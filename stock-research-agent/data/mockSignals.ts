@@ -1,0 +1,147 @@
+import { InsiderSignal, NewsItem, PoliticalTrade, Signal } from '@/types/stockAgent';
+
+export const mockSignalsByPickId: Record<string, Signal[]> = {
+  'pick-1': [
+    { name: 'volume_spike', value: 2.4, weightApplied: 1.2, note: 'Volume 2.4x the 20-day average' },
+    { name: 'sector_strength', value: 0.8, weightApplied: 1.0, note: 'Semiconductors outperforming SPY this week' },
+    { name: 'price_momentum', value: 0.65, weightApplied: 0.9, note: 'Up 6.5% over 5 sessions' },
+    { name: 'analyst_upgrade', value: 1, weightApplied: 0.7, note: 'Upgraded to Buy by one analyst' },
+  ],
+  'pick-2': [
+    { name: 'earnings_beat', value: 1, weightApplied: 1.3, note: 'Beat EPS estimates by 12%' },
+    { name: 'volume_spike', value: 1.8, weightApplied: 1.0, note: 'Volume 1.8x average post-earnings' },
+    { name: 'price_momentum', value: 0.42, weightApplied: 0.8, note: 'Up 4.2% since report' },
+  ],
+  'pick-3': [
+    { name: 'congressional_buy', value: 1, weightApplied: 1.1, note: 'Disclosed purchase by a House member' },
+    { name: 'insider_buying', value: 1, weightApplied: 0.9, note: 'CFO bought shares last week' },
+    { name: 'sector_strength', value: 0.5, weightApplied: 0.6, note: 'Sector roughly in line with market' },
+  ],
+  'pick-4': [
+    { name: 'news_sentiment', value: 0.7, weightApplied: 1.0, note: 'Positive coverage on new product line' },
+    { name: 'price_momentum', value: 0.3, weightApplied: 0.7, note: 'Up 3% over 5 sessions' },
+    { name: 'volume_spike', value: 1.3, weightApplied: 0.5, note: 'Mild volume increase' },
+  ],
+  'pick-5': [
+    { name: 'sector_strength', value: 0.9, weightApplied: 1.1, note: 'Strongest sector this month' },
+    { name: 'analyst_upgrade', value: 1, weightApplied: 0.8, note: 'Price target raised by two firms' },
+    { name: 'price_momentum', value: 0.55, weightApplied: 0.7, note: 'Up 5.5% over 5 sessions' },
+  ],
+  'pick-6': [
+    { name: 'volume_spike', value: 2.1, weightApplied: 1.1, note: 'Volume 2.1x the 20-day average' },
+    { name: 'relative_strength_vs_qqq', value: 0.6, weightApplied: 0.9, note: 'Outpacing QQQ over the last week' },
+    { name: 'unusual_options_activity', value: 0.78, weightApplied: 1.0, note: 'Call volume well above open interest' },
+    { name: 'news_sentiment', value: 0.5, weightApplied: 0.6, note: 'Mixed coverage, mostly product-cycle speculation' },
+  ],
+};
+
+export const mockPoliticalTrades: PoliticalTrade[] = [
+  {
+    id: 'pt-1',
+    politicianName: 'Rep. J. Alvarez',
+    ticker: 'LMT',
+    transactionType: 'buy',
+    disclosedDate: '2026-06-18',
+    transactionDate: '2026-06-02',
+    estimatedSize: '$15,001–$50,000',
+    committeeRelevance: 'Member, House Armed Services Committee',
+    signalStrength: 'medium',
+    notes: 'Disclosure lag of about two weeks; relevance is moderate given committee assignment, but this alone is not actionable.',
+  },
+  {
+    id: 'pt-2',
+    politicianName: 'Sen. R. Whitfield',
+    ticker: 'XLE',
+    transactionType: 'buy',
+    disclosedDate: '2026-06-15',
+    transactionDate: '2026-05-28',
+    estimatedSize: '$50,001–$100,000',
+    committeeRelevance: 'Member, Senate Energy Committee',
+    signalStrength: 'weak',
+    notes: 'Sector-level ETF purchase, not a single-stock bet; treat as a weak confirming signal at best.',
+  },
+];
+
+export const mockInsiderSignals: InsiderSignal[] = [
+  {
+    id: 'ins-1',
+    ticker: 'LMT',
+    insiderRole: 'Chief Financial Officer',
+    activityType: 'cluster_buy',
+    shares: 4200,
+    estimatedValue: 2008000,
+    date: '2026-06-16',
+    notes: 'Cluster buying from two executives in the same week is a stronger signal than a single small purchase.',
+  },
+  {
+    id: 'ins-2',
+    ticker: 'SHOP',
+    insiderRole: 'VP Engineering',
+    activityType: 'small_symbolic_buy',
+    shares: 500,
+    estimatedValue: 48000,
+    date: '2026-06-10',
+    notes: 'Small, symbolic purchase — unlikely to be meaningful on its own.',
+  },
+  {
+    id: 'ins-3',
+    ticker: 'CRWD',
+    insiderRole: 'Chief Revenue Officer',
+    activityType: 'planned_sell',
+    shares: 8000,
+    estimatedValue: 3296800,
+    date: '2026-06-19',
+    notes: 'Pre-scheduled 10b5-1 sale; routine and not a bearish signal by itself.',
+  },
+];
+
+export const mockNewsItems: NewsItem[] = [
+  {
+    id: 'news-1',
+    ticker: 'NVDA',
+    headline: 'NVIDIA suppliers report stronger-than-expected component orders',
+    source: 'Industry trade publication',
+    sentiment: 'positive',
+    catalystStrength: 7,
+    summary: 'Supply chain checks point to continued strong demand for AI accelerators into next quarter.',
+    relatedTickers: ['NVDA', 'AMD'],
+    publishedAt: '2026-06-22',
+    alreadyPricedIn: false,
+  },
+  {
+    id: 'news-2',
+    ticker: 'AMD',
+    headline: 'AMD unveils next-gen accelerator roadmap at industry event',
+    source: 'Tech press',
+    sentiment: 'positive',
+    catalystStrength: 6,
+    summary: 'Roadmap update was largely in line with expectations; some of the move may already be priced in.',
+    relatedTickers: ['AMD'],
+    publishedAt: '2026-06-21',
+    alreadyPricedIn: true,
+  },
+  {
+    id: 'news-3',
+    ticker: 'CRWD',
+    headline: 'CrowdStrike beats on EPS, raises forward guidance',
+    source: 'Earnings release',
+    sentiment: 'positive',
+    catalystStrength: 8,
+    summary: 'Clear company-specific catalyst tied directly to revenue and guidance, not just sentiment.',
+    relatedTickers: ['CRWD'],
+    publishedAt: '2026-06-20',
+    alreadyPricedIn: false,
+  },
+  {
+    id: 'news-4',
+    ticker: 'SHOP',
+    headline: 'Shopify announces new merchant tooling suite',
+    source: 'Company press release',
+    sentiment: 'positive',
+    catalystStrength: 4,
+    summary: 'Incremental product news; sentiment-positive but not a strong standalone catalyst.',
+    relatedTickers: ['SHOP'],
+    publishedAt: '2026-06-19',
+    alreadyPricedIn: false,
+  },
+];
