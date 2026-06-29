@@ -100,7 +100,10 @@ interface PredictionEntry {
   riskScore: number;
   status: string;
   predictionReason: string;
+  bullishCase: string;
+  bearishCase: string;
   timeWindow: string;
+  dataSourcesUsed: string[];
   missingDataWarnings: string[];
   createdAt: string;
 }
@@ -282,25 +285,34 @@ export default async function DashboardPage() {
           ) : (
             <div className="flex flex-col gap-2">
               {predictions.map((p, i) => (
-                <div key={i} className="flex items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-semibold text-zinc-100">{p.ticker}</span>
-                      {predictionBadge(p.predictionType)}
-                      <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${scoreBg(p.confidenceScore)} ${scoreColor(p.confidenceScore)}`}>
-                        conf {p.confidenceScore}
-                      </span>
-                      <span className="text-[10px] text-zinc-500">{p.timeWindow.replace(/_/g, ' ')}</span>
-                      <span className={`text-[10px] ${p.status === 'open' ? 'text-blue-400' : p.status === 'evaluated' ? 'text-green-400' : 'text-zinc-500'}`}>
-                        {p.status}
-                      </span>
+                <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5">
+                  <div className="flex items-start gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold text-zinc-100">{p.ticker}</span>
+                        {predictionBadge(p.predictionType)}
+                        <div className="flex items-center gap-1">
+                          <div className="h-1.5 w-10 overflow-hidden rounded-full bg-zinc-800">
+                            <div className={`h-full rounded-full ${p.confidenceScore >= 70 ? 'bg-green-500' : p.confidenceScore >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${p.confidenceScore}%` }} />
+                          </div>
+                          <span className="text-[10px] text-zinc-500">{p.confidenceScore}</span>
+                        </div>
+                        <span className="text-[10px] text-zinc-500">{p.timeWindow.replace(/_/g, ' ')}</span>
+                        <span className={`text-[10px] ${p.status === 'open' ? 'text-blue-400' : p.status === 'evaluated' ? 'text-green-400' : 'text-zinc-500'}`}>
+                          {p.status}
+                        </span>
+                        {p.dataSourcesUsed?.includes('openai-analysis') && (
+                          <span className="rounded bg-violet-500/10 px-1 py-0.5 text-[9px] font-medium text-violet-400">AI</span>
+                        )}
+                      </div>
+                      <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
+                      <div className="mt-1.5 flex gap-3 text-[10px]">
+                        <span className="text-zinc-500">Risk: <span className={`font-medium ${p.riskScore >= 70 ? 'text-red-400' : p.riskScore >= 40 ? 'text-yellow-400' : 'text-green-400'}`}>{p.riskScore}</span></span>
+                        <span className="text-zinc-500">Importance: <span className="text-zinc-400">{p.importanceScore}</span></span>
+                      </div>
                     </div>
-                    <p className="mt-1 line-clamp-2 text-[11px] leading-relaxed text-zinc-400">{p.predictionReason}</p>
-                    {p.missingDataWarnings.length > 0 && (
-                      <p className="mt-1 text-[10px] text-yellow-500">Missing: {p.missingDataWarnings.join(', ')}</p>
-                    )}
+                    <span className="shrink-0 text-[10px] text-zinc-600">{timeAgo(p.createdAt)}</span>
                   </div>
-                  <span className="shrink-0 text-[10px] text-zinc-600">{timeAgo(p.createdAt)}</span>
                 </div>
               ))}
             </div>
