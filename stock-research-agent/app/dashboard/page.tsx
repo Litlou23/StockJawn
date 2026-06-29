@@ -2,6 +2,9 @@ import AppShell from '@/components/AppShell';
 import JobTriggerButtons from '@/components/dashboard/JobTriggerButtons';
 import Link from 'next/link';
 
+// Force dynamic rendering — never serve a cached page
+export const dynamic = 'force-dynamic';
+
 // ---------------------------------------------------------------------------
 // Types matching GET /api/dashboard/summary response
 // ---------------------------------------------------------------------------

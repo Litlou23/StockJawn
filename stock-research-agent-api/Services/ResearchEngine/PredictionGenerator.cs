@@ -7,9 +7,19 @@ using StockResearchAgent.Api.Services.Supabase;
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
 /// <summary>
-/// Generates structured predictions by sending real market data to OpenAI.
-/// Uses GPT-4.1-nano for cost-effective analysis (~$0.10/month at 10 tickers/day).
-/// Historical outcomes and learning insights are fed as in-context learning.
+/// Generates structured predictions from real market data.
+///
+/// Flow:
+///   1. Rule-based engine scores technical signals + catalysts using
+///      learning-adjusted weights from Supabase.
+///   2. Direction, confidence, risk, and importance are determined by
+///      the computed scores — never by OpenAI.
+///   3. OpenAI (GPT-4.1-nano) receives the computed scores, signals,
+///      and raw market data, then writes the explanation: thesis,
+///      bull/bear cases, invalidation rule, and key levels.
+///
+/// If OpenAI is unavailable, the prediction still ships with a
+/// generated explanation from the signal list.
 /// No fake data. If data is unavailable, predictions are downgraded or skipped.
 /// </summary>
 public class PredictionGenerator
@@ -17,7 +27,7 @@ public class PredictionGenerator
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
     private readonly ILogger<PredictionGenerator> _logger;
-    private readonly ChatClient _chatClient;
+    private readonly ChatClient? _chatClient;
 
     public PredictionGenerator(
         MarketDataService marketData,
@@ -30,14 +40,19 @@ public class PredictionGenerator
         _logger = logger;
 
         var apiKey = configuration["OPENAI_API_KEY"];
-        var model = configuration["OPENAI_PREDICTION_MODEL"] ?? "gpt-4.1-nano";
-        if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException("OPENAI_API_KEY is not configured.");
-        _chatClient = new ChatClient(model, apiKey);
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            var model = configuration["OPENAI_PREDICTION_MODEL"] ?? "gpt-4.1-nano";
+            _chatClient = new ChatClient(model, apiKey);
+        }
+        else
+        {
+            _logger.LogWarning("[prediction] OPENAI_API_KEY not set — predictions will use signal-list explanations only");
+        }
     }
 
     // -----------------------------------------------------------------------
-    // Market snapshot builder (unchanged)
+    // Market snapshot builder
     // -----------------------------------------------------------------------
 
     public async Task<MarketSnapshot> BuildMarketSnapshotAsync(string ticker, string runId)
@@ -75,81 +90,102 @@ public class PredictionGenerator
     }
 
     // -----------------------------------------------------------------------
-    // AI-powered prediction generation
+    // Prediction generation — signals first, AI explains
     // -----------------------------------------------------------------------
 
     public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
         GeneratePredictionForTickerAsync(string ticker, string runId, MarketSnapshot snapshot)
     {
-        if (!snapshot.DataAvailability.MarketDataAvailable)
-        {
-            _logger.LogWarning("[prediction-ai] No market data for {Ticker}, skipping", ticker);
-            return (null, []);
-        }
-
-        var outcomes = await _repo.GetRecentOutcomesAsync(20);
-        var lessons = (await _repo.GetRecentLearningInsightsAsync(10))
-            .Select(i => i.Summary).ToList();
+        // ── Step 1: Compute real signals and scores ──────────────────
         var weights = (await _repo.GetScoringWeightsAsync())
             .ToDictionary(w => w.SignalName, w => w.Weight);
+        var lessons = (await _repo.GetRecentLearningInsightsAsync(10))
+            .Select(i => i.Summary).ToList();
 
-        try
+        var (techScore, techSignals) = ScoreTechnicalSignals(snapshot, weights);
+        var (catScore, catSignals) = ScoreCatalystSignals(snapshot, weights);
+        var totalScore = techScore + catScore;
+        var allSignals = techSignals.Concat(catSignals).ToList();
+
+        var predType = DeterminePredictionType(totalScore);
+        var confidence = CalculateConfidence(snapshot, totalScore);
+        var risk = CalculateRisk(snapshot, predType);
+
+        if (confidence < 5 && predType == "watch_only") return (null, []);
+
+        // ── Step 2: Build data-source metadata ──────────────────────
+        var dataSources = new List<string>();
+        var missingWarnings = new List<string>();
+
+        if (snapshot.DataAvailability.MarketDataAvailable) dataSources.Add("twelve-data");
+        else missingWarnings.Add("Market data unavailable — prediction based on news/catalysts only");
+
+        if (snapshot.DataAvailability.NewsAvailable) dataSources.Add("rss-news");
+        else missingWarnings.Add("No recent news/catalysts found");
+
+        if (!snapshot.DataAvailability.OptionsChainAvailable)
+            missingWarnings.Add("Options-chain data not connected — cannot confirm options setups");
+
+        // ── Step 3: Ask OpenAI to explain the computed prediction ───
+        var explanation = await GetAiExplanationAsync(
+            ticker, snapshot, predType, totalScore, confidence, risk,
+            allSignals, weights, lessons);
+
+        if (explanation is not null)
+            dataSources.Add("openai-analysis");
+
+        // Fall back to signal-derived explanation if AI unavailable
+        var bullishCase = explanation?.BullishCase
+            ?? string.Join("; ", allSignals.Where(s => !s.Contains("bearish") && !s.Contains("negative") && !s.Contains("below")));
+        var bearishCase = explanation?.BearishCase
+            ?? string.Join("; ", allSignals.Where(s => s.Contains("bearish") || s.Contains("negative") || s.Contains("below")));
+        var thesis = explanation?.Thesis
+            ?? $"Score: {totalScore:F1}. Signals: {allSignals.Count}. {predType} stance based on {(dataSources.Count > 0 ? string.Join(" + ", dataSources) : "limited data")}.";
+        var invalidation = explanation?.InvalidationRule
+            ?? (predType == "bullish"
+                ? "Invalidate if price drops >2% from entry or bearish catalyst emerges"
+                : predType == "bearish"
+                    ? "Invalidate if price rises >2% from entry or bullish catalyst emerges"
+                    : "Invalidate if major catalyst changes thesis direction");
+
+        // ── Step 4: Assemble prediction (scores from engine, text from AI) ──
+        var prediction = new PredictionCandidate
         {
-            var aiResult = await CallOpenAiForPredictionAsync(ticker, snapshot, outcomes, lessons, weights);
-            if (aiResult is null)
-            {
-                _logger.LogWarning("[prediction-ai] OpenAI returned no actionable prediction for {Ticker}", ticker);
-                return (null, []);
-            }
+            RunId = runId,
+            Ticker = ticker,
+            PredictionType = Enum.TryParse<PredictionType>(predType, out var pt) ? pt : PredictionType.neutral,
+            AssetType = PredictionAssetType.stock,
+            TimeWindow = "1_day",
+            ConfidenceScore = confidence,
+            ImportanceScore = Math.Min(Math.Abs((int)totalScore), 100),
+            RiskScore = risk,
+            EntryReferencePrice = snapshot.Quote?.Price,
+            BullishCase = string.IsNullOrEmpty(bullishCase) ? "No strong bullish signals" : bullishCase,
+            BearishCase = string.IsNullOrEmpty(bearishCase) ? "No strong bearish signals identified" : bearishCase,
+            PredictionReason = thesis,
+            InvalidationRule = invalidation,
+            DataSourcesUsed = dataSources,
+            MissingDataWarnings = missingWarnings,
+            Status = "open",
+        };
 
-            var dataSources = new List<string> { "twelve-data", "openai-analysis" };
-            var missingWarnings = new List<string>();
-            if (!snapshot.DataAvailability.NewsAvailable)
-                missingWarnings.Add("No recent news/catalysts found");
-            if (!snapshot.DataAvailability.OptionsChainAvailable)
-                missingWarnings.Add("Options-chain data not connected");
-
-            var prediction = new PredictionCandidate
-            {
-                RunId = runId,
-                Ticker = ticker,
-                PredictionType = ParsePredictionType(aiResult.Direction),
-                AssetType = PredictionAssetType.stock,
-                TimeWindow = aiResult.TimeWindow ?? "1_day",
-                ConfidenceScore = Math.Clamp(aiResult.Confidence, 1, 100),
-                ImportanceScore = Math.Clamp(aiResult.Importance, 1, 100),
-                RiskScore = Math.Clamp(aiResult.Risk, 1, 100),
-                EntryReferencePrice = snapshot.Quote?.Price,
-                BullishCase = aiResult.BullishCase ?? "No strong bullish signals",
-                BearishCase = aiResult.BearishCase ?? "No strong bearish signals",
-                PredictionReason = aiResult.Thesis ?? "AI analysis completed",
-                InvalidationRule = aiResult.InvalidationRule ?? "Invalidate if major catalyst changes thesis direction",
-                DataSourcesUsed = dataSources,
-                MissingDataWarnings = missingWarnings,
-                Status = "open",
-            };
-
-            var inputs = BuildInputs(ticker, snapshot, lessons);
+        var inputs = BuildInputs(ticker, snapshot, lessons);
+        if (explanation is not null)
+        {
             inputs.Add(new PredictionInput
             {
                 PredictionId = "",
-                InputType = "ai_analysis",
+                InputType = "ai_explanation",
                 SourceName = "openai-gpt4.1-nano",
-                Summary = $"AI thesis: {(aiResult.Thesis?.Length > 150 ? aiResult.Thesis[..150] + "..." : aiResult.Thesis)}",
+                Summary = $"AI explanation of {predType} call (conf={confidence}, risk={risk}): {(thesis.Length > 120 ? thesis[..120] + "..." : thesis)}",
             });
-
-            _logger.LogInformation(
-                "[prediction-ai] {Ticker}: {Direction} (conf={Conf}, risk={Risk}) — {Thesis}",
-                ticker, aiResult.Direction, aiResult.Confidence, aiResult.Risk,
-                aiResult.Thesis?[..Math.Min(80, aiResult.Thesis.Length)]);
-
-            return (prediction, inputs);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[prediction-ai] OpenAI call failed for {Ticker}, falling back to rule-based", ticker);
-            return FallbackRuleBased(ticker, runId, snapshot, weights, lessons);
-        }
+
+        _logger.LogInformation(
+            "[prediction] {Ticker}: {Direction} (conf={Conf}, risk={Risk}, score={Score:F1}) — AI explanation: {HasAI}",
+            ticker, predType, confidence, risk, totalScore, explanation is not null);
+
+        return (prediction, inputs);
     }
 
     public async Task<(List<PredictionCandidate> Predictions, List<PredictionInput> AllInputs)>
@@ -173,117 +209,121 @@ public class PredictionGenerator
     }
 
     // -----------------------------------------------------------------------
-    // OpenAI call
+    // OpenAI call — explanation only, not decision-making
     // -----------------------------------------------------------------------
 
-    private async Task<AiPredictionResponse?> CallOpenAiForPredictionAsync(
+    private async Task<AiExplanationResponse?> GetAiExplanationAsync(
         string ticker,
         MarketSnapshot snapshot,
-        List<PredictionOutcome> recentOutcomes,
-        List<string> lessons,
-        Dictionary<string, double> weights)
+        string direction,
+        double totalScore,
+        int confidence,
+        int risk,
+        List<string> signals,
+        Dictionary<string, double> weights,
+        List<string> lessons)
     {
-        var systemPrompt = BuildSystemPrompt(lessons, recentOutcomes);
-        var userPrompt = BuildUserPrompt(ticker, snapshot, weights);
-
-        var messages = new List<ChatMessage>
-        {
-            new SystemChatMessage(systemPrompt),
-            new UserChatMessage(userPrompt),
-        };
-
-        var options = new ChatCompletionOptions
-        {
-            MaxOutputTokenCount = 500,
-            ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat(),
-        };
-
-        var completion = await _chatClient.CompleteChatAsync(messages, options);
-        var text = completion.Value.Content.Count > 0 ? completion.Value.Content[0].Text : null;
-
-        if (string.IsNullOrWhiteSpace(text)) return null;
+        if (_chatClient is null) return null;
 
         try
         {
-            var result = JsonSerializer.Deserialize<AiPredictionResponse>(text, new JsonSerializerOptions
+            var systemPrompt = BuildExplanationSystemPrompt();
+            var userPrompt = BuildExplanationUserPrompt(
+                ticker, snapshot, direction, totalScore, confidence, risk, signals, weights, lessons);
+
+            var messages = new List<ChatMessage>
+            {
+                new SystemChatMessage(systemPrompt),
+                new UserChatMessage(userPrompt),
+            };
+
+            var options = new ChatCompletionOptions
+            {
+                MaxOutputTokenCount = 400,
+                ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat(),
+            };
+
+            var completion = await _chatClient.CompleteChatAsync(messages, options);
+            var text = completion.Value.Content.Count > 0 ? completion.Value.Content[0].Text : null;
+
+            if (string.IsNullOrWhiteSpace(text)) return null;
+
+            var result = JsonSerializer.Deserialize<AiExplanationResponse>(text, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
             });
-            if (result is null || string.IsNullOrWhiteSpace(result.Direction)) return null;
+
             return result;
         }
-        catch (JsonException ex)
+        catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[prediction-ai] Failed to parse OpenAI response for {Ticker}: {Text}", ticker, text?[..Math.Min(200, text.Length)]);
+            _logger.LogWarning(ex, "[prediction] OpenAI explanation call failed for {Ticker} — using signal-list fallback", ticker);
             return null;
         }
     }
 
-    private static string BuildSystemPrompt(List<string> lessons, List<PredictionOutcome> recentOutcomes)
+    private static string BuildExplanationSystemPrompt()
     {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine("You are a stock market technical analyst. Analyze the provided market data and produce a short-term prediction.");
-        sb.AppendLine("You MUST respond with valid JSON matching this exact schema:");
-        sb.AppendLine("""
-{
-  "direction": "bullish" | "bearish" | "neutral",
-  "confidence": <1-100>,
-  "importance": <1-100>,
-  "risk": <1-100>,
-  "time_window": "intraday" | "1_day" | "3_day" | "1_week",
-  "thesis": "<1-3 sentence analysis explaining your reasoning>",
-  "bullish_case": "<key bullish factors>",
-  "bearish_case": "<key bearish factors>",
-  "invalidation_rule": "<specific condition that would invalidate this prediction>",
-  "key_levels": { "support": <price>, "resistance": <price> }
-}
-""");
-        sb.AppendLine("Rules:");
-        sb.AppendLine("- Base your analysis on price action, trend, momentum, volume, and moving averages.");
-        sb.AppendLine("- Be specific about support/resistance levels from the price bars provided.");
-        sb.AppendLine("- If the data is insufficient for a strong call, set direction to neutral and confidence low.");
-        sb.AppendLine("- Do NOT invent data. Only reference what is provided.");
-        sb.AppendLine("- Keep thesis concise (1-3 sentences) but insightful — explain WHY, not just WHAT.");
-        sb.AppendLine("- Consider recent win/loss patterns in your confidence calibration.");
+        return """
+            You are a stock market analyst writing prediction explanations.
 
-        if (lessons.Count > 0)
-        {
-            sb.AppendLine();
-            sb.AppendLine("## Lessons from prior predictions (use to calibrate):");
-            foreach (var lesson in lessons.Take(5))
-                sb.AppendLine($"- {lesson}");
-        }
+            IMPORTANT: You do NOT decide the prediction direction, confidence, or risk.
+            Those have already been computed by the scoring engine from real market signals.
+            Your job is to EXPLAIN WHY those signals led to this prediction.
 
-        if (recentOutcomes.Count > 0)
-        {
-            sb.AppendLine();
-            sb.AppendLine("## Recent outcome history (for calibration):");
-            var correct = recentOutcomes.Count(o => o.DirectionCorrect == true);
-            var total = recentOutcomes.Count(o => o.DirectionCorrect.HasValue);
-            var avgMove = recentOutcomes.Where(o => o.PercentMove.HasValue).Select(o => o.PercentMove!.Value).DefaultIfEmpty(0).Average();
-            sb.AppendLine($"- Recent accuracy: {correct}/{total} ({(total > 0 ? correct * 100.0 / total : 0):F0}%)");
-            sb.AppendLine($"- Average move: {avgMove:F2}%");
-            if (total > 0 && correct * 100.0 / total < 50)
-                sb.AppendLine("- NOTE: Accuracy is below 50%. Consider being more conservative with confidence scores.");
-        }
+            You MUST respond with valid JSON matching this schema:
+            {
+              "thesis": "<1-3 sentence explanation of why the computed signals support this direction>",
+              "bullish_case": "<specific bullish factors from the provided signals and data>",
+              "bearish_case": "<specific bearish factors from the provided signals and data>",
+              "invalidation_rule": "<specific price level or condition that would invalidate this prediction>",
+              "key_levels": { "support": <price or null>, "resistance": <price or null> }
+            }
 
-        return sb.ToString();
+            Rules:
+            - Reference ONLY the signals, scores, and data provided. Do NOT invent signals.
+            - Be specific about price levels from the bars provided (support/resistance).
+            - Explain the reasoning behind the computed direction — don't override it.
+            - Keep thesis to 1-3 sentences. Be concise and insightful.
+            - Invalidation rule should reference specific price levels when possible.
+            """;
     }
 
-    private static string BuildUserPrompt(string ticker, MarketSnapshot snapshot, Dictionary<string, double> weights)
+    private static string BuildExplanationUserPrompt(
+        string ticker,
+        MarketSnapshot snapshot,
+        string direction,
+        double totalScore,
+        int confidence,
+        int risk,
+        List<string> signals,
+        Dictionary<string, double> weights,
+        List<string> lessons)
     {
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"## Analyze: {ticker}");
+        sb.AppendLine($"## Explain this prediction for {ticker}");
+        sb.AppendLine();
+        sb.AppendLine("### Computed prediction (from scoring engine — do NOT change these):");
+        sb.AppendLine($"- Direction: {direction}");
+        sb.AppendLine($"- Total score: {totalScore:F1}");
+        sb.AppendLine($"- Confidence: {confidence}/100");
+        sb.AppendLine($"- Risk: {risk}/100");
+        sb.AppendLine();
+
+        sb.AppendLine("### Signals that produced this score:");
+        foreach (var signal in signals)
+            sb.AppendLine($"- {signal}");
+        sb.AppendLine();
 
         if (snapshot.Quote is not null)
         {
             var q = snapshot.Quote;
-            sb.AppendLine($"**Current Quote:** ${q.Price:F2} | Change: {(q.ChangePercent >= 0 ? "+" : "")}{q.ChangePercent:F2}% | Open: ${q.Open:F2} | High: ${q.High:F2} | Low: ${q.Low:F2} | Vol: {q.Volume:N0}");
+            sb.AppendLine($"### Current Quote: ${q.Price:F2} | Change: {(q.ChangePercent >= 0 ? "+" : "")}{q.ChangePercent:F2}% | Open: ${q.Open:F2} | High: ${q.High:F2} | Low: ${q.Low:F2} | Vol: {q.Volume:N0}");
         }
 
         if (snapshot.RecentBars.Count > 0)
         {
-            sb.AppendLine("**Recent Price Bars (newest first):**");
+            sb.AppendLine("### Recent Price Bars (newest first):");
             foreach (var bar in snapshot.RecentBars.Take(10))
                 sb.AppendLine($"  {bar.Date}: O={bar.Open:F2} H={bar.High:F2} L={bar.Low:F2} C={bar.Close:F2} V={bar.Volume:N0}");
         }
@@ -291,90 +331,35 @@ public class PredictionGenerator
         if (snapshot.TechnicalContext is not null)
         {
             var t = snapshot.TechnicalContext;
-            sb.AppendLine($"**Technical Summary:** Trend={t.TrendDirection} | MA={t.MovingAverageSummary} | Momentum={t.MomentumSummary} | Volume={t.VolumeSummary} | RSI note={t.RelativeStrengthNote}");
+            sb.AppendLine($"### Technical: Trend={t.TrendDirection} | MA={t.MovingAverageSummary} | Momentum={t.MomentumSummary} | Volume={t.VolumeSummary} | RSI={t.RelativeStrengthNote}");
         }
 
         if (snapshot.NewsContext.Count > 0)
         {
-            sb.AppendLine("**Recent News:**");
+            sb.AppendLine("### News:");
             foreach (var n in snapshot.NewsContext.Take(5))
-                sb.AppendLine($"  - [{n.CatalystType ?? "news"}] {n.Title} (sentiment: {n.Sentiment ?? "unknown"}, importance: {n.ImportanceScore})");
+                sb.AppendLine($"  - [{n.CatalystType ?? "news"}] {n.Title} (sentiment: {n.Sentiment ?? "unknown"})");
         }
 
         if (weights.Count > 0)
         {
-            var significant = weights.Where(w => Math.Abs(w.Value - 1.0) > 0.1).ToList();
-            if (significant.Count > 0)
+            var adjusted = weights.Where(w => Math.Abs(w.Value - 1.0) > 0.1).ToList();
+            if (adjusted.Count > 0)
             {
-                sb.AppendLine("**Adjusted signal weights (from learning engine):**");
-                foreach (var w in significant)
+                sb.AppendLine("### Learning-adjusted weights:");
+                foreach (var w in adjusted)
                     sb.AppendLine($"  - {w.Key}: {w.Value:F2}x");
             }
         }
 
-        return sb.ToString();
-    }
-
-    // -----------------------------------------------------------------------
-    // Fallback rule-based scoring (if OpenAI fails)
-    // -----------------------------------------------------------------------
-
-    private (PredictionCandidate? Prediction, List<PredictionInput> Inputs) FallbackRuleBased(
-        string ticker, string runId, MarketSnapshot snapshot,
-        Dictionary<string, double> weights, List<string> lessons)
-    {
-        _logger.LogInformation("[prediction-ai] Using fallback rule-based scoring for {Ticker}", ticker);
-
-        var (techScore, techSignals) = ScoreTechnicalSignals(snapshot, weights);
-        var (catScore, catSignals) = ScoreCatalystSignals(snapshot, weights);
-        var totalScore = techScore + catScore;
-        var allSignals = techSignals.Concat(catSignals).ToList();
-
-        var predType = DeterminePredictionType(totalScore);
-        var confidence = CalculateConfidence(snapshot, totalScore);
-        var risk = CalculateRisk(snapshot, predType);
-
-        if (confidence < 5 && predType == "watch_only") return (null, []);
-
-        var dataSources = new List<string>();
-        var missingWarnings = new List<string> { "AI analysis unavailable — using rule-based fallback" };
-
-        if (snapshot.DataAvailability.MarketDataAvailable) dataSources.Add("twelve-data");
-        if (snapshot.DataAvailability.NewsAvailable) dataSources.Add("rss-news");
-        if (!snapshot.DataAvailability.OptionsChainAvailable)
-            missingWarnings.Add("Options-chain data not connected");
-
-        var bullishCase = string.Join("; ",
-            allSignals.Where(s => !s.Contains("bearish") && !s.Contains("negative") && !s.Contains("below")));
-        var bearishCase = string.Join("; ",
-            allSignals.Where(s => s.Contains("bearish") || s.Contains("negative") || s.Contains("below")));
-
-        var prediction = new PredictionCandidate
+        if (lessons.Count > 0)
         {
-            RunId = runId,
-            Ticker = ticker,
-            PredictionType = Enum.TryParse<PredictionType>(predType, out var pt) ? pt : PredictionType.neutral,
-            AssetType = PredictionAssetType.stock,
-            TimeWindow = "1_day",
-            ConfidenceScore = confidence,
-            ImportanceScore = Math.Min(Math.Abs((int)totalScore), 100),
-            RiskScore = risk,
-            EntryReferencePrice = snapshot.Quote?.Price,
-            BullishCase = string.IsNullOrEmpty(bullishCase) ? "No strong bullish signals" : bullishCase,
-            BearishCase = string.IsNullOrEmpty(bearishCase) ? "No strong bearish signals identified" : bearishCase,
-            PredictionReason = $"[Fallback] Score: {totalScore:F1}. Signals: {allSignals.Count}. {predType} stance.",
-            InvalidationRule = predType == "bullish"
-                ? "Invalidate if price drops >2% from entry or bearish catalyst emerges"
-                : predType == "bearish"
-                    ? "Invalidate if price rises >2% from entry or bullish catalyst emerges"
-                    : "Invalidate if major catalyst changes thesis direction",
-            DataSourcesUsed = dataSources,
-            MissingDataWarnings = missingWarnings,
-            Status = "open",
-        };
+            sb.AppendLine("### Prior lessons:");
+            foreach (var lesson in lessons.Take(3))
+                sb.AppendLine($"  - {lesson}");
+        }
 
-        var inputs = BuildInputs(ticker, snapshot, lessons);
-        return (prediction, inputs);
+        return sb.ToString();
     }
 
     // -----------------------------------------------------------------------
@@ -433,17 +418,8 @@ public class PredictionGenerator
         return inputs;
     }
 
-    private static PredictionType ParsePredictionType(string? direction) =>
-        direction?.ToLowerInvariant() switch
-        {
-            "bullish" => PredictionType.bullish,
-            "bearish" => PredictionType.bearish,
-            "neutral" => PredictionType.neutral,
-            _ => PredictionType.neutral,
-        };
-
     // -----------------------------------------------------------------------
-    // Rule-based scoring (kept as fallback)
+    // Rule-based scoring engine — the source of truth for all predictions
     // -----------------------------------------------------------------------
 
     private static (double Score, List<string> Signals) ScoreTechnicalSignals(
@@ -537,16 +513,11 @@ public class PredictionGenerator
 }
 
 // -----------------------------------------------------------------------
-// OpenAI response DTO (internal)
+// OpenAI response DTO — explanation only, no scores or direction
 // -----------------------------------------------------------------------
 
-internal class AiPredictionResponse
+internal class AiExplanationResponse
 {
-    public string? Direction { get; set; }
-    public int Confidence { get; set; }
-    public int Importance { get; set; }
-    public int Risk { get; set; }
-    public string? TimeWindow { get; set; }
     public string? Thesis { get; set; }
     public string? BullishCase { get; set; }
     public string? BearishCase { get; set; }

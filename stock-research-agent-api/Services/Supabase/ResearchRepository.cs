@@ -205,6 +205,16 @@ public class ResearchRepository
     }
 
     // -----------------------------------------------------------------------
+    // Generic insert (for options lab and future tables)
+    // -----------------------------------------------------------------------
+
+    public async Task InsertGenericAsync(string table, object row)
+    {
+        if (!_db.IsConfigured) return;
+        await _db.InsertAsync(table, new[] { row }, returnRows: false);
+    }
+
+    // -----------------------------------------------------------------------
     // Row mappers
     // -----------------------------------------------------------------------
 

@@ -5,6 +5,7 @@ using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.Watchlist;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
+using StockResearchAgent.Api.Services.OptionsLab;
 
 // Kept as a literal in sync with the CORS policy below — the dashboard
 // displays this same value, it does not change CORS behavior.
@@ -40,6 +41,10 @@ builder.Services.AddSingleton<UniverseDiscoveryService>();
 builder.Services.AddSingleton<WatchlistRepository>();
 builder.Services.AddSingleton<DynamicWatchlistService>();
 builder.Services.AddSingleton<JobStatusTracker>();
+
+// Options Lab — theoretical simulation only
+builder.Services.AddSingleton<TheoreticalOptionsSimulator>();
+builder.Services.AddSingleton<AutomaticScenarioGenerator>();
 
 // Dev-only in-memory request counter for the "/" dashboard — see
 // Dashboard/RequestMetrics.cs for why this is never trusted in production.
