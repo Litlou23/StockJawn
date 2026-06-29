@@ -14,8 +14,9 @@ namespace StockResearchAgent.Api.Services.Watchlist;
 public class DynamicWatchlistService
 {
     private const int MaxActiveItems = 10;
-    // Lowered from 15 → 5 because catalystScore is always 0 (news not integrated yet).
-    // With only technicals contributing, max possible score is ~40.
+    private const int MinActiveTarget = 5;
+    // With news-driven discovery, we have catalyst data. Tickers that were
+    // discovered by news get a catalyst boost, so this threshold works.
     private const double MinScoreForCandidate = 5.0;
     private const double SwapThresholdDelta = 20.0;
     private const int StaleDaysThreshold = 14;
@@ -43,12 +44,30 @@ public class DynamicWatchlistService
     // Main entry point
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Discovery context passed from UniverseDiscoveryService, telling us
+    /// WHY each ticker was discovered (news mentions, earnings, etc.)
+    /// </summary>
+    public record TickerDiscoveryContext(
+        string Ticker,
+        double DiscoveryScore,
+        bool HasUpcomingEarnings,
+        string? EarningsDate,
+        int RssMentions,
+        int FinnhubMentions,
+        string TopReason);
+
     public async Task<WatchlistGenerationResult> BuildDynamicWatchlistAsync(
         string[] universe,
         string? userId = null,
-        int maxActiveItems = MaxActiveItems)
+        int maxActiveItems = MaxActiveItems,
+        List<TickerDiscoveryContext>? discoveryContext = null)
     {
         _logger.LogInformation("[watchlist] Starting dynamic watchlist build for {Count} universe tickers", universe.Length);
+
+        // Build lookup for discovery context
+        var discoveryMap = (discoveryContext ?? [])
+            .ToDictionary(d => d.Ticker, d => d, StringComparer.OrdinalIgnoreCase);
 
         var warnings = new List<string>();
         var changeLogs = new List<object>();
@@ -87,14 +106,15 @@ public class DynamicWatchlistService
 
         foreach (var ticker in universe)
         {
-            var scored = await ScoreTickerAsync(ticker, scoringWeights, tickerAccuracy);
+            discoveryMap.TryGetValue(ticker, out var discovery);
+            var scored = await ScoreTickerAsync(ticker, scoringWeights, tickerAccuracy, discovery);
             candidates.Add(scored);
             if (scored.HasMarketData) tickersWithData++;
             if (scored.HasNews) tickersWithNews++;
-            _logger.LogInformation("[watchlist] {Ticker}: score={Score:F1}, hasData={HasData}, confidence={Conf}, trend={Trend}, warnings={Warnings}",
-                ticker, scored.TotalScore, scored.HasMarketData, scored.DataConfidence,
+            _logger.LogInformation("[watchlist] {Ticker}: score={Score:F1}, catalyst={Catalyst:F1}, hasData={HasData}, confidence={Conf}, trend={Trend}, discoveryReason={Reason}",
+                ticker, scored.TotalScore, scored.CatalystScore, scored.HasMarketData, scored.DataConfidence,
                 scored.Technical?.TrendDirection ?? "none",
-                string.Join("; ", scored.MissingWarnings));
+                discovery?.TopReason ?? "none");
         }
 
         candidates.Sort((a, b) => b.TotalScore.CompareTo(a.TotalScore));
@@ -152,6 +172,7 @@ public class DynamicWatchlistService
                             bullish_case = scored.BullishCase,
                             bearish_case = scored.BearishCase,
                             missing_data_warnings = scored.MissingWarnings.ToArray(),
+                            raw_context = new { score_breakdown = scored.ScoreBreakdown },
                         });
                         changeLogs.Add(MakeChangeLog(item, WatchlistChangeType.ScoreChanged, item.Status, item.Status, oldScore, newScore, decision.Reason, userId));
                     }
@@ -164,6 +185,7 @@ public class DynamicWatchlistService
                     {
                         total_score = newScore, catalyst_score = scored.CatalystScore,
                         risk_score = scored.RiskScore, last_reviewed_at = DateTimeOffset.UtcNow.ToString("o"),
+                        raw_context = new { score_breakdown = scored.ScoreBreakdown },
                     });
                     changeLogs.Add(MakeChangeLog(item, WatchlistChangeType.MarkedReviewNeeded, item.Status, WatchlistStatus.ReviewNeeded, oldScore, newScore, decision.Reason, userId));
                     reviewNeeded.Add(item with { Status = WatchlistStatus.ReviewNeeded, TotalScore = newScore, SwapReason = decision.Reason });
@@ -175,6 +197,7 @@ public class DynamicWatchlistService
                     {
                         total_score = newScore, catalyst_score = scored.CatalystScore,
                         risk_score = scored.RiskScore, last_reviewed_at = DateTimeOffset.UtcNow.ToString("o"),
+                        raw_context = new { score_breakdown = scored.ScoreBreakdown },
                     });
                     changeLogs.Add(MakeChangeLog(item, WatchlistChangeType.MarkedSwapCandidate, item.Status, WatchlistStatus.SwapCandidate, oldScore, newScore, decision.Reason, userId));
                     swapCandidates.Add(item with { Status = WatchlistStatus.SwapCandidate, TotalScore = newScore, SwapReason = decision.Reason });
@@ -279,9 +302,15 @@ public class DynamicWatchlistService
             ReviewNeeded = reviewNeeded,
             SwapCandidates = swapCandidates,
             ArchivedItems = archived,
-            TopCandidates = candidateRows.Take(10).Select(c => new WatchlistCandidate
+            TopCandidates = candidates.Take(10).Select(c => new WatchlistCandidate
             {
-                Ticker = candidates.First(x => x.Ticker == ((dynamic)c).ticker).Ticker,
+                Ticker = c.Ticker,
+                CandidateScore = c.TotalScore,
+                CatalystScore = c.CatalystScore,
+                RiskScore = c.RiskScore,
+                DataConfidence = c.DataConfidence,
+                Reason = c.Reason,
+                SelectedForWatchlist = added.Any(a => a.Ticker == c.Ticker),
             }).ToList(),
             ActiveWatchlist = activeWatchlist,
             ChangeLog = changeLogs.Select(c => new WatchlistChangeLog()).ToList(),
@@ -312,12 +341,14 @@ public class DynamicWatchlistService
         public bool HasNews { get; init; }
         public MarketSnapshotQuote? Quote { get; init; }
         public MarketSnapshotTechnical? Technical { get; init; }
+        public List<object> ScoreBreakdown { get; init; } = [];
     }
 
     private async Task<ScoredCandidate> ScoreTickerAsync(
         string ticker,
         Dictionary<string, double> weights,
-        Dictionary<string, (int Correct, int Total)> tickerAccuracy)
+        Dictionary<string, (int Correct, int Total)> tickerAccuracy,
+        TickerDiscoveryContext? discovery = null)
     {
         var (quote, bars, technical, mktWarnings) = await _marketData.GetFullContextAsync(ticker);
 
@@ -328,6 +359,10 @@ public class DynamicWatchlistService
         var bearishSignals = new List<string>();
         var sources = new List<string>();
         var missingWarnings = new List<string>(mktWarnings);
+        var hasNews = false;
+
+        // Track exact points per signal for the breakdown
+        var scoreBreakdown = new List<object>();
 
         // Technical scoring
         if (technical is not null)
@@ -337,18 +372,44 @@ public class DynamicWatchlistService
             var momW = weights.GetValueOrDefault("technical_momentum", 1.0);
             var volW = weights.GetValueOrDefault("technical_volume", 1.0);
 
-            if (technical.TrendDirection == "bullish") { techScore += 20 * trendW; signals.Add("Trend bullish"); }
-            else if (technical.TrendDirection == "bearish") { techScore -= 15 * trendW; bearishSignals.Add("Trend bearish"); }
+            if (technical.TrendDirection == "bullish")
+            {
+                var pts = Math.Round(20 * trendW, 1);
+                techScore += pts; signals.Add("Trend bullish");
+                scoreBreakdown.Add(new { signal = "Trend bullish", points = pts, category = "technical", weight = trendW });
+            }
+            else if (technical.TrendDirection == "bearish")
+            {
+                var pts = Math.Round(-15 * trendW, 1);
+                techScore += pts; bearishSignals.Add("Trend bearish");
+                scoreBreakdown.Add(new { signal = "Trend bearish", points = pts, category = "technical", weight = trendW });
+            }
 
             if (technical.MomentumSummary.Contains("up", StringComparison.OrdinalIgnoreCase))
-            { techScore += 10 * momW; signals.Add("Momentum positive"); }
+            {
+                var pts = Math.Round(10 * momW, 1);
+                techScore += pts; signals.Add("Momentum positive");
+                scoreBreakdown.Add(new { signal = "Momentum positive", points = pts, category = "technical", weight = momW });
+            }
             else if (technical.MomentumSummary.Contains("down", StringComparison.OrdinalIgnoreCase))
-            { techScore -= 10 * momW; bearishSignals.Add("Momentum negative"); }
+            {
+                var pts = Math.Round(-10 * momW, 1);
+                techScore += pts; bearishSignals.Add("Momentum negative");
+                scoreBreakdown.Add(new { signal = "Momentum negative", points = pts, category = "technical", weight = momW });
+            }
 
             if (technical.VolumeSummary.Contains("elevated", StringComparison.OrdinalIgnoreCase))
-            { techScore += 10 * volW; signals.Add("Volume elevated"); }
+            {
+                var pts = Math.Round(10 * volW, 1);
+                techScore += pts; signals.Add("Volume elevated");
+                scoreBreakdown.Add(new { signal = "Volume elevated", points = pts, category = "technical", weight = volW });
+            }
             else if (technical.VolumeSummary.Contains("below", StringComparison.OrdinalIgnoreCase))
-            { techScore -= 5 * volW; bearishSignals.Add("Volume below average"); }
+            {
+                var pts = Math.Round(-5 * volW, 1);
+                techScore += pts; bearishSignals.Add("Volume below average");
+                scoreBreakdown.Add(new { signal = "Volume below average", points = pts, category = "technical", weight = volW });
+            }
         }
         else
         {
@@ -360,12 +421,65 @@ public class DynamicWatchlistService
         if (tickerAccuracy.TryGetValue(ticker, out var acc) && acc.Total >= 3)
         {
             var accuracy = (double)acc.Correct / acc.Total;
-            if (accuracy > 0.6) { techScore += 10; signals.Add($"Prior accuracy {accuracy * 100:F0}%"); }
-            else if (accuracy < 0.3) { techScore -= 10; bearishSignals.Add($"Prior accuracy only {accuracy * 100:F0}%"); riskScore += 10; }
+            if (accuracy > 0.6)
+            {
+                techScore += 10; signals.Add($"Prior accuracy {accuracy * 100:F0}%");
+                scoreBreakdown.Add(new { signal = $"Prior accuracy {accuracy * 100:F0}%", points = 10.0, category = "technical", weight = 1.0 });
+            }
+            else if (accuracy < 0.3)
+            {
+                techScore -= 10; bearishSignals.Add($"Prior accuracy only {accuracy * 100:F0}%"); riskScore += 10;
+                scoreBreakdown.Add(new { signal = $"Prior accuracy only {accuracy * 100:F0}%", points = -10.0, category = "technical", weight = 1.0 });
+            }
         }
 
-        // No real news integration yet -- note it
-        missingWarnings.Add("RSS news not yet integrated into .NET API scoring");
+        // Catalyst scoring from discovery context (news mentions, earnings, etc.)
+        if (discovery is not null)
+        {
+            var catalystW = weights.GetValueOrDefault("catalyst_news", 1.0);
+            hasNews = discovery.RssMentions > 0 || discovery.FinnhubMentions > 0;
+
+            if (hasNews) sources.Add("news-discovery");
+
+            // Earnings upcoming = strong catalyst
+            if (discovery.HasUpcomingEarnings)
+            {
+                var pts = Math.Round(15 * catalystW, 1);
+                catalystScore += pts;
+                signals.Add($"Earnings on {discovery.EarningsDate}");
+                sources.Add("finnhub-earnings");
+                scoreBreakdown.Add(new { signal = $"Earnings on {discovery.EarningsDate}", points = pts, category = "catalyst", weight = catalystW });
+            }
+
+            // High news mention count = market attention
+            if (discovery.RssMentions >= 5)
+            {
+                var pts = Math.Round(10 * catalystW, 1);
+                catalystScore += pts;
+                signals.Add($"High news volume ({discovery.RssMentions} mentions)");
+                scoreBreakdown.Add(new { signal = $"High news volume ({discovery.RssMentions} mentions)", points = pts, category = "catalyst", weight = catalystW });
+            }
+            else if (discovery.RssMentions >= 2)
+            {
+                var pts = Math.Round(5 * catalystW, 1);
+                catalystScore += pts;
+                signals.Add($"News mentions ({discovery.RssMentions})");
+                scoreBreakdown.Add(new { signal = $"News mentions ({discovery.RssMentions})", points = pts, category = "catalyst", weight = catalystW });
+            }
+
+            // Finnhub coverage
+            if (discovery.FinnhubMentions >= 3)
+            {
+                var pts = Math.Round(5 * catalystW, 1);
+                catalystScore += pts;
+                signals.Add($"Finnhub coverage ({discovery.FinnhubMentions} articles)");
+                scoreBreakdown.Add(new { signal = $"Finnhub coverage ({discovery.FinnhubMentions} articles)", points = pts, category = "catalyst", weight = catalystW });
+            }
+        }
+        else
+        {
+            missingWarnings.Add("No discovery context — ticker not found in recent news");
+        }
 
         // Options data always missing (not connected)
         missingWarnings.Add("Options-chain data not connected -- options_readiness_score is null");
@@ -394,9 +508,10 @@ public class DynamicWatchlistService
             MissingWarnings = missingWarnings,
             SourcesUsed = sources,
             HasMarketData = quote is not null,
-            HasNews = false,
+            HasNews = hasNews,
             Quote = quote,
             Technical = technical,
+            ScoreBreakdown = scoreBreakdown,
         };
     }
 
@@ -488,6 +603,7 @@ public class DynamicWatchlistService
             review_by_date = DateOnly.FromDateTime(DateTime.UtcNow.AddDays(7)).ToString("yyyy-MM-dd"),
             sources_used = candidate.SourcesUsed.ToArray(),
             missing_data_warnings = candidate.MissingWarnings.ToArray(),
+            raw_context = new { score_breakdown = candidate.ScoreBreakdown },
         };
 
         var id = await _watchlistRepo.UpsertWatchlistItemAsync(item);

@@ -92,7 +92,12 @@ public class WatchlistRepository
     public async Task<bool> InsertChangeLogsAsync(List<object> entries)
     {
         if (entries.Count == 0) return true;
-        await _db.InsertAsync("watchlist_change_log", entries, returnRows: false);
+        // Insert one at a time to avoid PostgREST "All object keys must match" error
+        // when change log entries have different nullable field combinations
+        foreach (var entry in entries)
+        {
+            await _db.InsertAsync("watchlist_change_log", new[] { entry }, returnRows: false);
+        }
         return true;
     }
 

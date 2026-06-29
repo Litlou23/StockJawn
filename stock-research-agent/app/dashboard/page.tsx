@@ -328,7 +328,7 @@ export default async function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {watchlist.active.map((item) => (
+                  {[...watchlist.active].sort((a, b) => (b.totalScore ?? 0) - (a.totalScore ?? 0)).map((item) => (
                     <tr key={item.ticker} className="border-b border-zinc-800/50">
                       <td className="py-2 pr-3">
                         <span className="font-semibold text-zinc-100">{item.ticker}</span>

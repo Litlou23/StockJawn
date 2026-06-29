@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.Watchlist;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 // Kept as a literal in sync with the CORS policy below — the dashboard
 // displays this same value, it does not change CORS behavior.
@@ -30,9 +31,15 @@ builder.Services.AddSingleton<LearningEngine>();
 builder.Services.AddSingleton<DailyReportService>();
 builder.Services.AddSingleton<DailyResearchRunService>();
 
+// Universe discovery services
+builder.Services.AddSingleton<RssFeedService>();
+builder.Services.AddSingleton<FinnhubProvider>();
+builder.Services.AddSingleton<UniverseDiscoveryService>();
+
 // Dynamic watchlist services
 builder.Services.AddSingleton<WatchlistRepository>();
 builder.Services.AddSingleton<DynamicWatchlistService>();
+builder.Services.AddSingleton<JobStatusTracker>();
 
 // Dev-only in-memory request counter for the "/" dashboard — see
 // Dashboard/RequestMetrics.cs for why this is never trusted in production.

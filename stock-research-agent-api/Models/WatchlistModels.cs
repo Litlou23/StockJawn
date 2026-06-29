@@ -112,25 +112,9 @@ public static class WatchlistChangeType
     public const string ScoreChanged = "score_changed";
 }
 
-// ---------------------------------------------------------------------------
-// Default Scan Universe (replaces old hardcoded "watchlist")
-// ---------------------------------------------------------------------------
-
-public static class DefaultScanUniverse
-{
-    /// <summary>
-    /// The pool of tickers the system is allowed to scan. This is NOT
-    /// the active watchlist -- it is the universe from which candidates
-    /// are discovered and scored. The active watchlist is generated
-    /// dynamically from scoring and saved in Supabase.
-    /// </summary>
-    public static readonly string[] Tickers =
-    [
-        "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMD",
-        "TSLA", "AMZN", "META", "GOOGL", "PLTR", "AVGO",
-        "NFLX", "COIN",
-    ];
-}
+// DefaultScanUniverse has been removed. The system now discovers tickers
+// dynamically from RSS news feeds, Finnhub earnings/news, and market data.
+// See Services/UniverseDiscovery/ for the discovery pipeline.
 
 // ---------------------------------------------------------------------------
 // Dynamic Watchlist Generation Result

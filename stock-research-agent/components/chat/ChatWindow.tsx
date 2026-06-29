@@ -10,6 +10,7 @@ import ChatComposer from './ChatComposer';
 import ChatLayout from './ChatLayout';
 import SuggestedPrompts from './SuggestedPrompts';
 import TypingIndicator from './TypingIndicator';
+import FullScreenLoader from '@/components/FullScreenLoader';
 
 const INITIAL_PROMPTS = [
   'What should I check this morning?',
@@ -195,6 +196,17 @@ export default function ChatWindow({ initialMessages = [] }: { initialMessages?:
       ))}
 
       {isThinking && <TypingIndicator />}
+      <FullScreenLoader
+        loading={isThinking}
+        message="Analyzing..."
+        detail="The research agent is thinking"
+        steps={[
+          'Building market context...',
+          'Reviewing watchlist data...',
+          'Checking recent predictions...',
+          'Generating response...',
+        ]}
+      />
 
       <div ref={bottomRef} />
     </ChatLayout>

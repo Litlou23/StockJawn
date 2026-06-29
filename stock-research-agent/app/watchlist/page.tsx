@@ -1,8 +1,19 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import AppShell from '@/components/AppShell';
+import FullScreenLoader from '@/components/FullScreenLoader';
 
 // ---------------------------------------------------------------------------
 // Types matching the .NET API response shapes
 // ---------------------------------------------------------------------------
+
+interface BreakdownSignal {
+  signal: string;
+  points: number;
+  category: 'technical' | 'catalyst';
+  weight: number;
+}
 
 interface WatchlistItemDto {
   id: string;
@@ -24,7 +35,9 @@ interface WatchlistItemDto {
   reviewByDate: string | null;
   invalidationPoint: string | null;
   swapReason: string | null;
+  sourcesUsed: string[] | null;
   missingDataWarnings: string[] | null;
+  rawContext: { score_breakdown?: BreakdownSignal[] } | null;
   archivedAt: string | null;
 }
 
@@ -50,51 +63,6 @@ interface ChangeLogDto {
   newScore: number | null;
   reason: string | null;
   createdAt: string;
-}
-
-// ---------------------------------------------------------------------------
-// Data fetching (server-side only)
-// ---------------------------------------------------------------------------
-
-async function fetchWatchlist(): Promise<WatchlistResponse | null> {
-  const base = process.env.AGENT_API_BASE_URL;
-  if (!base) return null;
-
-  const isLocalHttps = base.startsWith('https://localhost');
-  if (isLocalHttps) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
-  try {
-    const res = await fetch(`${base}/api/watchlist`, {
-      cache: 'no-store',
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as WatchlistResponse;
-  } catch {
-    return null;
-  } finally {
-    if (isLocalHttps) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  }
-}
-
-async function fetchChanges(): Promise<ChangeLogDto[]> {
-  const base = process.env.AGENT_API_BASE_URL;
-  if (!base) return [];
-
-  const isLocalHttps = base.startsWith('https://localhost');
-  if (isLocalHttps) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-
-  try {
-    const res = await fetch(`${base}/api/watchlist/changes?limit=20`, {
-      cache: 'no-store',
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { count: number; changes: ChangeLogDto[] };
-    return data.changes;
-  } catch {
-    return [];
-  } finally {
-    if (isLocalHttps) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -138,11 +106,166 @@ function relativeTime(iso: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Score Breakdown component
+// ---------------------------------------------------------------------------
+
+function ScoreBreakdown({ item }: { item: WatchlistItemDto }) {
+  const breakdown = item.rawContext?.score_breakdown;
+
+  // If we have real breakdown data from the API, use it
+  if (breakdown && breakdown.length > 0) {
+    const techSignals = breakdown.filter((s) => s.category === 'technical');
+    const catalystSignals = breakdown.filter((s) => s.category === 'catalyst');
+    const techTotal = techSignals.reduce((sum, s) => sum + s.points, 0);
+    const catalystTotal = catalystSignals.reduce((sum, s) => sum + s.points, 0);
+
+    return (
+      <div className="mt-3 rounded-lg border border-zinc-700/50 bg-zinc-950 p-3 space-y-3">
+        <div className="text-xs font-semibold text-zinc-300">Score Breakdown</div>
+
+        {/* Technical signals */}
+        <div>
+          <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wide mb-1">
+            Technical Signals = {techTotal > 0 ? '+' : ''}{Math.round(techTotal * 10) / 10}
+          </div>
+          {techSignals.length > 0 ? (
+            <div className="space-y-0.5">
+              {techSignals.map((s, i) => (
+                <div key={i} className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-400">
+                    {s.signal}
+                    {s.weight !== 1 && (
+                      <span className="ml-1 text-[10px] text-zinc-600">×{s.weight.toFixed(1)}</span>
+                    )}
+                  </span>
+                  <span className={s.points >= 0 ? 'text-green-400 font-mono' : 'text-red-400 font-mono'}>
+                    {s.points > 0 ? '+' : ''}{Math.round(s.points * 10) / 10}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[10px] text-zinc-600">No technical data</div>
+          )}
+        </div>
+
+        {/* Catalyst signals */}
+        <div>
+          <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wide mb-1">
+            Catalyst Signals = {catalystTotal > 0 ? '+' : ''}{Math.round(catalystTotal * 10) / 10}
+          </div>
+          {catalystSignals.length > 0 ? (
+            <div className="space-y-0.5">
+              {catalystSignals.map((s, i) => (
+                <div key={i} className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-400">
+                    {s.signal}
+                    {s.weight !== 1 && (
+                      <span className="ml-1 text-[10px] text-zinc-600">×{s.weight.toFixed(1)}</span>
+                    )}
+                  </span>
+                  <span className={s.points >= 0 ? 'text-green-400 font-mono' : 'text-red-400 font-mono'}>
+                    {s.points > 0 ? '+' : ''}{Math.round(s.points * 10) / 10}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[10px] text-zinc-600">No catalyst signals detected</div>
+          )}
+        </div>
+
+        {/* Total */}
+        <div className="flex items-center justify-between border-t border-zinc-800 pt-2">
+          <span className="text-xs font-semibold text-zinc-300">Total Score</span>
+          <span className={`text-sm font-bold font-mono ${scoreColor(item.totalScore)}`}>
+            {item.totalScore !== null ? Math.round(item.totalScore) : '—'}
+          </span>
+        </div>
+
+        {/* Risk & confidence */}
+        <div className="flex gap-4 text-[10px] text-zinc-500">
+          {item.riskScore !== null && (
+            <span>
+              Risk: <span className={item.riskScore >= 70 ? 'text-red-400' : 'text-zinc-300'}>{Math.round(item.riskScore)}/100</span>
+            </span>
+          )}
+          {item.dataConfidence && (
+            <span>
+              Confidence: <span className="text-zinc-300">{item.dataConfidence}</span>
+            </span>
+          )}
+        </div>
+
+        {/* Sources */}
+        {item.sourcesUsed && item.sourcesUsed.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {item.sourcesUsed.map((s, i) => (
+              <span key={i} className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">
+                {s}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Fallback: parse from bullish/bearish case strings (older data without breakdown)
+  const bullishSignals = item.bullishCase
+    ? item.bullishCase.split('; ').filter((s) => s && !s.startsWith('No strong'))
+    : [];
+  const bearishSignals = item.bearishCase
+    ? item.bearishCase.split('; ').filter((s) => s && !s.startsWith('No strong'))
+    : [];
+
+  return (
+    <div className="mt-3 rounded-lg border border-zinc-700/50 bg-zinc-950 p-3 space-y-3">
+      <div className="text-xs font-semibold text-zinc-300">Score Breakdown</div>
+      <div className="text-[10px] text-yellow-500 mb-2">
+        Approximate — run Weekly Research again for exact point values
+      </div>
+
+      {bullishSignals.length > 0 && (
+        <div>
+          <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wide mb-1">Bullish Signals</div>
+          <div className="space-y-0.5">
+            {bullishSignals.map((s, i) => (
+              <div key={i} className="text-xs text-green-400">+ {s}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {bearishSignals.length > 0 && (
+        <div>
+          <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wide mb-1">Bearish Signals</div>
+          <div className="space-y-0.5">
+            {bearishSignals.map((s, i) => (
+              <div key={i} className="text-xs text-red-400">− {s}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between border-t border-zinc-800 pt-2">
+        <span className="text-xs font-semibold text-zinc-300">Total Score</span>
+        <span className={`text-sm font-bold font-mono ${scoreColor(item.totalScore)}`}>
+          {item.totalScore !== null ? Math.round(item.totalScore) : '—'}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Sub-components
 // ---------------------------------------------------------------------------
 
 function WatchlistCard({ item }: { item: WatchlistItemDto }) {
+  const [expanded, setExpanded] = useState(false);
   const badge = statusBadge(item.status);
+
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
       <div className="flex items-start justify-between">
@@ -175,30 +298,30 @@ function WatchlistCard({ item }: { item: WatchlistItemDto }) {
         <p className="mt-1 text-xs text-zinc-400">{item.thesisSummary}</p>
       )}
 
-      <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-500">
+      <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-zinc-500">
         {item.catalystScore !== null && (
           <span>Catalyst: <span className={scoreColor(item.catalystScore)}>{Math.round(item.catalystScore)}</span></span>
         )}
         {item.riskScore !== null && (
           <span>Risk: <span className={item.riskScore >= 70 ? 'text-red-400' : 'text-zinc-300'}>{Math.round(item.riskScore)}</span></span>
         )}
-        {item.optionsReadinessScore !== null && (
-          <span>Options: <span className="text-zinc-300">{Math.round(item.optionsReadinessScore)}</span></span>
-        )}
         {item.dataConfidence && (
           <span>Confidence: <span className="text-zinc-300">{item.dataConfidence}</span></span>
         )}
-        {item.category !== 'general' && (
-          <span className="rounded bg-zinc-800 px-1.5 py-0.5">{item.category.replace(/_/g, ' ')}</span>
-        )}
+
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="ml-auto rounded-md border border-zinc-700 px-2 py-0.5 text-[10px] font-medium text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
+        >
+          {expanded ? 'Hide Breakdown' : 'Score Breakdown'}
+        </button>
       </div>
+
+      {expanded && <ScoreBreakdown item={item} />}
 
       {item.swapReason && (
         <p className="mt-2 text-xs text-orange-400/80">{item.swapReason}</p>
-      )}
-
-      {item.invalidationPoint && (
-        <p className="mt-1 text-xs text-zinc-500">Invalidation: {item.invalidationPoint}</p>
       )}
 
       {item.missingDataWarnings && item.missingDataWarnings.length > 0 && (
@@ -236,9 +359,11 @@ function WatchlistSection({
       </h2>
       {items.length > 0 ? (
         <div className="flex flex-col gap-3">
-          {items.map((item) => (
-            <WatchlistCard key={item.id} item={item} />
-          ))}
+          {[...items]
+            .sort((a, b) => (b.totalScore ?? 0) - (a.totalScore ?? 0))
+            .map((item) => (
+              <WatchlistCard key={item.id} item={item} />
+            ))}
         </div>
       ) : (
         <p className="text-sm text-zinc-600">{emptyText}</p>
@@ -276,19 +401,53 @@ function ChangeHistory({ changes }: { changes: ChangeLogDto[] }) {
 }
 
 // ---------------------------------------------------------------------------
-// Page
+// Page (client component with data fetching)
 // ---------------------------------------------------------------------------
 
-export default async function WatchlistPage() {
-  const [watchlist, changes] = await Promise.all([fetchWatchlist(), fetchChanges()]);
+export default function WatchlistPage() {
+  const [watchlist, setWatchlist] = useState<WatchlistResponse | null>(null);
+  const [changes, setChanges] = useState<ChangeLogDto[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  if (!watchlist) {
+  useEffect(() => {
+    async function load() {
+      setLoading(true);
+      try {
+        const [wRes, cRes] = await Promise.all([
+          fetch('/api/watchlist').then((r) => (r.ok ? r.json() : null)),
+          fetch('/api/watchlist/changes?limit=20').then((r) => (r.ok ? r.json() : null)),
+        ]);
+        setWatchlist(wRes);
+        setChanges(cRes?.changes ?? []);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load watchlist');
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) {
+    return (
+      <AppShell>
+        <FullScreenLoader
+          loading={true}
+          message="Loading Watchlist..."
+          steps={['Fetching active items...', 'Loading change history...']}
+        />
+      </AppShell>
+    );
+  }
+
+  if (error || !watchlist) {
     return (
       <AppShell>
         <div className="mx-auto max-w-3xl space-y-4 p-4">
           <h1 className="text-lg font-bold text-zinc-100">Watchlist</h1>
           <p className="text-sm text-zinc-500">
-            Could not load watchlist data. Make sure the .NET API is running and AGENT_API_BASE_URL is set.
+            {error ?? 'Could not load watchlist data. Make sure the .NET API is running.'}
           </p>
         </div>
       </AppShell>

@@ -222,7 +222,7 @@ public record LearningInsight
     public DateTimeOffset CreatedAt { get; init; }
 }
 
-// DefaultScanUniverse is defined in WatchlistModels.cs
+// DefaultScanUniverse removed — tickers are now discovered dynamically from news/earnings.
 
 // ---------------------------------------------------------------------------
 // Job request/response DTOs

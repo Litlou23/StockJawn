@@ -16,6 +16,7 @@ public class DailyResearchRunService
     private readonly LearningEngine _learning;
     private readonly DailyReportService _reports;
     private readonly ResearchRepository _repo;
+    private readonly WatchlistRepository _watchlistRepo;
     private readonly ILogger<DailyResearchRunService> _logger;
 
     public DailyResearchRunService(
@@ -24,6 +25,7 @@ public class DailyResearchRunService
         LearningEngine learning,
         DailyReportService reports,
         ResearchRepository repo,
+        WatchlistRepository watchlistRepo,
         ILogger<DailyResearchRunService> logger)
     {
         _predGen = predGen;
@@ -31,6 +33,7 @@ public class DailyResearchRunService
         _learning = learning;
         _reports = reports;
         _repo = repo;
+        _watchlistRepo = watchlistRepo;
         _logger = logger;
     }
 
@@ -49,9 +52,21 @@ public class DailyResearchRunService
 
         try
         {
-            // 1. Build market snapshots
-            _logger.LogInformation("[research-engine] Building snapshots for {Count} tickers...", DefaultScanUniverse.Tickers.Length);
-            var snapshotTasks = DefaultScanUniverse.Tickers
+            // 1. Build market snapshots from active watchlist (not hardcoded)
+            var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
+            var tickers = activeWatchlist.Select(w => w.Ticker).ToArray();
+
+            if (tickers.Length == 0)
+            {
+                _logger.LogWarning("[research-engine] No active watchlist items — run weekly research first to populate");
+                await _repo.CompleteResearchRunAsync(run.Id, "No active watchlist items. Run weekly research first.", 0, 0,
+                    ["No active watchlist items"]);
+                return new MorningScanResult { RunId = run.Id, Report = "No active watchlist items. Run weekly research first to discover tickers.", Errors = ["No active watchlist items"] };
+            }
+
+            _logger.LogInformation("[research-engine] Building snapshots for {Count} active watchlist tickers: [{Tickers}]",
+                tickers.Length, string.Join(", ", tickers));
+            var snapshotTasks = tickers
                 .Select(t => _predGen.BuildMarketSnapshotAsync(t, run.Id));
             var snapshots = (await Task.WhenAll(snapshotTasks)).ToList();
 
@@ -71,7 +86,7 @@ public class DailyResearchRunService
             // 2. Generate predictions
             _logger.LogInformation("[research-engine] Generating predictions...");
             var (predictions, allInputs) = await _predGen.GeneratePredictionsForWatchlistAsync(
-                DefaultScanUniverse.Tickers, run.Id, snapshots);
+                tickers, run.Id, snapshots);
 
             // Save predictions
             var predRows = predictions.Select(p => (object)new

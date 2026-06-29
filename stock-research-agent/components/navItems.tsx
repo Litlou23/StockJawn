@@ -76,6 +76,17 @@ export const navItems: NavItem[] = [
     ),
   },
   {
+    href: '/connectivity',
+    label: 'Connectivity',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 3v2m6-2v2M9 19v2m6-2v2M3 9h2m-2 6h2m14-6h2m-2 6h2" />
+        <rect x="7" y="7" width="10" height="10" rx="2" />
+        <circle cx="12" cy="12" r="2" />
+      </svg>
+    ),
+  },
+  {
     href: '/settings',
     label: 'Settings',
     icon: (
