@@ -158,6 +158,9 @@ public class OptionsLabController : ControllerBase
     [HttpPost("explain")]
     public async Task<IActionResult> Explain([FromBody] OptionsLabExplainRequest request)
     {
+        if (request.SimulationResult is null)
+            return BadRequest(new { error = "SimulationResult is required." });
+
         var sim = request.SimulationResult;
 
         var prompt = $"""

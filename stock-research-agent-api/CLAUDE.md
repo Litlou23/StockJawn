@@ -1,15 +1,11 @@
-@AGENTS.md
-
 ## Project Notes
 
-- **Restart reminder**: When making changes to API routes, server services, or anything under `services/` or `app/api/`, remind Lou to restart the dev server (`npm run dev`) so changes go live.
 - **No mock data**: This is a live system. Do not use mock fallbacks. If a data source fails, return empty results with honest status — never inject fake data.
-- **RSS/intake is the live data source**: The information intake pipeline (`services/informationIntake/`) fetches real RSS feeds. The learning analysis pulls from this live data, not just manually-entered outcomes.
-- **Check config before asking**: Before asking Lou about env vars, API URLs, ports, or settings, read the relevant files first (`.env.local`, `.env`, `appsettings.json`, `appsettings.Development.json`, `launchSettings.json`, `next.config.ts`, `package.json`). Only ask if the information isn't in any config file.
-- **Verify before suggesting**: NEVER suggest SQL queries, API calls, column names, table names, or code snippets from memory or assumption. ALWAYS read the actual source code first — migration files, repository classes, model definitions, controller routes — to get the real names. If you don't know a table or column name, look it up in `Services/Supabase/ResearchRepository.cs` (MapPrediction, MapOutcome, etc.) or the migration SQL files before giving Lou a query.
-- **Every new page must have proper UI states**: Every new page/screen MUST handle all of these states on the page itself: (1) Loading state — use `FullScreenLoader` from `@/components/FullScreenLoader` with a relevant message and steps, (2) Error state — show a clear error message, (3) Empty state — show a helpful message explaining what's missing and how to populate it, (4) Data state — the actual content. Look at existing pages (e.g. `app/results/page.tsx`, `app/dashboard/page.tsx`) for patterns. Never create a page that just renders nothing while data loads.
+- **Check config before asking**: Before asking Lou about env vars, API URLs, ports, or settings, read the relevant files first (`appsettings.json`, `appsettings.Development.json`, `launchSettings.json`). Only ask if the information isn't in any config file.
+- **Verify before suggesting**: NEVER suggest SQL queries, API calls, column names, table names, or code snippets from memory or assumption. ALWAYS read the actual source code first — migration files, `Services/Supabase/ResearchRepository.cs` (MapPrediction, MapOutcome, MapSignalPerformance, etc.), model definitions in `Models/ResearchEngineModels.cs`, controller routes — to get the real names. If you don't know a table or column name, LOOK IT UP before giving Lou a query.
+- **Security**: Do not hardcode API keys. Do not expose API keys in frontend code. Do not log API keys. Protect job routes with JOB_SECRET header.
 
-## Supabase Database Tables (actual column names)
+## Supabase Database Tables (actual column names from ResearchRepository.cs)
 
 ### research_runs
 `id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`
@@ -41,6 +37,8 @@
 ### pg_cron jobs
 Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM cron.job`
 
-### Azure .NET API
-Deployed at: `https://stock-research-agent-api-lsmart-ghhwebetfycxgrf8.centralus-01.azurewebsites.net`
-Edge Functions use `DOTNET_API_BASE_URL` secret to reach it.
+## Deployment
+
+- Azure .NET API: `https://stock-research-agent-api-lsmart-ghhwebetfycxgrf8.centralus-01.azurewebsites.net`
+- Edge Functions use `DOTNET_API_BASE_URL` Supabase secret to reach the Azure API
+- Edge Functions: `supabase/functions/` — morning-scan, end-of-day-review, learning-update, weekly-research

@@ -57,6 +57,15 @@ export const navItems: NavItem[] = [
     ),
   },
   {
+    href: '/predictions',
+    label: 'Predictions',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13h4l3-8 4 16 3-8h4" />
+      </svg>
+    ),
+  },
+  {
     href: '/results',
     label: 'Results',
     icon: (
@@ -66,11 +75,30 @@ export const navItems: NavItem[] = [
     ),
   },
   {
+    href: '/options-research',
+    label: 'Options Data',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 3v18h18M7 16l4-4 4 4 5-6" />
+      </svg>
+    ),
+  },
+  {
     href: '/options-lab',
     label: 'Options Lab',
     icon: (
       <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
         <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 3v5.7a2.25 2.25 0 0 1-.66 1.6L5 14.5M14.25 3v5.7a2.25 2.25 0 0 0 .66 1.6L19 14.5M5 14.5l-1.43 5.13a1.5 1.5 0 0 0 1.45 1.87h13.96a1.5 1.5 0 0 0 1.45-1.87L19 14.5" />
+      </svg>
+    ),
+  },
+  {
+    href: '/paper-options',
+    label: 'Paper Options',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
+        <rect x="4" y="3" width="16" height="18" rx="2" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M8 8h8M8 12h8M8 16h5" />
       </svg>
     ),
   },

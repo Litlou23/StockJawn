@@ -32,6 +32,44 @@ public class ResearchController : ControllerBase
         return Ok(new { count = outcomes.Count, outcomes });
     }
 
+    [HttpGet("predictions-with-outcomes")]
+    public async Task<IActionResult> GetPredictionsWithOutcomes([FromQuery] int limit = 50)
+    {
+        var predictions = await _repo.GetRecentPredictionsAsync(limit);
+        var outcomes = await _repo.GetRecentOutcomesAsync(200);
+
+        // Build a lookup from prediction_id -> outcome
+        var outcomeMap = outcomes
+            .GroupBy(o => o.PredictionId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
+
+        var joined = predictions.Select(p =>
+        {
+            outcomeMap.TryGetValue(p.Id, out var outcome);
+            return new
+            {
+                prediction = p,
+                outcome = outcome,
+                hasOutcome = outcome is not null,
+                wasCorrect = outcome?.DirectionCorrect,
+            };
+        }).ToList();
+
+        var stats = new
+        {
+            total = joined.Count,
+            evaluated = joined.Count(j => j.hasOutcome),
+            correct = joined.Count(j => j.wasCorrect == true),
+            incorrect = joined.Count(j => j.wasCorrect == false),
+            pending = joined.Count(j => !j.hasOutcome),
+            accuracy = joined.Count(j => j.hasOutcome) > 0
+                ? Math.Round(100.0 * joined.Count(j => j.wasCorrect == true) / joined.Count(j => j.hasOutcome), 1)
+                : 0,
+        };
+
+        return Ok(new { stats, items = joined });
+    }
+
     [HttpGet("latest-report")]
     public async Task<IActionResult> GetLatestReport()
     {

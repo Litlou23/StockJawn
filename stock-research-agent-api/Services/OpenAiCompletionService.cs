@@ -5,6 +5,7 @@ namespace StockResearchAgent.Api.Services;
 
 public interface IOpenAiCompletionService
 {
+    bool IsConfigured { get; }
     Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken);
 }
 
@@ -16,15 +17,21 @@ public interface IOpenAiCompletionService
 /// </summary>
 public class OpenAiCompletionService : IOpenAiCompletionService
 {
-    private readonly ChatClient _chatClient;
+    private readonly ChatClient? _chatClient;
+    private readonly bool _configured;
+    private readonly ILogger<OpenAiCompletionService> _logger;
 
-    public OpenAiCompletionService(IConfiguration configuration)
+    public bool IsConfigured => _configured;
+
+    public OpenAiCompletionService(IConfiguration configuration, ILogger<OpenAiCompletionService> logger)
     {
+        _logger = logger;
         var apiKey = configuration["OPENAI_API_KEY"];
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            throw new InvalidOperationException(
-                "OPENAI_API_KEY is not configured. Set it as an environment variable or via dotnet user-secrets.");
+            _logger.LogWarning("[openai] OPENAI_API_KEY not set -- AI completions unavailable");
+            _configured = false;
+            return;
         }
 
         var model = configuration["OPENAI_MODEL"];
@@ -34,10 +41,16 @@ public class OpenAiCompletionService : IOpenAiCompletionService
         }
 
         _chatClient = new ChatClient(model, apiKey);
+        _configured = true;
     }
 
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken)
     {
+        if (!_configured || _chatClient is null)
+        {
+            return new AiCompletionResult { Text = "[OpenAI not configured — OPENAI_API_KEY is missing]" };
+        }
+
         var messages = request.Messages.Select(ToChatMessage).ToList();
 
         var options = new ChatCompletionOptions();
@@ -50,7 +63,7 @@ public class OpenAiCompletionService : IOpenAiCompletionService
             options.ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat();
         }
 
-        ChatCompletion completion = await _chatClient.CompleteChatAsync(messages, options, cancellationToken);
+        ChatCompletion completion = await _chatClient!.CompleteChatAsync(messages, options, cancellationToken);
         var text = completion.Content.Count > 0 ? completion.Content[0].Text : string.Empty;
 
         return new AiCompletionResult { Text = text };
