@@ -197,12 +197,22 @@ export default function StockLabPage() {
           </button>
         </div>
 
-        {lastRun && (
+        {jobStatus && (
           <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <Stat label="Predictions" value={lastRun.predictionsGenerated.toString()} />
-            <Stat label="Stock candidates" value={lastRun.stockCandidatesGenerated.toString()} />
-            <Stat label="Qualified for options" value={lastRun.stockCandidatesQualifiedForOptions.toString()} />
-            <Stat label="Option candidates" value={lastRun.optionCandidatesGenerated.toString()} />
+            <Stat label="Job" value={jobStatus.jobName} />
+            <Stat label="State" value={jobStatus.state} />
+            <Stat
+              label="Duration"
+              value={
+                jobStatus.durationSeconds != null
+                  ? `${Math.round(jobStatus.durationSeconds)}s`
+                  : '—'
+              }
+            />
+            <Stat
+              label="Last summary"
+              value={jobStatus.summary ?? jobStatus.error ?? '—'}
+            />
           </div>
         )}
 
