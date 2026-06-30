@@ -54,13 +54,13 @@ import {
 export async function getNewsIntelligenceStatus(): Promise<NewsIntelligenceStatus> {
   const warnings: string[] = [];
   const providerHealth = await getInformationProviderHealth();
-  const intakeOk = providerHealth.some((p) => p.status === 'ok');
-  if (!intakeOk) warnings.push('No information intake providers report status=ok.');
+  const intakeOk = providerHealth.status === 'ok';
+  if (!intakeOk) warnings.push(`Information intake reports status=${providerHealth.status}: ${providerHealth.message}`);
 
   // Supabase availability is implied by repository return shape — we
   // make a probe call to see if anything comes back at all.
   const probe = await getRecentCatalysts(1);
-  const supabaseOk = probe.length > 0 || providerHealth.length === 0; // can't distinguish empty-vs-unreachable here
+  const supabaseOk = probe.length > 0; // can't distinguish empty-vs-unreachable from here
   if (!supabaseOk) warnings.push('No persisted catalysts found yet (or Supabase not configured).');
 
   return {
