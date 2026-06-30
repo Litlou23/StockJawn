@@ -63,6 +63,22 @@ public class ResearchRepository
         return rows.Select(MapResearchRun).ToList();
     }
 
+    public async Task<ResearchRun?> GetResearchRunByIdAsync(string id)
+    {
+        var row = await _db.SelectSingleAsync("research_runs", $"id=eq.{id}");
+        return row is not null ? MapResearchRun(row) : null;
+    }
+
+    /// <summary>
+    /// Returns a currently-running (status=started) research run of the given type, if any.
+    /// </summary>
+    public async Task<ResearchRun?> GetRunningJobAsync(string runType)
+    {
+        var row = await _db.SelectSingleAsync("research_runs",
+            $"run_type=eq.{runType}&status=eq.started&order=started_at.desc");
+        return row is not null ? MapResearchRun(row) : null;
+    }
+
     // -----------------------------------------------------------------------
     // Market Snapshots
     // -----------------------------------------------------------------------

@@ -41,12 +41,27 @@ public class DailyResearchRunService
     // Morning Scan
     // -----------------------------------------------------------------------
 
-    public async Task<MorningScanResult> RunMorningScanAsync()
+    /// <summary>
+    /// Run the morning scan. If <paramref name="existingRunId"/> is provided, uses that
+    /// already-created research_runs row instead of creating a new one (background-job pattern).
+    /// </summary>
+    public async Task<MorningScanResult> RunMorningScanAsync(string? existingRunId = null)
     {
         _logger.LogInformation("[research-engine] Starting morning scan...");
         var errors = new List<string>();
 
-        var run = await _repo.CreateResearchRunAsync("morning_scan");
+        ResearchRun? run;
+        if (existingRunId is not null)
+        {
+            run = await _repo.GetResearchRunByIdAsync(existingRunId);
+            if (run is null)
+                return new MorningScanResult { Report = $"Research run {existingRunId} not found", Errors = [$"Research run {existingRunId} not found"] };
+        }
+        else
+        {
+            run = await _repo.CreateResearchRunAsync("morning_scan");
+        }
+
         if (run is null)
             return new MorningScanResult { Report = "Failed to create research run (Supabase not configured?)", Errors = ["Failed to create research run"] };
 
@@ -174,12 +189,23 @@ public class DailyResearchRunService
     // End-of-Day Review
     // -----------------------------------------------------------------------
 
-    public async Task<EndOfDayReviewResult> RunEndOfDayReviewAsync()
+    public async Task<EndOfDayReviewResult> RunEndOfDayReviewAsync(string? existingRunId = null)
     {
         _logger.LogInformation("[research-engine] Starting end-of-day review...");
         var errors = new List<string>();
 
-        var run = await _repo.CreateResearchRunAsync("end_of_day_review");
+        ResearchRun? run;
+        if (existingRunId is not null)
+        {
+            run = await _repo.GetResearchRunByIdAsync(existingRunId);
+            if (run is null)
+                return new EndOfDayReviewResult { Report = $"Research run {existingRunId} not found", Errors = [$"Research run {existingRunId} not found"] };
+        }
+        else
+        {
+            run = await _repo.CreateResearchRunAsync("end_of_day_review");
+        }
+
         if (run is null)
             return new EndOfDayReviewResult { Report = "Failed to create research run", Errors = ["Failed to create research run"] };
 
@@ -206,12 +232,23 @@ public class DailyResearchRunService
     // Learning Update
     // -----------------------------------------------------------------------
 
-    public async Task<LearningUpdateResult> RunLearningUpdateAsync()
+    public async Task<LearningUpdateResult> RunLearningUpdateAsync(string? existingRunId = null)
     {
         _logger.LogInformation("[research-engine] Starting learning update...");
         var errors = new List<string>();
 
-        var run = await _repo.CreateResearchRunAsync("learning_update");
+        ResearchRun? run;
+        if (existingRunId is not null)
+        {
+            run = await _repo.GetResearchRunByIdAsync(existingRunId);
+            if (run is null)
+                return new LearningUpdateResult { Report = $"Research run {existingRunId} not found", Errors = [$"Research run {existingRunId} not found"] };
+        }
+        else
+        {
+            run = await _repo.CreateResearchRunAsync("learning_update");
+        }
+
         if (run is null)
             return new LearningUpdateResult { Report = "Failed to create research run", Errors = ["Failed to create research run"] };
 
