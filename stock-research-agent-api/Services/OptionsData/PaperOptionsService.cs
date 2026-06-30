@@ -51,11 +51,15 @@ public class PaperOptionsService
     public async Task<List<PredictionCandidate>> GetEligiblePredictionsAsync(int limit = 30)
     {
         var recent = await _researchRepo.GetRecentPredictionsAsync(limit);
-        // Eligible = open and either bullish or bearish (skip pure neutral for naked C/P).
+        // Eligible = open, bullish/bearish (no naked C/P on neutral), and confidence
+        // high enough that option premium isn't pure noise. Spec threshold: 30+.
+        // Anything lower is shown on /predictions but skipped from the paper-option
+        // selector so the user doesn't waste a scan on a 13-confidence pick.
         return recent
             .Where(p => p.Status == "open"
                      && (p.PredictionType == PredictionType.bullish
-                         || p.PredictionType == PredictionType.bearish))
+                         || p.PredictionType == PredictionType.bearish)
+                     && p.ConfidenceScore >= 30)
             .ToList();
     }
 
@@ -144,16 +148,46 @@ public class PaperOptionsService
             };
         }
 
-        // Filter
-        var filtered = _filterService.Filter(chain.Contracts, filter);
-        // Drop missing-bid/ask
-        filtered = filtered.Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol)).ToList();
-        // Estimated-cost cap (200 default => mid <= 2.00)
-        filtered = filtered.Where(c => c.Mid * EstContractMultiplier <= 200).ToList();
+        // ---- Pass 1: strict default filter (spec values) ----
+        var strict = _filterService.Filter(chain.Contracts, filter);
+        strict = strict.Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol)).ToList();
+        var withinCost = strict.Where(c => c.Mid * EstContractMultiplier <= 200).ToList();
 
+        var filtered = withinCost;
+        bool relaxed = false;
+
+        // ---- Pass 2: relax-and-retry when strict pass returns nothing ----
+        // Stocks like MSFT/NVDA at $300+ won't have any ATM contracts under
+        // the $2/share cost cap, so the strict pass returns empty and the
+        // user sees nothing. Fall back to a wider scan and tag the survivors
+        // so the UI can warn the user they're outside default filters.
         if (filtered.Count == 0)
         {
-            warnings.Add("No contracts passed default filters (volume, OI, spread, delta, cost).");
+            warnings.Add("No contracts passed strict filters (cost ≤ $200, vol ≥ 10, OI ≥ 100, spread ≤ 20%). " +
+                         "Showing wider results — review warnings carefully.");
+            relaxed = true;
+
+            var relaxedFilter = new OptionContractFilter
+            {
+                Side = filter.Side,
+                MinDte = filter.MinDte,
+                MaxDte = filter.MaxDte,
+                MinStrike = filter.MinStrike,
+                MaxStrike = filter.MaxStrike,
+                MinOpenInterest = 10,         // was 100
+                MinVolume = 1,                // was 10
+                MaxBidAskSpreadPercent = 40,  // was 20
+                MinDelta = 0.20,              // was 0.30
+                MaxDelta = 0.70,              // was 0.60
+            };
+
+            var relaxedPass = _filterService.Filter(chain.Contracts, relaxedFilter);
+            filtered = relaxedPass
+                .Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol))
+                .ToList();
+
+            if (filtered.Count == 0)
+                warnings.Add("Even the relaxed scan returned no contracts. Try a different duration or check chain availability.");
         }
 
         var ranked = _filterService.ScoreAndRankEnhanced(filtered, predictionType, DefaultTopN);
@@ -166,6 +200,9 @@ public class PaperOptionsService
         {
             var c = s.Contract;
             var contractWarnings = new List<string>();
+            if (relaxed) contractWarnings.Add("Outside default filters — surfaced via relaxed scan.");
+            if (c.Mid * EstContractMultiplier > 200)
+                contractWarnings.Add($"Est. cost ${c.Mid * EstContractMultiplier:F0} exceeds default $200 cap.");
             if (c.Volume < 10) contractWarnings.Add("Low volume (<10).");
             if (c.OpenInterest < 100) contractWarnings.Add("Low open interest (<100).");
             if (c.BidAskSpreadPercent > 20) contractWarnings.Add($"Wide spread ({c.BidAskSpreadPercent:F1}%).");

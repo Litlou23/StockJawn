@@ -140,6 +140,56 @@ async function postJson<T>(url: string, body: unknown = { trigger: 'manual' }): 
   return data as T;
 }
 
+/** Shape returned by the fire-and-forget job-trigger proxies. */
+export interface JobAcceptedResponse {
+  status: 'started' | 'completed' | 'failed';
+  jobName?: string;
+  message?: string;
+  startedAt?: string;
+}
+
+/** Single entry returned by GET /api/jobs/status. */
+export interface BackendJobStatus {
+  jobName: string;
+  state: 'idle' | 'running' | 'completed' | 'failed';
+  startedAt?: string;
+  completedAt?: string;
+  summary?: string;
+  error?: string;
+  durationSeconds?: number;
+}
+
+/**
+ * Poll /api/jobs/status until the named job leaves the running state.
+ * Returns the final status (completed / failed). Used by the UI after
+ * firing a long-running job so the user sees the real outcome instead of
+ * a 502 from the proxy chain.
+ */
+export async function pollJobUntilDone(
+  jobName: string,
+  opts: { intervalMs?: number; timeoutMs?: number; onTick?: (s: BackendJobStatus | null) => void } = {},
+): Promise<BackendJobStatus | null> {
+  const intervalMs = opts.intervalMs ?? 5_000;
+  const timeoutMs = opts.timeoutMs ?? 30 * 60_000; // 30 min hard cap
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch('/api/jobs/status', { cache: 'no-store' });
+      const all = (await res.json().catch(() => ({}))) as Record<string, BackendJobStatus>;
+      const status = all[jobName] ?? null;
+      opts.onTick?.(status);
+      if (status && (status.state === 'completed' || status.state === 'failed')) {
+        return status;
+      }
+    } catch {
+      // Treat fetch errors as transient — keep polling.
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   const data = await res.json();
@@ -149,27 +199,23 @@ async function getJson<T>(url: string): Promise<T> {
 
 export const dynamicPickOrchestrator = {
   /**
-   * Generate today's paper stock candidates + linked paper option candidates.
-   * Calls the .NET orchestrator which runs morning scan → wraps predictions →
-   * scans real option chains for qualifying candidates → saves everything.
+   * Fire the dynamic morning picks job and return immediately. The .NET
+   * side runs morning scan → wraps predictions as paper_stock_candidates →
+   * scans real option chains → saves linked option candidates. Use
+   * pollJobUntilDone('run-dynamic-morning-picks') to wait for the result.
    */
-  runDynamicMorningPicks(): Promise<DynamicMorningResult> {
-    return postJson<DynamicMorningResult>('/api/jobs/run-dynamic-morning-picks');
+  runDynamicMorningPicks(): Promise<JobAcceptedResponse> {
+    return postJson<JobAcceptedResponse>('/api/jobs/run-dynamic-morning-picks');
   },
 
-  /**
-   * Evaluate open paper stock candidates and open paper option candidates
-   * against current real prices, save outcomes, update both learning tables.
-   */
-  runDynamicEodReview(): Promise<DynamicEodResult> {
-    return postJson<DynamicEodResult>('/api/jobs/run-dynamic-eod-review');
+  /** Fire EOD evaluation (stock + options). Poll for result. */
+  runDynamicEodReview(): Promise<JobAcceptedResponse> {
+    return postJson<JobAcceptedResponse>('/api/jobs/run-dynamic-eod-review');
   },
 
-  /**
-   * Run signal performance update, weight adjustment, and insight generation.
-   */
-  runDynamicLearningUpdate(): Promise<DynamicLearningResult> {
-    return postJson<DynamicLearningResult>('/api/jobs/run-dynamic-learning-update');
+  /** Fire learning update (signal accuracy + weights + insights). Poll for result. */
+  runDynamicLearningUpdate(): Promise<JobAcceptedResponse> {
+    return postJson<JobAcceptedResponse>('/api/jobs/run-dynamic-learning-update');
   },
 
   // Read helpers used by /stock-lab and /dashboard.

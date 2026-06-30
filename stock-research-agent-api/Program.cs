@@ -25,8 +25,10 @@ try
     // to localhost:3000 for local dev. The dashboard displays the joined list.
     var frontendOriginsRaw =
         builder.Configuration["FRONTEND_ORIGINS"]
-        ?? builder.Configuration["FRONTEND_ORIGIN"]
-        ?? "http://localhost:3000";
+        ?? builder.Configuration["FRONTEND_ORIGIN"];
+
+    var frontendOriginDefaulted = string.IsNullOrWhiteSpace(frontendOriginsRaw);
+    frontendOriginsRaw ??= "http://localhost:3000";
 
     var frontendOrigins = frontendOriginsRaw
         .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -100,8 +102,8 @@ try
     builder.Services.AddSingleton<PaperStockCandidateRepository>();
     builder.Services.AddSingleton<DynamicPickOrchestrator>();
 
-    // Dev-only in-memory request counter for the "/" dashboard — see
-    // Dashboard/RequestMetrics.cs for why this is never trusted in production.
+    // In-memory request counter — recorded on every request, displayed
+    // on the dashboard with a "per-instance, resets on restart" caveat.
     builder.Services.AddSingleton<RequestMetrics>();
 
     builder.Services.AddCors(options =>
@@ -123,8 +125,13 @@ try
     if (app.Environment.IsDevelopment())
     {
         app.MapOpenApi();
-        app.UseMiddleware<RequestMetricsMiddleware>();
     }
+
+    // In-memory request metrics are useful in production too as long as we
+    // label them clearly ("per-instance, resets on restart"). Without this,
+    // the dashboard never shows what calls are happening on the deployed
+    // server — exactly the visibility gap Lou flagged.
+    app.UseMiddleware<RequestMetricsMiddleware>();
 
     app.UseHttpsRedirection();
 
@@ -187,11 +194,10 @@ try
         Version: typeof(Program).Assembly.GetName().Version?.ToString() ?? "1.0.0",
         FrontendOrigin: FrontendOrigin,
         CorsConfigured: true,
+        FrontendOriginDefaulted: frontendOriginDefaulted,
         ApiEndpoints: apiEndpoints,
         FrontendAppEndpoints: frontendAppEndpoints,
-        Metrics: app.Environment.IsDevelopment()
-            ? app.Services.GetRequiredService<RequestMetrics>().Snapshot()
-            : new MetricsSnapshot(false, 0, null, 0, 0, Array.Empty<string>()));
+        Metrics: app.Services.GetRequiredService<RequestMetrics>().Snapshot());
 
     app.MapGet("/", () => Results.Content(DashboardHtml.Render(BuildDashboardData()), "text/html"));
 

@@ -31,6 +31,10 @@ const ALLOWED_JOBS = new Set([
 const FIRE_AND_FORGET_JOBS = new Set([
   'run-weekly-research',
   'run-watchlist-refresh',
+  // Dynamic orchestrator — all three loop over the watchlist + external APIs.
+  'run-dynamic-morning-picks',
+  'run-dynamic-eod-review',
+  'run-dynamic-learning-update',
 ]);
 
 export async function POST(req: NextRequest) {

@@ -5,10 +5,11 @@ import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
 import {
   dynamicPickOrchestrator,
+  pollJobUntilDone,
   type PaperStockCandidate,
   type PaperStockOutcome,
   type StockLearningStat,
-  type DynamicMorningResult,
+  type BackendJobStatus,
 } from '@/services/researchOrchestrator/dynamicPickOrchestrator';
 
 export const dynamic = 'force-dynamic';
@@ -24,7 +25,7 @@ export default function StockLabPage() {
   const [candidates, setCandidates] = useState<PaperStockCandidate[]>([]);
   const [outcomes, setOutcomes] = useState<PaperStockOutcome[]>([]);
   const [stats, setStats] = useState<StockLearningStat[]>([]);
-  const [lastRun, setLastRun] = useState<DynamicMorningResult | null>(null);
+  const [jobStatus, setJobStatus] = useState<BackendJobStatus | null>(null);
 
   const [loading, setLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
@@ -48,53 +49,79 @@ export default function StockLabPage() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  async function handleGenerate() {
+  /**
+   * Fire a long-running orchestrator job and poll for the outcome.
+   * The .NET handler returns 202 in <1s; the actual work runs in a
+   * background Task and updates JobStatusTracker. The poller surfaces
+   * progress/result to the UI instead of waiting for the original POST
+   * (which would 502 long before the work finished).
+   */
+  async function fireAndPoll(
+    jobName: string,
+    label: string,
+    runner: () => Promise<unknown>,
+  ) {
     setError(null);
     setInfo(null);
+    setJobStatus(null);
     setLoading(true);
-    setLoadingMessage('Running dynamic morning picks — stock + linked options…');
+    setLoadingMessage(`${label} — accepted, polling for progress…`);
+
     try {
-      const result = await dynamicPickOrchestrator.runDynamicMorningPicks();
-      setLastRun(result);
-      setInfo(result.report);
-      await loadAll();
+      await runner();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to generate picks');
+      setError(e instanceof Error ? e.message : 'Failed to submit job');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const final = await pollJobUntilDone(jobName, {
+        intervalMs: 5_000,
+        timeoutMs: 30 * 60_000,
+        onTick: (s) => {
+          setJobStatus(s);
+          if (s?.state === 'running' && s.durationSeconds != null) {
+            setLoadingMessage(`${label} — running ${Math.round(s.durationSeconds)}s…`);
+          }
+        },
+      });
+
+      if (!final) {
+        setError(`${label}: still running after the polling window. Check /api/jobs/status.`);
+      } else if (final.state === 'failed') {
+        setError(`${label} failed: ${final.error ?? 'no detail'}`);
+      } else {
+        setInfo(final.summary ?? `${label} completed.`);
+        await loadAll();
+      }
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleEvaluate() {
-    setError(null);
-    setInfo(null);
-    setLoading(true);
-    setLoadingMessage('Evaluating open stock + option candidates against current prices…');
-    try {
-      const result = await dynamicPickOrchestrator.runDynamicEodReview();
-      setInfo(result.report);
-      await loadAll();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to evaluate');
-    } finally {
-      setLoading(false);
-    }
+  function handleGenerate() {
+    return fireAndPoll(
+      'run-dynamic-morning-picks',
+      'Dynamic morning picks',
+      () => dynamicPickOrchestrator.runDynamicMorningPicks(),
+    );
   }
 
-  async function handleLearningUpdate() {
-    setError(null);
-    setInfo(null);
-    setLoading(true);
-    setLoadingMessage('Updating learning stats and scoring weights…');
-    try {
-      const result = await dynamicPickOrchestrator.runDynamicLearningUpdate();
-      setInfo(result.report);
-      await loadAll();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update learning');
-    } finally {
-      setLoading(false);
-    }
+  function handleEvaluate() {
+    return fireAndPoll(
+      'run-dynamic-eod-review',
+      'Dynamic EOD review',
+      () => dynamicPickOrchestrator.runDynamicEodReview(),
+    );
+  }
+
+  function handleLearningUpdate() {
+    return fireAndPoll(
+      'run-dynamic-learning-update',
+      'Dynamic learning update',
+      () => dynamicPickOrchestrator.runDynamicLearningUpdate(),
+    );
   }
 
   const grouped = useMemo(() => {

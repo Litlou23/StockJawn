@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
-export const maxDuration = 300;
 
+/** Fire-and-forget proxy. See run-dynamic-morning-picks for the pattern. */
 export async function POST(req: NextRequest) {
   const base = process.env.AGENT_API_BASE_URL;
   const secret = process.env.JOB_RUN_SECRET;
@@ -19,13 +19,20 @@ export async function POST(req: NextRequest) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-job-secret': secret },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(290_000),
+      signal: AbortSignal.timeout(10_000),
     });
     const data = await res.json().catch(() => ({}));
     return NextResponse.json(data, { status: res.status });
   } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      return NextResponse.json({
+        status: 'started',
+        jobName: 'run-dynamic-learning-update',
+        message: 'Job is running in the background. Poll /api/jobs/status for progress.',
+      });
+    }
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to run learning update' },
+      { error: err instanceof Error ? err.message : 'Failed to reach .NET API' },
       { status: 502 },
     );
   } finally {

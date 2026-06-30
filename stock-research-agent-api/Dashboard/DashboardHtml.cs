@@ -98,8 +98,8 @@ public static class DashboardHtml
 
         return $"""
             <div class="card">
-              <h2>Request metrics <span class="badge badge-dev">development only</span></h2>
-              <p class="muted">In-memory, per-instance, resets on restart — not a substitute for real telemetry. Never used outside Development.</p>
+              <h2>Request metrics <span class="badge badge-dev">in-memory</span></h2>
+              <p class="muted">Per-instance, resets on every app restart. Not a substitute for App Insights but enough to see what calls are actually landing on this server right now.</p>
               <div class="stat-grid">
                 <div class="stat"><div class="stat-value">{metrics.TotalCallsSinceStart}</div><div class="stat-label">calls since start</div></div>
                 <div class="stat"><div class="stat-value">{metrics.SuccessCount}</div><div class="stat-label">success</div></div>
@@ -107,15 +107,30 @@ public static class DashboardHtml
               </div>
               <p class="muted">Last call: {Esc(lastCall)} UTC</p>
               <ul class="recent-list">{recentList}</ul>
+              <p class="muted" style="margin-top:8px">Refresh this page to see the most recent calls. Long-running jobs (the <code>/run-dynamic-*</code> endpoints) return immediately and finish in the background — check <code>/api/jobs/status</code> for their state.</p>
             </div>
             """;
     }
 
     public static string Render(DashboardData data)
     {
-        var corsBadge = data.CorsConfigured
-            ? $"<span class=\"badge badge-open\">configured</span> <code>{Esc(data.FrontendOrigin)}</code>"
-            : "<span class=\"badge badge-auth\">not configured</span>";
+        string corsBadge;
+        if (!data.CorsConfigured)
+        {
+            corsBadge = "<span class=\"badge badge-auth\">not configured</span>";
+        }
+        else if (data.FrontendOriginDefaulted)
+        {
+            corsBadge = $"<span class=\"badge badge-auth\">defaulted</span> <code>{Esc(data.FrontendOrigin)}</code> " +
+                        "<div class=\"muted\" style=\"margin-top:6px\">⚠️ FRONTEND_ORIGINS env var not set on this server. " +
+                        "Falling back to localhost — deployed frontends will be blocked by CORS. " +
+                        "Set <code>FRONTEND_ORIGINS</code> in Azure App Service → Configuration → Application settings " +
+                        "(comma-separated for multiple origins).</div>";
+        }
+        else
+        {
+            corsBadge = $"<span class=\"badge badge-open\">configured</span> <code>{Esc(data.FrontendOrigin)}</code>";
+        }
 
         return $"""
             <!DOCTYPE html>

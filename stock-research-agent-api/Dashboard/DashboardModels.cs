@@ -32,6 +32,7 @@ public sealed record DashboardData(
     string Version,
     string FrontendOrigin,
     bool CorsConfigured,
+    bool FrontendOriginDefaulted,
     IReadOnlyList<EndpointInfo> ApiEndpoints,
     IReadOnlyList<EndpointInfo> FrontendAppEndpoints,
     MetricsSnapshot Metrics);
