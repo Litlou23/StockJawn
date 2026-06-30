@@ -27,6 +27,7 @@ interface Prediction {
 interface PaperCandidate {
   id?: string;
   predictionId?: string | null;
+  paperStockCandidateId?: string | null;
   ticker: string;
   optionSymbol: string;
   side: 'call' | 'put';
@@ -767,6 +768,17 @@ function OpenCandidateRow({
         <span className="text-zinc-500">Score {c.contractScore.toFixed(0)}</span>
         <span className="text-zinc-500">Saved {fmtDate(c.createdAt)}</span>
         <span className="rounded bg-violet-900/40 px-2 py-0.5 text-xs text-violet-300">{c.durationBucket}</span>
+        {c.paperStockCandidateId ? (
+          <a
+            href="/stock-lab"
+            className="rounded bg-emerald-900/40 px-2 py-0.5 text-xs text-emerald-300 hover:bg-emerald-900/60"
+            title={`Linked to paper stock candidate ${c.paperStockCandidateId}`}
+          >
+            from stock pick
+          </a>
+        ) : (
+          <span className="rounded bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400">manual</span>
+        )}
       </div>
       <button
         onClick={onEvaluate}

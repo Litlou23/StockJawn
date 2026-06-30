@@ -17,6 +17,9 @@ try
 {
     BootstrapLogger.Init(); // BOOT 001 + 002 inside
 
+    BootstrapLogger.Log("BOOT 003", $"Creating builder...");
+    var builder = WebApplication.CreateBuilder(args);
+
     // CORS-allowed frontend origins. Reads FRONTEND_ORIGINS (comma-separated)
     // from configuration so dev and Azure App Service can differ. Falls back
     // to localhost:3000 for local dev. The dashboard displays the joined list.
@@ -30,9 +33,6 @@ try
         .ToArray();
 
     string FrontendOrigin = string.Join(", ", frontendOrigins);
-
-    BootstrapLogger.Log("BOOT 003", $"Creating builder...");
-    var builder = WebApplication.CreateBuilder(args);
 
     BootstrapLogger.Log("BOOT 003", $"Environment: {builder.Environment.EnvironmentName}");
     BootstrapLogger.Log("BOOT 004", $"Content root: {builder.Environment.ContentRootPath}");
@@ -94,6 +94,11 @@ try
 
     // Paper Options — enhanced flow for /paper-options page
     builder.Services.AddSingleton<PaperOptionsService>();
+
+    // Dynamic pick orchestrator — wraps research engine + paper options
+    // services to auto-generate stock + linked option candidates daily.
+    builder.Services.AddSingleton<PaperStockCandidateRepository>();
+    builder.Services.AddSingleton<DynamicPickOrchestrator>();
 
     // Dev-only in-memory request counter for the "/" dashboard — see
     // Dashboard/RequestMetrics.cs for why this is never trusted in production.

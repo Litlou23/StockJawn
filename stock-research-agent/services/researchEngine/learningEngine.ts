@@ -25,6 +25,10 @@ import {
   saveLearningInsights,
   getRecentLearningInsights,
 } from '../persistence/researchRepository';
+import {
+  getLinksForPrediction,
+  getCatalystById,
+} from '../persistence/newsIntelligenceRepository';
 
 // ---------------------------------------------------------------------------
 // Signal Performance Tracking
@@ -69,6 +73,29 @@ export async function updateSignalPerformance(): Promise<{
       tally.totalScore += outcome.outcomeScore ?? 50;
       signalTallies.set(signalName, tally);
     }
+
+    // Also tally per-catalyst event-type signals so the main scoring weight
+    // table stays consistent with the catalyst learning loop.
+    try {
+      const links = await getLinksForPrediction(pred.id);
+      const eventTypesSeen = new Set<string>();
+      for (const link of links) {
+        const cat = await getCatalystById(link.catalystId);
+        if (!cat) continue;
+        for (const et of cat.detectedEventTypes) {
+          eventTypesSeen.add(`catalyst_${et}`);
+        }
+      }
+      for (const signalName of eventTypesSeen) {
+        const tally = signalTallies.get(signalName) ?? { total: 0, correct: 0, totalScore: 0 };
+        tally.total++;
+        if (outcome.directionCorrect) tally.correct++;
+        tally.totalScore += outcome.outcomeScore ?? 50;
+        signalTallies.set(signalName, tally);
+      }
+    } catch {
+      // best-effort — never let catalyst tally failures break learning.
+    }
   }
 
   // Persist updated stats
@@ -97,6 +124,11 @@ function extractSignalsFromPrediction(pred: PredictionCandidate): string[] {
       signals.push('technical_trend', 'technical_momentum', 'technical_volume', 'technical_ma_position');
     } else if (src === 'rss-news') {
       signals.push('news_sentiment_bullish', 'news_sentiment_bearish', 'news_volume');
+    } else if (src === 'news-catalyst-intelligence') {
+      // Catalyst signals are added per-prediction via getLinksForPrediction;
+      // mark a generic capability signal here so the learning engine can
+      // see the intelligence layer was used.
+      signals.push('news_catalyst_intelligence_used');
     }
   }
   return signals;

@@ -25,6 +25,15 @@ import { getLatestIntakeItems } from '../informationIntake/informationIntakeServ
 import type { NormalizedIntakeItem } from '../informationIntake/intake.types';
 import { getScoringWeights } from '../persistence/researchRepository';
 import { getRecentLearningInsights } from '../persistence/researchRepository';
+import {
+  buildCatalystsForTicker,
+  eventImportance,
+} from '../newsIntelligence/newsIntelligenceService';
+import type {
+  NewsCatalystInput,
+  CatalystEventType,
+} from '../newsIntelligence/newsIntelligence.types';
+import { getOutcomeStatForEventType } from '../persistence/newsIntelligenceRepository';
 
 // ---------------------------------------------------------------------------
 // Market snapshot builder
@@ -151,23 +160,111 @@ function scoreCatalystSignals(ctx: ScoringContext): { score: number; signals: st
   if (news.length >= 3) { score += 10 * volWeight; signals.push(`High news volume: ${news.length} items`); }
 
   for (const item of news) {
-    // Catalyst type weighting
+    // Catalyst type weighting (intake-layer label)
     const catalystKey = item.catalystType ? `catalyst_${item.catalystType}` : null;
     const catWeight = catalystKey ? (ctx.weights.get(catalystKey) ?? 1.0) : 1.0;
 
     const impactScore = item.importanceScore * catWeight * 5;
-    score += item.sentiment === 'bearish' ? -impactScore : impactScore;
+    // Sentiment values from the intake layer are 'positive'|'negative'|... — match those too,
+    // and keep backward compat with any legacy 'bearish'/'bullish' values from older snapshots.
+    const isNegative = item.sentiment === 'negative' || item.sentiment === 'bearish';
+    const isPositive = item.sentiment === 'positive' || item.sentiment === 'bullish';
+    score += isNegative ? -impactScore : impactScore;
 
     // Sentiment signal
-    const sentWeight = item.sentiment === 'bearish'
+    const sentWeight = isNegative
       ? (ctx.weights.get('news_sentiment_bearish') ?? 1.0)
       : (ctx.weights.get('news_sentiment_bullish') ?? 1.0);
-    score += (item.sentiment === 'bullish' ? 5 : item.sentiment === 'bearish' ? -5 : 0) * sentWeight;
+    score += (isPositive ? 5 : isNegative ? -5 : 0) * sentWeight;
 
     signals.push(`${item.catalystType ?? 'news'}: "${item.title.slice(0, 60)}" (${item.sentiment ?? 'neutral'}, imp=${item.importanceScore})`);
   }
 
   return { score, signals };
+}
+
+// ---------------------------------------------------------------------------
+// News Catalyst Intelligence layer — sits on top of scoreCatalystSignals.
+// Pulls fully classified catalysts (event types + keywords + strength) and
+// returns an additive score adjustment plus the data we need to persist
+// catalyst -> prediction links downstream.
+// ---------------------------------------------------------------------------
+
+interface CatalystIntelligenceResult {
+  available: boolean;
+  reason?: string;
+  catalysts: NewsCatalystInput[];
+  topEventTypes: CatalystEventType[];
+  topKeywords: string[];
+  scoreAdjustment: number;       // additive (may be negative)
+  signals: string[];
+  warnings: string[];
+}
+
+async function scoreCatalystIntelligence(
+  ticker: string,
+  ctx: ScoringContext,
+): Promise<CatalystIntelligenceResult> {
+  const built = await buildCatalystsForTicker({
+    ticker,
+    quote: ctx.snapshot.quote,
+  });
+
+  if (!built.available || built.catalysts.length === 0) {
+    return {
+      available: false,
+      reason: built.reason ?? 'No catalysts produced.',
+      catalysts: [],
+      topEventTypes: [],
+      topKeywords: [],
+      scoreAdjustment: 0,
+      signals: ['catalyst-intelligence: no real catalysts available'],
+      warnings: built.reason ? [built.reason] : [],
+    };
+  }
+
+  let scoreAdjustment = 0;
+  const signals: string[] = [];
+  const warnings: string[] = [];
+
+  // Only use the top-N strongest catalysts to avoid noise.
+  const useTop = built.catalysts.slice(0, 5);
+  for (const cat of useTop) {
+    const dominant = cat.detectedEventTypes[0];
+    const baseImportance = dominant ? eventImportance(dominant) : 20;
+    const weightKey = dominant ? `catalyst_${dominant}` : 'catalyst_unknown';
+    const weight = ctx.weights.get(weightKey) ?? 1.0;
+
+    // Historical adjustment based on prior outcome stats for this event type
+    const histStat = dominant ? await getOutcomeStatForEventType(dominant) : null;
+    const histMultiplier = histStat && histStat.totalLinkedPredictions >= 3
+      ? 1.0 + (histStat.stockWinRate - 0.5) * 0.6 * Math.min(histStat.totalLinkedPredictions / 20, 1)
+      : 1.0;
+
+    // Direction: positive sentiment -> + contribution; negative -> -. Strength scales the magnitude.
+    const direction = cat.sentiment === 'negative' ? -1 : cat.sentiment === 'positive' ? 1 : 0;
+    const contribution = direction * (cat.catalystStrengthScore / 100) * baseImportance * weight * histMultiplier * 0.25;
+    scoreAdjustment += contribution;
+
+    signals.push(
+      `catalyst[${dominant ?? 'unknown'}] strength=${cat.catalystStrengthScore} weight=${weight.toFixed(2)} contrib=${contribution.toFixed(1)} "${cat.headline.slice(0, 60)}"`,
+    );
+    for (const w of cat.warnings) warnings.push(w);
+  }
+
+  if (built.catalysts.length >= 5) {
+    signals.push(`Unusual news volume detected: ${built.catalysts.length} catalyst items`);
+  }
+
+  return {
+    available: true,
+    catalysts: built.catalysts,
+    topEventTypes: built.topEventTypes,
+    topKeywords: built.topKeywords,
+    scoreAdjustment,
+    signals,
+    warnings,
+  };
 }
 
 function determinePredictionType(totalScore: number): PredictionType {
@@ -212,7 +309,7 @@ export async function generatePredictionForTicker(
   ticker: string,
   runId: string,
   snapshot: MarketSnapshot,
-): Promise<{ prediction: PredictionCandidateInput; inputs: PredictionInputEntry[] } | null> {
+): Promise<{ prediction: PredictionCandidateInput; inputs: PredictionInputEntry[]; catalysts: NewsCatalystInput[]; topEventTypes: CatalystEventType[]; topKeywords: string[] } | null> {
   const [weightsRows, recentInsights] = await Promise.all([
     getScoringWeights(),
     getRecentLearningInsights(10),
@@ -225,8 +322,11 @@ export async function generatePredictionForTicker(
 
   const techResult = scoreTechnicalSignals(ctx);
   const catalystResult = scoreCatalystSignals(ctx);
-  const totalScore = techResult.score + catalystResult.score;
-  const allSignals = [...techResult.signals, ...catalystResult.signals];
+  // Layer in News Catalyst Intelligence — adds event-type + keyword scoring and
+  // returns the structured catalysts so we can link them to the prediction later.
+  const intelligenceResult = await scoreCatalystIntelligence(ticker, ctx);
+  const totalScore = techResult.score + catalystResult.score + intelligenceResult.scoreAdjustment;
+  const allSignals = [...techResult.signals, ...catalystResult.signals, ...intelligenceResult.signals];
 
   const predictionType = determinePredictionType(totalScore);
   const confidence = calculateConfidence(snapshot, totalScore);
@@ -243,6 +343,15 @@ export async function generatePredictionForTicker(
 
   if (snapshot.dataAvailability.newsAvailable) dataSourcesUsed.push('rss-news');
   else missingDataWarnings.push('No recent news/catalysts found');
+
+  if (intelligenceResult.available) {
+    dataSourcesUsed.push('news-catalyst-intelligence');
+  } else if (intelligenceResult.reason) {
+    missingDataWarnings.push(`Catalyst intelligence unavailable: ${intelligenceResult.reason}`);
+  }
+  for (const w of intelligenceResult.warnings) {
+    if (!missingDataWarnings.includes(w)) missingDataWarnings.push(w);
+  }
 
   if (!snapshot.dataAvailability.optionsChainAvailable) {
     missingDataWarnings.push('Options-chain data not connected -- cannot confirm options setups');
@@ -263,7 +372,11 @@ export async function generatePredictionForTicker(
     entryReferencePrice: snapshot.quote?.price ?? null,
     bullishCase,
     bearishCase,
-    predictionReason: `Score: ${totalScore.toFixed(1)}. Signals: ${allSignals.length}. ${predictionType} stance based on ${dataSourcesUsed.join(' + ') || 'limited data'}.`,
+    predictionReason: `Score: ${totalScore.toFixed(1)}. Signals: ${allSignals.length}. ${predictionType} stance based on ${dataSourcesUsed.join(' + ') || 'limited data'}.${intelligenceResult.available && intelligenceResult.topEventTypes.length > 0
+      ? ` Top catalyst event types: ${intelligenceResult.topEventTypes.slice(0, 3).join(', ')}.`
+      : ''}${intelligenceResult.available && intelligenceResult.topKeywords.length > 0
+      ? ` Keywords: ${intelligenceResult.topKeywords.slice(0, 5).join(', ')}.`
+      : ''}`,
     invalidationRule: predictionType === 'bullish'
       ? `Invalidate if price drops >2% from entry or bearish catalyst emerges`
       : predictionType === 'bearish'
@@ -310,6 +423,18 @@ export async function generatePredictionForTicker(
     });
   }
 
+  // News Catalyst Intelligence inputs — one row per structured catalyst used
+  for (const cat of intelligenceResult.catalysts.slice(0, 5)) {
+    inputs.push({
+      predictionId: '',
+      inputType: 'catalyst',
+      sourceName: cat.sourceName,
+      sourceUrl: cat.sourceUrl,
+      sourceRecordId: cat.sourceItemId,
+      summary: `[${cat.detectedEventTypes.join(', ')}] strength=${cat.catalystStrengthScore} sentiment=${cat.sentiment} keywords=${cat.extractedKeywords.slice(0, 5).join(', ')} :: ${cat.headline.slice(0, 120)}`,
+    });
+  }
+
   if (lessons.length > 0) {
     inputs.push({
       predictionId: '',
@@ -321,26 +446,45 @@ export async function generatePredictionForTicker(
     });
   }
 
-  return { prediction, inputs };
+  return {
+    prediction,
+    inputs,
+    catalysts: intelligenceResult.catalysts,
+    topEventTypes: intelligenceResult.topEventTypes,
+    topKeywords: intelligenceResult.topKeywords,
+  };
+}
+
+export interface WatchlistGenerationResult {
+  predictions: PredictionCandidateInput[];
+  allInputs: PredictionInputEntry[];
+  /** Per-ticker catalyst bundles built during scoring (ticker -> { catalysts, eventTypes, keywords }). */
+  catalystsByTicker: Map<string, { catalysts: NewsCatalystInput[]; topEventTypes: CatalystEventType[]; topKeywords: string[] }>;
 }
 
 export async function generatePredictionsForWatchlist(
   watchlist: readonly string[],
   runId: string,
   snapshots: MarketSnapshot[],
-): Promise<{ predictions: PredictionCandidateInput[]; allInputs: PredictionInputEntry[] }> {
+): Promise<WatchlistGenerationResult> {
   const predictions: PredictionCandidateInput[] = [];
   const allInputs: PredictionInputEntry[] = [];
+  const catalystsByTicker = new Map<string, { catalysts: NewsCatalystInput[]; topEventTypes: CatalystEventType[]; topKeywords: string[] }>();
 
   for (const snapshot of snapshots) {
     const result = await generatePredictionForTicker(snapshot.ticker, runId, snapshot);
     if (result) {
       predictions.push(result.prediction);
       allInputs.push(...result.inputs);
+      catalystsByTicker.set(snapshot.ticker, {
+        catalysts: result.catalysts,
+        topEventTypes: result.topEventTypes,
+        topKeywords: result.topKeywords,
+      });
     }
   }
 
   // Sort by confidence descending
   predictions.sort((a, b) => b.confidenceScore - a.confidenceScore);
-  return { predictions, allInputs };
+  return { predictions, allInputs, catalystsByTicker };
 }

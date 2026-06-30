@@ -73,6 +73,40 @@ const JOBS: JobDef[] = [
       'Updating watchlist...',
     ],
   },
+  // Dynamic orchestrator — auto-generates stock + linked option candidates.
+  {
+    id: 'run-dynamic-morning-picks',
+    label: 'Generate Dynamic Picks',
+    description: 'Stock candidates + linked paper option candidates (auto)',
+    steps: [
+      'Running morning scan...',
+      'Wrapping predictions as stock candidates...',
+      'Scoring deterministic signals...',
+      'Scanning real option chains for qualifying picks...',
+      'Saving everything to Supabase...',
+    ],
+  },
+  {
+    id: 'run-dynamic-eod-review',
+    label: 'Evaluate Results',
+    description: 'Evaluate open stock + option candidates against current prices',
+    steps: [
+      'Loading open stock + option candidates...',
+      'Fetching current prices (Twelve Data + MarketData.app)...',
+      'Computing outcomes...',
+      'Updating learning stats...',
+    ],
+  },
+  {
+    id: 'run-dynamic-learning-update',
+    label: 'Run Learning Update',
+    description: 'Update signal accuracy + scoring weights + insights',
+    steps: [
+      'Analyzing signal performance...',
+      'Adjusting scoring weights...',
+      'Generating insights...',
+    ],
+  },
 ];
 
 type JobState = 'idle' | 'running' | 'background' | 'done' | 'error';

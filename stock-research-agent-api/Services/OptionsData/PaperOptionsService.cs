@@ -184,6 +184,7 @@ public class PaperOptionsService
             return new PaperCandidateEnhanced
             {
                 PredictionId = req.PredictionId,
+                PaperStockCandidateId = req.PaperStockCandidateId,
                 Ticker = prediction.Ticker,
                 OptionSymbol = c.OptionSymbol,
                 Side = c.Side,

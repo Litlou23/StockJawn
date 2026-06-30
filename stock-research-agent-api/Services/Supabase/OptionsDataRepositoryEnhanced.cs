@@ -20,6 +20,7 @@ public partial class OptionsDataRepository
         var row = new
         {
             prediction_id = c.PredictionId,
+            paper_stock_candidate_id = c.PaperStockCandidateId,
             ticker = c.Ticker,
             option_symbol = c.OptionSymbol,
             side = c.Side.ToString(),
@@ -198,6 +199,7 @@ public partial class OptionsDataRepository
     {
         Id = r["id"]?.ToString() ?? "",
         PredictionId = r["prediction_id"]?.ToString(),
+        PaperStockCandidateId = r["paper_stock_candidate_id"]?.ToString(),
         Ticker = r["ticker"]?.ToString() ?? "",
         OptionSymbol = r["option_symbol"]?.ToString() ?? "",
         Side = r["side"]?.ToString() == "put" ? OptionSide.put : OptionSide.call,

@@ -1,5 +1,7 @@
 import AppShell from '@/components/AppShell';
 import JobTriggerButtons from '@/components/dashboard/JobTriggerButtons';
+import DynamicSummaryCards from '@/components/dashboard/DynamicSummaryCards';
+import CatalystIntelligenceSection from '@/components/dashboard/CatalystIntelligenceSection';
 import Link from 'next/link';
 
 // Force dynamic rendering — never serve a cached page
@@ -281,6 +283,11 @@ export default async function DashboardPage() {
           <StatCard label="Accuracy" value={overview.accuracyPct !== null ? `${overview.accuracyPct}%` : '—'} accent={overview.accuracyPct !== null && overview.accuracyPct >= 60 ? 'green' : undefined} />
         </div>
 
+        {/* Dynamic pick orchestrator summary — fetched client-side */}
+        <Section title="Dynamic picks today" subtitle="Auto-generated stock + linked option candidates">
+          <DynamicSummaryCards />
+        </Section>
+
         {/* ── 2. Research Predictions ──────────────────────────────── */}
         <Section title="Recent Predictions" subtitle={`${predictions.length} prediction(s)`}>
           {predictions.length === 0 ? (
@@ -320,6 +327,11 @@ export default async function DashboardPage() {
               ))}
             </div>
           )}
+        </Section>
+
+        {/* ── 2b. Catalyst Intelligence ────────────────────────────── */}
+        <Section title="Catalyst Intelligence" subtitle="Real news -> classified catalysts -> outcomes">
+          <CatalystIntelligenceSection />
         </Section>
 
         {/* ── 3. Watchlist Summary ─────────────────────────────────── */}

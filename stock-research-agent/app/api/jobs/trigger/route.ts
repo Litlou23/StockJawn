@@ -21,6 +21,10 @@ const ALLOWED_JOBS = new Set([
   'run-learning-update',
   'run-weekly-research',
   'run-watchlist-refresh',
+  // Dynamic orchestrator entry points — auto-generate stock + option picks.
+  'run-dynamic-morning-picks',
+  'run-dynamic-eod-review',
+  'run-dynamic-learning-update',
 ]);
 
 /** Jobs that take too long to wait for synchronously */

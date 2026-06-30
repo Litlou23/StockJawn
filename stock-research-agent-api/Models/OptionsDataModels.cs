@@ -408,12 +408,18 @@ public class GenerateCandidatesRequest
     public string PredictionId { get; set; } = "";
     public DurationPreference DurationPreference { get; set; } = DurationPreference.system_recommended;
     public bool AutoSave { get; set; } = false;
+    /// <summary>
+    /// Optional link to the paper_stock_candidates row that triggered this
+    /// generation. Persisted on the option candidate when AutoSave is true.
+    /// </summary>
+    public string? PaperStockCandidateId { get; set; }
 }
 
 public record PaperCandidateEnhanced
 {
     public string Id { get; init; } = "";
     public string? PredictionId { get; init; }
+    public string? PaperStockCandidateId { get; init; }
     public string Ticker { get; init; } = "";
     public string OptionSymbol { get; init; } = "";
     public OptionSide Side { get; init; }

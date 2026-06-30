@@ -26,6 +26,10 @@ import {
 } from './learningEngine';
 import { generateMorningReport, generateEndOfDayReport } from './dailyReportService';
 import { requestAiCompletion } from '@/lib/ai/aiClient';
+import { persistCatalysts } from '../newsIntelligence/newsIntelligenceService';
+import { buildPredictionLinks, persistPredictionLinks } from '../newsIntelligence/catalystPredictionLinker';
+import { runCatalystLearningUpdate } from '../newsIntelligence/catalystLearningService';
+import type { NewsCatalyst, NewsCatalystInput } from '../newsIntelligence/newsIntelligence.types';
 
 const WATCHLIST: readonly string[] = [
   'SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMD',
@@ -63,13 +67,77 @@ export async function runMorningScan(): Promise<{
     await saveMarketSnapshots(snapshots);
     console.log(`[research-engine] Saved ${snapshots.length} market snapshots`);
 
-    // 3. Generate predictions
+    // 3. Generate predictions (now also returns per-ticker catalyst bundles)
     console.log('[research-engine] Generating predictions...');
-    const { predictions, allInputs } = await generatePredictionsForWatchlist(WATCHLIST, run.id, snapshots);
+    const { predictions, allInputs, catalystsByTicker } = await generatePredictionsForWatchlist(WATCHLIST, run.id, snapshots);
 
     // Save predictions
     const saveResult = await savePredictions(predictions);
     console.log(`[research-engine] Saved ${saveResult.ids.length} predictions`);
+
+    // 3a. Persist news catalysts + per-prediction links
+    let catalystsPersisted = 0;
+    let linksPersisted = 0;
+    try {
+      // Flatten unique catalyst inputs across all tickers (deduped by sourceItemId + ticker)
+      const seenKey = new Set<string>();
+      const allCatalystInputs: NewsCatalystInput[] = [];
+      for (const bundle of catalystsByTicker.values()) {
+        for (const c of bundle.catalysts) {
+          const key = `${c.sourceItemId}::${c.ticker}`;
+          if (seenKey.has(key)) continue;
+          seenKey.add(key);
+          allCatalystInputs.push(c);
+        }
+      }
+      if (allCatalystInputs.length > 0) {
+        const catPersist = await persistCatalysts(allCatalystInputs);
+        if (catPersist.persisted) catalystsPersisted = catPersist.ids.length;
+
+        // Reload persisted catalysts so we have real IDs to link
+        // (saveNewsCatalysts returns IDs in insert order — keyed back by sourceItemId+ticker).
+        const idByKey = new Map<string, string>();
+        for (let i = 0; i < catPersist.ids.length && i < allCatalystInputs.length; i++) {
+          const c = allCatalystInputs[i];
+          idByKey.set(`${c.sourceItemId}::${c.ticker}`, catPersist.ids[i]);
+        }
+
+        // For each saved prediction, build links from its catalyst bundle
+        for (let i = 0; i < predictions.length && i < saveResult.ids.length; i++) {
+          const pred = predictions[i];
+          const predId = saveResult.ids[i];
+          const bundle = catalystsByTicker.get(pred.ticker);
+          if (!bundle || bundle.catalysts.length === 0) continue;
+
+          const hydrated: NewsCatalyst[] = [];
+          for (const c of bundle.catalysts.slice(0, 5)) {
+            const catId = idByKey.get(`${c.sourceItemId}::${c.ticker}`);
+            if (!catId) continue;
+            hydrated.push({
+              ...c,
+              id: catId,
+              createdAt: new Date().toISOString(),
+            });
+          }
+          if (hydrated.length === 0) continue;
+
+          const linkInputs = buildPredictionLinks({
+            catalysts: hydrated,
+            paperStockCandidateId: predId,
+            paperOptionCandidateId: null,
+            ticker: pred.ticker,
+            predictionType: pred.predictionType,
+          });
+          const persisted = await persistPredictionLinks(linkInputs);
+          if (persisted.persisted) linksPersisted += persisted.count;
+        }
+        console.log(`[research-engine] Persisted ${catalystsPersisted} catalysts and ${linksPersisted} prediction links`);
+      }
+    } catch (catErr) {
+      const msg = catErr instanceof Error ? catErr.message : 'unknown catalyst persistence error';
+      errors.push(`catalyst persistence: ${msg}`);
+      console.warn('[research-engine] Catalyst persistence failed (non-fatal):', msg);
+    }
 
     // Link inputs to saved prediction IDs
     if (saveResult.ids.length > 0 && allInputs.length > 0) {
@@ -187,12 +255,22 @@ export async function runLearningUpdate(): Promise<{
     console.log('[research-engine] Generating learning insights...');
     const insights = await generateLearningInsights();
 
+    // 3b. Catalyst-specific learning loop — updates catalyst_outcome_stats
+    //     and adjusts catalyst_<event_type> scoring weights.
+    console.log('[research-engine] Running catalyst learning update...');
+    const catalystLearning = await runCatalystLearningUpdate();
+
     // 4. Build summary
     const summaryParts = [
       `Updated ${perfResult.updated} signal performance records.`,
       `Adjusted ${weightResult.adjusted} scoring weights.`,
       `Generated ${insights.length} learning insights.`,
     ];
+    if (catalystLearning.available) {
+      summaryParts.push(`Catalyst learning: ${catalystLearning.statsUpdated} stats updated, ${catalystLearning.weightsAdjusted} catalyst weights adjusted, ${catalystLearning.insightsCreated} insights.`);
+    } else {
+      summaryParts.push(`Catalyst learning skipped: ${catalystLearning.reason}`);
+    }
     if (weightResult.changes.length > 0) {
       summaryParts.push('Weight changes: ' + weightResult.changes.map((c) => `${c.signal}: ${c.oldWeight} -> ${c.newWeight}`).join(', '));
     }
@@ -200,8 +278,14 @@ export async function runLearningUpdate(): Promise<{
 
     await completeResearchRun(run.id, report, 0, 0, errors);
 
-    console.log(`[research-engine] Learning update complete: ${insights.length} insights, ${weightResult.adjusted} weight changes`);
-    return { run, insightsGenerated: insights.length, weightsAdjusted: weightResult.adjusted, report, errors };
+    console.log(`[research-engine] Learning update complete: ${insights.length} insights, ${weightResult.adjusted} weight changes, ${catalystLearning.weightsAdjusted} catalyst weight changes`);
+    return {
+      run,
+      insightsGenerated: insights.length + catalystLearning.insightsCreated,
+      weightsAdjusted: weightResult.adjusted + catalystLearning.weightsAdjusted,
+      report,
+      errors,
+    };
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown error';
