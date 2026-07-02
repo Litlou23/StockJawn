@@ -97,9 +97,26 @@ public class ResearchRepository
     public async Task<(bool Persisted, List<string> Ids)> SavePredictionsAsync(List<object> predictions)
     {
         if (predictions.Count == 0) return (true, []);
+
+        // Use RPC function to bypass PostgREST schema-cache issues with text[] columns.
+        // The SQL function handles jsonb→text[] casting explicitly.
+        var rpcResult = await _db.RpcAsync("insert_prediction_candidates",
+            new { payload = predictions });
+
+        try
+        {
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<List<Dictionary<string, string>>>(rpcResult);
+            var ids = parsed?.Select(r => r.GetValueOrDefault("id", "")).Where(id => id != "").ToList() ?? [];
+            if (ids.Count > 0)
+                return (true, ids);
+        }
+        catch { /* fall through to legacy path */ }
+
+        // Fallback: try direct INSERT (in case RPC function doesn't exist yet)
+        _logger.LogWarning("[research-repo] RPC insert returned no IDs, falling back to direct INSERT");
         var rows = await _db.InsertAsync("prediction_candidates", predictions);
-        var ids = rows.Select(r => r["id"]?.ToString() ?? "").Where(id => id != "").ToList();
-        return (ids.Count > 0, ids);
+        var fallbackIds = rows.Select(r => r["id"]?.ToString() ?? "").Where(id => id != "").ToList();
+        return (fallbackIds.Count > 0, fallbackIds);
     }
 
     public async Task<List<PredictionCandidate>> GetOpenPredictionsAsync()

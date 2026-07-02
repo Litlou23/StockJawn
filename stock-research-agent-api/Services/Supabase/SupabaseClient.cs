@@ -191,7 +191,9 @@ public class SupabaseClient
             var body = await resp.Content.ReadAsStringAsync();
             if (!resp.IsSuccessStatusCode)
             {
-                _logger.LogWarning("[supabase] INSERT {Table} failed: {Status} {Body}", table, resp.StatusCode, body);
+                var jsonPreview = json.Length > 500 ? json[..500] + "..." : json;
+                _logger.LogWarning("[supabase] INSERT {Table} failed: {Status} {Body} | Payload preview: {Payload}",
+                    table, resp.StatusCode, body, jsonPreview);
                 return [];
             }
             if (!returnRows) return [];
@@ -201,6 +203,40 @@ public class SupabaseClient
         {
             _logger.LogError(ex, "[supabase] INSERT {Table} error", table);
             return [];
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RPC (call a Postgres function via PostgREST)
+    // -----------------------------------------------------------------------
+
+    public async Task<string> RpcAsync(string functionName, object parameters)
+    {
+        if (!_configured) return "[]";
+
+        var url = $"{_baseUrl}/rpc/{functionName}";
+        var json = JsonSerializer.Serialize(parameters, JsonOpts);
+        var req = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        try
+        {
+            var resp = await _http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[supabase] RPC {Func} failed: {Status} {Body}", functionName, resp.StatusCode, body);
+                return "[]";
+            }
+            return body;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[supabase] RPC {Func} error", functionName);
+            return "[]";
         }
     }
 
