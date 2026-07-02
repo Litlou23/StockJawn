@@ -12,33 +12,38 @@ interface JobDef {
 }
 
 const JOBS: JobDef[] = [
+  // Dynamic orchestrator — the primary daily workflow buttons.
+  // "Morning Scan" runs the full pipeline: predictions → stock candidates → option candidates.
   {
-    id: 'run-morning-scan',
+    id: 'run-dynamic-morning-picks',
     label: 'Morning Scan',
-    description: 'Gather market data and generate predictions',
+    description: 'Generate predictions, stock candidates, and linked option candidates',
     steps: [
       'Loading active watchlist...',
       'Fetching market quotes...',
       'Computing technical indicators...',
       'Generating predictions...',
-      'Saving to Supabase...',
+      'Wrapping predictions as stock candidates...',
+      'Scoring deterministic signals...',
+      'Scanning real option chains for qualifying picks...',
+      'Saving everything to Supabase...',
     ],
   },
   {
-    id: 'run-end-of-day-review',
+    id: 'run-dynamic-eod-review',
     label: 'EOD Review',
-    description: 'Evaluate open predictions against current prices',
+    description: 'Evaluate open stock + option candidates against current prices',
     steps: [
-      'Loading open predictions...',
-      'Fetching current prices...',
-      'Evaluating outcomes...',
-      'Scoring results...',
+      'Loading open stock + option candidates...',
+      'Fetching current prices (Twelve Data + MarketData.app)...',
+      'Computing outcomes...',
+      'Updating learning stats...',
     ],
   },
   {
-    id: 'run-learning-update',
+    id: 'run-dynamic-learning-update',
     label: 'Learning Update',
-    description: 'Update signal performance and adjust weights',
+    description: 'Update signal accuracy + scoring weights + insights',
     steps: [
       'Analyzing signal performance...',
       'Adjusting scoring weights...',
@@ -71,40 +76,6 @@ const JOBS: JobDef[] = [
       'Discovering tickers...',
       'Re-scoring candidates...',
       'Updating watchlist...',
-    ],
-  },
-  // Dynamic orchestrator — auto-generates stock + linked option candidates.
-  {
-    id: 'run-dynamic-morning-picks',
-    label: 'Generate Dynamic Picks',
-    description: 'Stock candidates + linked paper option candidates (auto)',
-    steps: [
-      'Running morning scan...',
-      'Wrapping predictions as stock candidates...',
-      'Scoring deterministic signals...',
-      'Scanning real option chains for qualifying picks...',
-      'Saving everything to Supabase...',
-    ],
-  },
-  {
-    id: 'run-dynamic-eod-review',
-    label: 'Evaluate Results',
-    description: 'Evaluate open stock + option candidates against current prices',
-    steps: [
-      'Loading open stock + option candidates...',
-      'Fetching current prices (Twelve Data + MarketData.app)...',
-      'Computing outcomes...',
-      'Updating learning stats...',
-    ],
-  },
-  {
-    id: 'run-dynamic-learning-update',
-    label: 'Run Learning Update',
-    description: 'Update signal accuracy + scoring weights + insights',
-    steps: [
-      'Analyzing signal performance...',
-      'Adjusting scoring weights...',
-      'Generating insights...',
     ],
   },
 ];

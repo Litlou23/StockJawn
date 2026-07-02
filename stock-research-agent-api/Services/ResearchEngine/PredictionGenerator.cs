@@ -308,12 +308,14 @@ public class PredictionGenerator
         scoring = ScoringEngine.FinalizeWithRiskReward(scoring, priceCalc.RiskRewardRatio);
         confidence = scoring.Confidence;
 
-        // If R:R ratio is too low, downgrade to watch_only
-        if (priceCalc.RiskRewardRatio is double rr and < 1.5
+        // If R:R ratio is extremely poor, downgrade to watch_only.
+        // Threshold is 0.5 (not 1.5) — in learning mode we want to observe
+        // predictions with marginal R:R so the learning engine can calibrate.
+        if (priceCalc.RiskRewardRatio is double rr and < 0.5
             && (predType == "bullish" || predType == "bearish"))
         {
             predType = "watch_only";
-            priceCalc.Warnings.Add($"Downgraded to watch_only: R:R ratio {rr:F2} < 1.5 minimum");
+            priceCalc.Warnings.Add($"Downgraded to watch_only: R:R ratio {rr:F2} < 0.5 minimum");
         }
 
         // ── Step 5: Assemble prediction (scores from engine, text from AI) ──
@@ -732,8 +734,11 @@ public class PredictionGenerator
             result.PredictedPrice = Math.Round(ep + expectedMove * 0.6, 2);
             result.PredictedMovePercent = Math.Round((expectedMove * 0.6 / ep) * 100, 2);
 
+            // Use ATR-based target; only cap at resistance if raw target is far above it.
+            // Resistance from a 10-bar lookback is not a hard ceiling — stocks routinely
+            // break through short-term highs.
             var rawTarget = ep + expectedMove;
-            result.TargetPrice = Math.Round(Math.Min(rawTarget, resistance), 2);
+            result.TargetPrice = Math.Round(rawTarget, 2);
 
             var atrStop = ep - atr14;
             var supportStop = support - 0.25 * atr14;
@@ -748,8 +753,9 @@ public class PredictionGenerator
             result.PredictedPrice = Math.Round(ep - expectedMove * 0.6, 2);
             result.PredictedMovePercent = Math.Round((-expectedMove * 0.6 / ep) * 100, 2);
 
+            // Use ATR-based target; only cap at support if raw target is far below it.
             var rawTarget = ep - expectedMove;
-            result.TargetPrice = Math.Round(Math.Max(rawTarget, support), 2);
+            result.TargetPrice = Math.Round(rawTarget, 2);
 
             var atrStop = ep + atr14;
             var resistanceStop = resistance + 0.25 * atr14;
@@ -763,11 +769,13 @@ public class PredictionGenerator
         var riskDollar = Math.Abs(ep - result.StopPrice!.Value);
         result.RiskRewardRatio = riskDollar > 0 ? Math.Round(reward / riskDollar, 2) : 0;
 
-        if (result.RiskRewardRatio < 1.5)
-            result.Warnings.Add($"Poor risk/reward ratio: {result.RiskRewardRatio:F2} (minimum 1.5)");
+        if (result.RiskRewardRatio < 1.0)
+            result.Warnings.Add($"Poor risk/reward ratio: {result.RiskRewardRatio:F2} (below 1.0)");
 
-        if (predType == "bullish" && result.TargetPrice <= resistance * 0.99)
-            result.Warnings.Add("Target near resistance — upside may be capped");
+        if (predType == "bullish" && result.TargetPrice > resistance)
+            result.Warnings.Add($"Target ${result.TargetPrice:F2} is above recent resistance ${resistance:F2} — breakout needed");
+        else if (predType == "bearish" && result.TargetPrice < support)
+            result.Warnings.Add($"Target ${result.TargetPrice:F2} is below recent support ${support:F2} — breakdown needed");
 
         result.Method = atrPeriod >= 14 ? "atr14_full" : $"atr{atrPeriod}_partial";
         return result;
