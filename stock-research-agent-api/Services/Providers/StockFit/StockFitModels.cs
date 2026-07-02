@@ -34,10 +34,12 @@ public class StockFitRawNewsItem
     [JsonPropertyName("summary")] public string? Summary { get; set; }
     [JsonPropertyName("description")] public string? Description { get; set; }
     [JsonPropertyName("url")] public string? Url { get; set; }
+    [JsonPropertyName("link")] public string? Link { get; set; }
     [JsonPropertyName("article_url")] public string? ArticleUrl { get; set; }
     [JsonPropertyName("source")] public string? Source { get; set; }
     [JsonPropertyName("publisher")] public string? Publisher { get; set; }
     [JsonPropertyName("published_at")] public string? PublishedAt { get; set; }
+    [JsonPropertyName("publishedAt")] public string? PublishedAtCamel { get; set; }
     [JsonPropertyName("time_published")] public string? TimePublished { get; set; }
     [JsonPropertyName("sentiment")] public string? Sentiment { get; set; }
     [JsonPropertyName("sentiment_score")] public double? SentimentScore { get; set; }
@@ -341,7 +343,7 @@ internal static class StockFitJsonHelpers
 
             if (node is JsonObject obj)
             {
-                foreach (var key in new[] { "data", "results", "items", "articles", "filings", "events", "trades", "holdings" })
+                foreach (var key in new[] { "data", "results", "items", "articles", "news", "filings", "events", "trades", "holdings" })
                 {
                     if (obj[key] is JsonArray inner)
                         return inner.Deserialize<List<T>>(options) ?? [];

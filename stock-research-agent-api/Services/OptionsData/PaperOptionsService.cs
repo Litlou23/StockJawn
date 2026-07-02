@@ -52,14 +52,13 @@ public class PaperOptionsService
     {
         var recent = await _researchRepo.GetRecentPredictionsAsync(limit);
         // Eligible = open, bullish/bearish (no naked C/P on neutral), and confidence
-        // high enough that option premium isn't pure noise. Spec threshold: 30+.
-        // Anything lower is shown on /predictions but skipped from the paper-option
-        // selector so the user doesn't waste a scan on a 13-confidence pick.
+        // high enough that option premium isn't pure noise. Lowered from 30 to 15
+        // because current research runs produce modest confidence scores.
         return recent
             .Where(p => p.Status == "open"
                      && (p.PredictionType == PredictionType.bullish
                          || p.PredictionType == PredictionType.bearish)
-                     && p.ConfidenceScore >= 30)
+                     && p.ConfidenceScore >= 15)
             .ToList();
     }
 

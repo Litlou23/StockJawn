@@ -91,6 +91,7 @@ export default function ResultsPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [tab, setTab] = useState<'evaluated' | 'open' | 'all'>('all');
+  const [sortBy, setSortBy] = useState<'confidence_desc' | 'confidence_asc' | 'move_desc' | 'move_asc' | 'newest' | 'oldest' | 'ticker'>('confidence_desc');
 
   useEffect(() => {
     Promise.all([
@@ -127,7 +128,19 @@ export default function ResultsPage() {
   const evaluated = merged.filter((e) => e.outcome);
   const open = merged.filter((e) => !e.outcome && e.prediction.status === 'open');
 
-  const displayed = tab === 'evaluated' ? evaluated : tab === 'open' ? open : merged;
+  const preSortDisplayed = tab === 'evaluated' ? evaluated : tab === 'open' ? open : merged;
+  const displayed = [...preSortDisplayed].sort((a, b) => {
+    switch (sortBy) {
+      case 'confidence_desc': return b.prediction.confidenceScore - a.prediction.confidenceScore;
+      case 'confidence_asc':  return a.prediction.confidenceScore - b.prediction.confidenceScore;
+      case 'move_desc':       return (b.outcome?.percentMove ?? -Infinity) - (a.outcome?.percentMove ?? -Infinity);
+      case 'move_asc':        return (a.outcome?.percentMove ?? Infinity) - (b.outcome?.percentMove ?? Infinity);
+      case 'oldest':          return +new Date(a.prediction.createdAt) - +new Date(b.prediction.createdAt);
+      case 'ticker':          return a.prediction.ticker.localeCompare(b.prediction.ticker);
+      case 'newest':
+      default:                return +new Date(b.prediction.createdAt) - +new Date(a.prediction.createdAt);
+    }
+  });
 
   // Stats
   const totalEvaluated = evaluated.length;
@@ -164,17 +177,35 @@ export default function ResultsPage() {
               {isAiPowered && <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-400">AI-Powered</span>}
             </p>
           </div>
-          {/* Tab switcher */}
-          <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-            {(['all', 'open', 'evaluated'] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setTab(t)}
-                className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${tab === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+          {/* Tab switcher + sort */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+              {(['all', 'open', 'evaluated'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${tab === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+                >
+                  {t === 'all' ? 'All' : t === 'open' ? `Open (${open.length})` : `Evaluated (${totalEvaluated})`}
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 text-[11px] text-zinc-500">
+              Sort:
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500 focus:outline-none"
               >
-                {t === 'all' ? 'All' : t === 'open' ? `Open (${open.length})` : `Evaluated (${totalEvaluated})`}
-              </button>
-            ))}
+                <option value="confidence_desc">Confidence (high → low)</option>
+                <option value="confidence_asc">Confidence (low → high)</option>
+                <option value="move_desc">Move % (high → low)</option>
+                <option value="move_asc">Move % (low → high)</option>
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="ticker">Ticker (A → Z)</option>
+              </select>
+            </label>
           </div>
         </div>
 

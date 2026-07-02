@@ -147,6 +147,7 @@ export default function PaperOptionsPage() {
   const [selectedCandidateIndex, setSelectedCandidateIndex] = useState<number | null>(null);
 
   const [openCandidates, setOpenCandidates] = useState<PaperCandidate[]>([]);
+  const [openSort, setOpenSort] = useState<'score_desc' | 'score_asc' | 'newest' | 'oldest' | 'ticker'>('score_desc');
   const [recentOutcomes, setRecentOutcomes] = useState<PaperOutcome[]>([]);
   const [learningStats, setLearningStats] = useState<OptionLearningStat[]>([]);
   const [lastOutcome, setLastOutcome] = useState<PaperOutcome | null>(null);
@@ -523,22 +524,47 @@ export default function PaperOptionsPage() {
         <Section
           title="6. Open paper candidates"
           right={
-            openCandidates.length > 0 && (
-              <button
-                onClick={handleEvaluateAllOpen}
-                disabled={loading}
-                className="rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
-              >
-                Evaluate all open
-              </button>
-            )
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-[11px] text-zinc-500">
+                Sort:
+                <select
+                  value={openSort}
+                  onChange={(e) => setOpenSort(e.target.value as typeof openSort)}
+                  className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500 focus:outline-none"
+                >
+                  <option value="score_desc">Score (high → low)</option>
+                  <option value="score_asc">Score (low → high)</option>
+                  <option value="newest">Newest first</option>
+                  <option value="oldest">Oldest first</option>
+                  <option value="ticker">Ticker (A → Z)</option>
+                </select>
+              </label>
+              {openCandidates.length > 0 && (
+                <button
+                  onClick={handleEvaluateAllOpen}
+                  disabled={loading}
+                  className="rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-600 disabled:opacity-50"
+                >
+                  Evaluate all open
+                </button>
+              )}
+            </div>
           }
         >
           {openCandidates.length === 0 ? (
             <EmptyState>No open paper candidates. Save one above to get started.</EmptyState>
           ) : (
             <div className="space-y-2">
-              {openCandidates.map(c => (
+              {[...openCandidates].sort((a, b) => {
+                switch (openSort) {
+                  case 'score_desc': return b.contractScore - a.contractScore;
+                  case 'score_asc':  return a.contractScore - b.contractScore;
+                  case 'oldest':     return +new Date(a.createdAt ?? 0) - +new Date(b.createdAt ?? 0);
+                  case 'ticker':     return a.ticker.localeCompare(b.ticker);
+                  case 'newest':
+                  default:           return +new Date(b.createdAt ?? 0) - +new Date(a.createdAt ?? 0);
+                }
+              }).map(c => (
                 <OpenCandidateRow
                   key={c.id}
                   c={c}

@@ -343,14 +343,30 @@ function WatchlistCard({ item }: { item: WatchlistItemDto }) {
   );
 }
 
+type WatchlistSort = 'score_desc' | 'score_asc' | 'risk_asc' | 'risk_desc' | 'ticker';
+
+function sortWatchlist(items: WatchlistItemDto[], sortBy: WatchlistSort): WatchlistItemDto[] {
+  const copy = [...items];
+  switch (sortBy) {
+    case 'score_asc':  return copy.sort((a, b) => (a.totalScore ?? 0) - (b.totalScore ?? 0));
+    case 'risk_asc':   return copy.sort((a, b) => (a.riskScore ?? 999) - (b.riskScore ?? 999));
+    case 'risk_desc':  return copy.sort((a, b) => (b.riskScore ?? -1) - (a.riskScore ?? -1));
+    case 'ticker':     return copy.sort((a, b) => a.ticker.localeCompare(b.ticker));
+    case 'score_desc':
+    default:           return copy.sort((a, b) => (b.totalScore ?? 0) - (a.totalScore ?? 0));
+  }
+}
+
 function WatchlistSection({
   title,
   items,
   emptyText,
+  sortBy,
 }: {
   title: string;
   items: WatchlistItemDto[];
   emptyText: string;
+  sortBy: WatchlistSort;
 }) {
   return (
     <section>
@@ -359,11 +375,9 @@ function WatchlistSection({
       </h2>
       {items.length > 0 ? (
         <div className="flex flex-col gap-3">
-          {[...items]
-            .sort((a, b) => (b.totalScore ?? 0) - (a.totalScore ?? 0))
-            .map((item) => (
-              <WatchlistCard key={item.id} item={item} />
-            ))}
+          {sortWatchlist(items, sortBy).map((item) => (
+            <WatchlistCard key={item.id} item={item} />
+          ))}
         </div>
       ) : (
         <p className="text-sm text-zinc-600">{emptyText}</p>
@@ -409,6 +423,7 @@ export default function WatchlistPage() {
   const [changes, setChanges] = useState<ChangeLogDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<WatchlistSort>('score_desc');
 
   useEffect(() => {
     async function load() {
@@ -462,35 +477,55 @@ export default function WatchlistPage() {
   return (
     <AppShell>
       <div className="mx-auto max-w-3xl space-y-6 p-4">
-        <div>
-          <h1 className="text-lg font-bold text-zinc-100">Dynamic Watchlist</h1>
-          <p className="text-sm text-zinc-500">
-            {totalActive} active · {totalReview} needs review · {totalSwap} swap candidates · {totalArchived} archived
-          </p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h1 className="text-lg font-bold text-zinc-100">Dynamic Watchlist</h1>
+            <p className="text-sm text-zinc-500">
+              {totalActive} active · {totalReview} needs review · {totalSwap} swap candidates · {totalArchived} archived
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-[11px] text-zinc-500">
+            Sort:
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as WatchlistSort)}
+              className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500 focus:outline-none"
+            >
+              <option value="score_desc">Score (high → low)</option>
+              <option value="score_asc">Score (low → high)</option>
+              <option value="risk_asc">Risk (low → high)</option>
+              <option value="risk_desc">Risk (high → low)</option>
+              <option value="ticker">Ticker (A → Z)</option>
+            </select>
+          </label>
         </div>
 
         <WatchlistSection
           title="Active"
           items={watchlist.active.items}
           emptyText="No active watchlist items. Run a weekly research scan to populate."
+          sortBy={sortBy}
         />
 
         <WatchlistSection
           title="Review Needed"
           items={watchlist.reviewNeeded.items}
           emptyText="No items flagged for review."
+          sortBy={sortBy}
         />
 
         <WatchlistSection
           title="Swap Candidates"
           items={watchlist.swapCandidates.items}
           emptyText="No swap candidates."
+          sortBy={sortBy}
         />
 
         <WatchlistSection
           title="Archived"
           items={watchlist.archived.items}
           emptyText="No archived items."
+          sortBy={sortBy}
         />
 
         <ChangeHistory changes={changes} />

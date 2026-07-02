@@ -197,6 +197,15 @@ const PRESET_LABELS: Record<DatePreset, string> = {
 type CategoryTab = 'stock_picks' | 'long_term' | 'options' | 'scan_results';
 type FilterTab = 'all' | 'correct' | 'wrong' | 'pending';
 
+type SortKey = 'confidence_desc' | 'confidence_asc' | 'newest' | 'oldest' | 'ticker';
+const SORT_LABELS: Record<SortKey, string> = {
+  confidence_desc: 'Confidence (high → low)',
+  confidence_asc: 'Confidence (low → high)',
+  newest: 'Newest first',
+  oldest: 'Oldest first',
+  ticker: 'Ticker (A → Z)',
+};
+
 const CATEGORY_LABELS: Record<CategoryTab, string> = {
   stock_picks: 'Stock Picks',
   long_term: 'Long-Term',
@@ -276,6 +285,7 @@ export default function PredictionsPage() {
   const [datePreset, setDatePreset] = useState<DatePreset>('all');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
+  const [sortBy, setSortBy] = useState<SortKey>('confidence_desc');
 
   const fetchData = useCallback(async (preset: DatePreset, cFrom: string, cTo: string, cat: CategoryTab) => {
     if (cat === 'options') {
@@ -363,10 +373,21 @@ export default function PredictionsPage() {
   const items = data?.items ?? [];
   const stats = data?.stats ?? { total: 0, evaluated: 0, correct: 0, incorrect: 0, pending: 0, accuracy: 0 };
 
-  const filtered = tab === 'correct' ? items.filter((i) => i.wasCorrect === true)
+  const preSort = tab === 'correct' ? items.filter((i) => i.wasCorrect === true)
     : tab === 'wrong' ? items.filter((i) => i.wasCorrect === false)
     : tab === 'pending' ? items.filter((i) => !i.hasOutcome)
     : items;
+
+  const filtered = [...preSort].sort((a, b) => {
+    switch (sortBy) {
+      case 'confidence_desc': return b.prediction.confidenceScore - a.prediction.confidenceScore;
+      case 'confidence_asc':  return a.prediction.confidenceScore - b.prediction.confidenceScore;
+      case 'oldest':          return +new Date(a.prediction.createdAt) - +new Date(b.prediction.createdAt);
+      case 'ticker':          return a.prediction.ticker.localeCompare(b.prediction.ticker);
+      case 'newest':
+      default:                return +new Date(b.prediction.createdAt) - +new Date(a.prediction.createdAt);
+    }
+  });
 
   const rangeLabel = datePreset === 'all' ? 'all time'
     : datePreset === 'custom' ? `${customFrom}${customTo ? ` to ${customTo}` : ' to now'}`
@@ -527,21 +548,37 @@ export default function PredictionsPage() {
 
         {/* Verdict filter tabs — hidden for scan results and options */}
         {!isScanTab && category !== 'options' && (
-          <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 w-fit">
-            {([
-              ['all', `All (${stats.total})`],
-              ['correct', `Correct (${stats.correct})`],
-              ['wrong', `Wrong (${stats.incorrect})`],
-              ['pending', `Pending (${stats.pending})`],
-            ] as [FilterTab, string][]).map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${tab === key ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 w-fit">
+              {([
+                ['all', `All (${stats.total})`],
+                ['correct', `Correct (${stats.correct})`],
+                ['wrong', `Wrong (${stats.incorrect})`],
+                ['pending', `Pending (${stats.pending})`],
+              ] as [FilterTab, string][]).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setTab(key)}
+                  className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors ${tab === key ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Sort — orders by that confidence bar. */}
+            <label className="flex items-center gap-2 text-[11px] text-zinc-500">
+              Sort:
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortKey)}
+                className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500 focus:outline-none"
               >
-                {label}
-              </button>
-            ))}
+                {(Object.entries(SORT_LABELS) as [SortKey, string][]).map(([k, label]) => (
+                  <option key={k} value={k}>{label}</option>
+                ))}
+              </select>
+            </label>
           </div>
         )}
 

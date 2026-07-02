@@ -12,7 +12,7 @@ namespace StockResearchAgent.Api.Services.Providers.StockFit;
 /// Endpoint path templates below are STOCKFIT_* configurable so we can
 /// steer around future StockFit changes without a redeploy. Defaults match
 /// the confirmed docs (2026-06):
-///   STOCKFIT_PATH_NEWS     (default "/news?symbol={ticker}")
+///   STOCKFIT_PATH_NEWS     (default "/lookup/news?symbol={ticker}")
 ///   STOCKFIT_PATH_FILINGS  (default "/filings?symbol={ticker}")
 ///   STOCKFIT_PATH_EARNINGS (default "/earnings/calendar?symbols={ticker}")
 ///   STOCKFIT_PATH_METRICS  (default "/financials/key-metrics?symbol={ticker}")
@@ -49,7 +49,7 @@ public sealed class StockFitProvider
     public async Task<StockFitResult<List<NormalizedNewsArticle>>> GetNewsAsync(
         string ticker, int limit = 20, CancellationToken ct = default)
     {
-        var path = ResolvePath("STOCKFIT_PATH_NEWS", "/news?symbol={ticker}", ticker);
+        var path = ResolvePath("STOCKFIT_PATH_NEWS", "/lookup/news?symbol={ticker}", ticker);
         var resp = await _client.GetAsync(path, new Dictionary<string, string> { ["limit"] = limit.ToString() }, ct);
 
         if (!IsSuccess(resp, out var warning))
@@ -64,9 +64,9 @@ public sealed class StockFitProvider
             Ticker = (r.Symbol ?? r.Ticker ?? ticker).ToUpperInvariant(),
             Title = r.Title ?? r.Headline ?? "",
             Summary = r.Summary ?? r.Description,
-            ArticleUrl = r.Url ?? r.ArticleUrl,
+            ArticleUrl = r.Link ?? r.Url ?? r.ArticleUrl,
             Publisher = r.Source ?? r.Publisher,
-            PublishedAt = StockFitJsonHelpers.ParseDate(r.PublishedAt ?? r.TimePublished),
+            PublishedAt = StockFitJsonHelpers.ParseDate(r.PublishedAt ?? r.PublishedAtCamel ?? r.TimePublished),
             Sentiment = NormalizeSentiment(r.Sentiment, r.SentimentScore),
             SentimentScore = r.SentimentScore,
             RelevanceScore = r.RelevanceScore,

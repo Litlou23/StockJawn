@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Providers.StockFit;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
@@ -28,6 +29,7 @@ public class PredictionGenerator
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
     private readonly StockFitProvider _stockFit;
+    private readonly FinnhubProvider _finnhub;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
 
@@ -35,12 +37,14 @@ public class PredictionGenerator
         MarketDataService marketData,
         ResearchRepository repo,
         StockFitProvider stockFit,
+        FinnhubProvider finnhub,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
         _marketData = marketData;
         _repo = repo;
         _stockFit = stockFit;
+        _finnhub = finnhub;
         _logger = logger;
 
         var apiKey = configuration["OPENAI_API_KEY"];
@@ -138,6 +142,53 @@ public class PredictionGenerator
             warnings.Add("stockfit_not_configured");
         }
 
+        // ── Finnhub — company-specific news (last 3 days) ──
+        // Complements StockFit with real-time company news from Finnhub.
+        // Returns empty list if FINNHUB_API_KEY is not configured.
+        try
+        {
+            var finnhubNews = await _finnhub.GetCompanyNewsAsync(ticker, daysBack: 3);
+            if (finnhubNews.Count > 0)
+            {
+                _logger.LogInformation("[prediction] Finnhub returned {Count} news items for {Ticker}", finnhubNews.Count, ticker);
+                foreach (var article in finnhubNews.Take(10))
+                {
+                    // Skip if we already have a news item with the same title (dedup vs StockFit)
+                    if (newsContext.Any(n => string.Equals(n.Title, article.Headline, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
+                    var hoursAgo = (DateTimeOffset.UtcNow - article.Datetime).TotalHours;
+                    var importance = hoursAgo switch
+                    {
+                        <= 6 => 65.0,
+                        <= 24 => 50.0,
+                        <= 48 => 35.0,
+                        _ => 25.0,
+                    };
+
+                    newsContext.Add(new MarketSnapshotNews
+                    {
+                        Title = article.Headline,
+                        SourceName = article.Source ?? "finnhub",
+                        Url = article.Url ?? "",
+                        PublishedAt = article.Datetime.ToString("o"),
+                        CatalystType = "news",
+                        Sentiment = null, // Finnhub doesn't provide sentiment — let scoring handle it
+                        ImportanceScore = importance,
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Finnhub news fetch failed for {Ticker}", ticker);
+            warnings.Add($"finnhub_news_exception:{ex.Message}");
+        }
+
+        // RSS feeds are used for universe discovery only (ticker selection),
+        // not for prediction scoring. News for predictions comes from
+        // Finnhub (company news) and StockFit (SEC filings/earnings).
+
         var availability = new MarketSnapshotAvailability
         {
             MarketDataAvailable = quote is not null,
@@ -214,7 +265,12 @@ public class PredictionGenerator
         if (snapshot.DataAvailability.MarketDataAvailable) dataSources.Add("twelve-data");
         else missingWarnings.Add("Market data unavailable — prediction based on news/catalysts only");
 
-        if (snapshot.DataAvailability.NewsAvailable) dataSources.Add("rss-news");
+        if (snapshot.DataAvailability.NewsAvailable)
+        {
+            var sources = snapshot.NewsContext.Select(n => n.SourceName).Distinct().ToList();
+            if (sources.Any(s => s.Contains("finnhub", StringComparison.OrdinalIgnoreCase))) dataSources.Add("finnhub-news");
+            if (sources.Any(s => s.Contains("stockfit", StringComparison.OrdinalIgnoreCase) || s.Contains("SEC", StringComparison.OrdinalIgnoreCase))) dataSources.Add("stockfit-news");
+        }
         else missingWarnings.Add("No recent news/catalysts found");
 
         if (!snapshot.DataAvailability.OptionsChainAvailable)
