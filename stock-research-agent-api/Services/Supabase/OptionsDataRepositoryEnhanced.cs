@@ -51,6 +51,13 @@ public partial class OptionsDataRepository
             data_delay_label = c.DataDelayLabel,
             rank = c.Rank,
             warnings_json = JsonSerializer.SerializeToNode(c.Warnings),
+            candidate_mode = c.CandidateMode.ToString(),
+            quality_tier = c.QualityTier.ToString(),
+            is_actionable = c.IsActionable,
+            threshold_policy_version = c.ThresholdPolicyVersion,
+            inclusion_reason = c.InclusionReason,
+            exclusion_reason = c.ExclusionReason,
+            score_percentile_in_run = c.ScorePercentileInRun,
         };
 
         var rows = await _db.InsertAsync("paper_option_candidates", new[] { row });
@@ -81,6 +88,9 @@ public partial class OptionsDataRepository
             order: "created_at.desc", limit: limit);
         return rows.Select(MapPaperCandidateEnhanced).ToList();
     }
+
+    public Task<int> CountPaperCandidatesEnhancedAsync(string? filter = null)
+        => _db.CountAsync("paper_option_candidates", filter);
 
     // -----------------------------------------------------------------------
     // PaperOutcomeEnhanced — save / read
@@ -129,6 +139,9 @@ public partial class OptionsDataRepository
             order: "evaluation_time.desc", limit: limit);
         return rows.Select(MapPaperOutcomeEnhanced).ToList();
     }
+
+    public Task<int> CountOutcomesEnhancedAsync(string? filter = null)
+        => _db.CountAsync("paper_option_outcomes", filter);
 
     // -----------------------------------------------------------------------
     // option_learning_stats — upsert with running averages
@@ -232,6 +245,15 @@ public partial class OptionsDataRepository
         DataDelayLabel = r["data_delay_label"]?.ToString(),
         Rank = GetInt(r, "rank"),
         Warnings = GetWarnings(r, "warnings_json"),
+        CandidateMode = Enum.TryParse<CandidateMode>(r["candidate_mode"]?.ToString(), out var cm)
+            ? cm : CandidateMode.learning,
+        QualityTier = Enum.TryParse<QualityTier>(r["quality_tier"]?.ToString(), out var qt)
+            ? qt : QualityTier.very_weak,
+        IsActionable = GetBool(r, "is_actionable"),
+        ThresholdPolicyVersion = r["threshold_policy_version"]?.ToString() ?? "learning_options_v1",
+        InclusionReason = r["inclusion_reason"]?.ToString() ?? "",
+        ExclusionReason = r["exclusion_reason"]?.ToString(),
+        ScorePercentileInRun = GetDouble(r, "score_percentile_in_run"),
     };
 
     private static PaperOutcomeEnhanced MapPaperOutcomeEnhanced(JsonObject r) => new()

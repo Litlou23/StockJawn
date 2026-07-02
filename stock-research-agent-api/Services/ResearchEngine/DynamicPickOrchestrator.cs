@@ -22,14 +22,21 @@ namespace StockResearchAgent.Api.Services.ResearchEngine;
 /// </summary>
 public class DynamicPickOrchestrator
 {
-    // Option-qualification thresholds — lowered to build data faster.
-    private const int MinConfidenceForOptions = 40;
-    private const int MaxRiskForOptions = 85;
+    private const int LearningMinConfidenceForOptions = 15;
+    private const int LearningMaxRiskForOptions = 90;
+    private const int ActionableShadowMinConfidence = 40;
+    private const int ActionableShadowMaxRisk = 75;
+    private const int LiveEligibleMinConfidence = 60;
+    private const int LiveEligibleMaxRisk = 65;
+    private const int MaxOptionCandidatesPerRun = 25;
+    private const int MaxOptionCandidatesPerTickerPerRun = 1;
+    private const string ThresholdPolicyVersion = "learning_options_v1";
 
     private readonly DailyResearchRunService _dailyService;
     private readonly ResearchRepository _researchRepo;
     private readonly PaperStockCandidateRepository _stockRepo;
     private readonly OptionsDataRepository _optionsRepo;
+    private readonly CandidateGenerationAuditRepository _auditRepo;
     private readonly PaperOptionsService _paperOptions;
     private readonly MarketDataOptionsProvider _optionsProvider;
     private readonly MarketDataService _marketData;
@@ -41,6 +48,7 @@ public class DynamicPickOrchestrator
         ResearchRepository researchRepo,
         PaperStockCandidateRepository stockRepo,
         OptionsDataRepository optionsRepo,
+        CandidateGenerationAuditRepository auditRepo,
         PaperOptionsService paperOptions,
         MarketDataOptionsProvider optionsProvider,
         MarketDataService marketData,
@@ -51,6 +59,7 @@ public class DynamicPickOrchestrator
         _researchRepo = researchRepo;
         _stockRepo = stockRepo;
         _optionsRepo = optionsRepo;
+        _auditRepo = auditRepo;
         _paperOptions = paperOptions;
         _optionsProvider = optionsProvider;
         _marketData = marketData;
@@ -80,57 +89,160 @@ public class DynamicPickOrchestrator
             };
         }
 
-        // 2. Load the just-saved predictions for this run
-        // (Filter in memory since GetRecentPredictionsAsync doesn't take run_id.)
-        var recent = await _researchRepo.GetRecentPredictionsAsync(limit: 100);
-        var runPredictions = recent.Where(p => p.RunId == scan.RunId).ToList();
+        // 2. Load the just-saved predictions for this run.
+        var runPredictions = await _researchRepo.GetPredictionsByRunAsync(scan.RunId);
 
         _logger.LogInformation("[dynamic] Wrapping {Count} predictions as paper stock candidates", runPredictions.Count);
 
-        // 3. Wrap each prediction as a paper_stock_candidate
-        var savedStockCandidates = new List<PaperStockCandidate>();
+        var directionalRankings = BuildDirectionalRankings(runPredictions);
+        var stockBuilds = new List<StockCandidateBuild>();
         foreach (var pred in runPredictions)
         {
-            var candidate = await BuildStockCandidateFromPredictionAsync(pred, scan.RunId);
+            directionalRankings.TryGetValue(pred.Id, out var ranking);
+            var candidate = await BuildStockCandidateFromPredictionAsync(
+                pred,
+                scan.RunId,
+                ranking?.Percentile ?? 0,
+                ranking?.IsTopQuartile ?? false);
             var saved = await _stockRepo.SaveCandidateAsync(candidate);
-            if (saved is not null) savedStockCandidates.Add(saved);
+            stockBuilds.Add(new StockCandidateBuild(pred, candidate, saved, ranking));
         }
 
-        // 4. For each qualifying candidate, generate linked option candidates
-        var qualifying = savedStockCandidates.Where(c => c.QualifiesForOptions).ToList();
-        var optionsGenerated = 0;
+        // 4. Option generation in learning mode with per-run and per-ticker caps.
+        var optionAttempts = stockBuilds
+            .Where(b => b.SavedCandidate is not null && b.SavedCandidate.QualifiesForOptions)
+            .OrderByDescending(b => b.SavedCandidate!.ScorePercentileInRun)
+            .ThenByDescending(b => b.Prediction.ConfidenceScore)
+            .ThenBy(b => b.Prediction.RiskScore)
+            .ThenByDescending(b => b.SavedCandidate!.DataAvailability == "real")
+            .ToList();
 
-        foreach (var stock in qualifying)
+        var selectedForOptions = new List<StockCandidateBuild>();
+        var tickerCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var build in optionAttempts)
         {
-            try
-            {
-                var resp = await _paperOptions.GenerateCandidatesAsync(new GenerateCandidatesRequest
-                {
-                    PredictionId = stock.PredictionId ?? "",
-                    DurationPreference = ChooseDuration(stock),
-                    AutoSave = true,
-                    PaperStockCandidateId = stock.Id,
-                });
-
-                if (resp is not null) optionsGenerated += resp.Candidates.Count;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[dynamic] Option generation failed for {Ticker}", stock.Ticker);
-                errors.Add($"option-gen {stock.Ticker}: {ex.Message}");
-            }
+            if (selectedForOptions.Count >= MaxOptionCandidatesPerRun) break;
+            var ticker = build.SavedCandidate!.Ticker;
+            tickerCounts.TryGetValue(ticker, out var currentPerTicker);
+            if (currentPerTicker >= MaxOptionCandidatesPerTickerPerRun) continue;
+            selectedForOptions.Add(build);
+            tickerCounts[ticker] = currentPerTicker + 1;
         }
 
+        var selectedIds = selectedForOptions
+            .Select(b => b.Prediction.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var optionsGenerated = 0;
+        var blockedOptionCandidates = 0;
+        var auditRows = new List<CandidateGenerationAuditEntry>();
+
+        foreach (var build in stockBuilds)
+        {
+            var savedStock = build.SavedCandidate;
+            var optionCreated = false;
+            var paperOptionCandidateId = (string?)null;
+            var optionBlockReason = savedStock?.ExclusionReason;
+            var optionChainAvailable = false;
+            var marketDataAvailable = savedStock is not null && savedStock.EntryPrice is > 0;
+
+            if (savedStock is not null && savedStock.QualifiesForOptions)
+            {
+                if (!selectedIds.Contains(build.Prediction.Id))
+                {
+                    optionBlockReason = "max_candidates_reached";
+                    blockedOptionCandidates++;
+                }
+                else
+                {
+                    try
+                    {
+                        var resp = await _paperOptions.GenerateCandidatesAsync(new GenerateCandidatesRequest
+                        {
+                            PredictionId = savedStock.PredictionId ?? "",
+                            DurationPreference = ChooseDuration(savedStock),
+                            AutoSave = true,
+                            PaperStockCandidateId = savedStock.Id,
+                            CandidateMode = savedStock.CandidateMode,
+                            QualityTier = savedStock.QualityTier,
+                            IsActionable = savedStock.IsActionable,
+                            ThresholdPolicyVersion = savedStock.ThresholdPolicyVersion,
+                            InclusionReason = savedStock.InclusionReason,
+                            ExclusionReason = savedStock.ExclusionReason,
+                            ScorePercentileInRun = savedStock.ScorePercentileInRun,
+                        });
+
+                        optionChainAvailable = resp?.OptionChainAvailable == true;
+                        marketDataAvailable = resp?.MarketDataAvailable == true || marketDataAvailable;
+
+                        if (resp?.SavedCandidate is not null)
+                        {
+                            optionCreated = true;
+                            paperOptionCandidateId = resp.SavedCandidate.Id;
+                            optionsGenerated++;
+                            optionBlockReason = null;
+                        }
+                        else
+                        {
+                            optionBlockReason = resp?.BlockReason ?? "unknown_error";
+                            blockedOptionCandidates++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[dynamic] Option generation failed for {Ticker}", savedStock.Ticker);
+                        errors.Add($"option-gen {savedStock.Ticker}: {ex.Message}");
+                        optionBlockReason = "unknown_error";
+                        blockedOptionCandidates++;
+                    }
+                }
+            }
+            else if (savedStock is not null)
+            {
+                optionBlockReason = savedStock.ExclusionReason ?? "confidence_below_learning_threshold";
+            }
+
+            auditRows.Add(new CandidateGenerationAuditEntry
+            {
+                RunId = build.Prediction.RunId,
+                Ticker = build.Prediction.Ticker,
+                PredictionCandidateId = build.Prediction.Id,
+                PaperStockCandidateId = savedStock?.Id,
+                PaperOptionCandidateId = paperOptionCandidateId,
+                PredictionType = build.Prediction.PredictionType.ToString(),
+                ConfidenceScore = build.Prediction.ConfidenceScore,
+                RiskScore = build.Prediction.RiskScore,
+                ScorePercentileInRun = build.Ranking?.Percentile ?? 0,
+                StockCandidateCreated = savedStock is not null,
+                OptionCandidateCreated = optionCreated,
+                CandidateMode = savedStock?.CandidateMode ?? DetermineCandidateMode(build.Prediction),
+                QualityTier = savedStock?.QualityTier ?? DetermineQualityTier(build.Prediction.ConfidenceScore),
+                OptionBlockReason = optionBlockReason,
+                MarketDataAvailable = marketDataAvailable,
+                OptionChainAvailable = optionChainAvailable,
+                ThresholdPolicyVersion = ThresholdPolicyVersion,
+            });
+        }
+
+        foreach (var audit in auditRows)
+            await _auditRepo.SaveAsync(audit);
+
+        var savedStockCandidates = stockBuilds
+            .Where(b => b.SavedCandidate is not null)
+            .Select(b => b.SavedCandidate!)
+            .ToList();
+
+        var optionEligible = savedStockCandidates.Count(c => c.QualifiesForOptions);
         var report = $"Generated {savedStockCandidates.Count} paper stock candidates from {runPredictions.Count} predictions. " +
-                     $"{qualifying.Count} qualified for options (conf>={MinConfidenceForOptions}, risk<={MaxRiskForOptions}). " +
-                     $"Saved {optionsGenerated} paper option candidates.";
+                     $"{optionEligible} were learning-eligible for options. " +
+                     $"Saved {optionsGenerated} paper option candidates and blocked {blockedOptionCandidates}.";
 
         return new DynamicMorningResult
         {
             RunId = scan.RunId,
             PredictionsGenerated = scan.PredictionsGenerated,
             StockCandidatesGenerated = savedStockCandidates.Count,
-            StockCandidatesQualifiedForOptions = qualifying.Count,
+            StockCandidatesQualifiedForOptions = optionEligible,
             OptionCandidatesGenerated = optionsGenerated,
             Report = report,
             Errors = errors,
@@ -226,19 +338,74 @@ public class DynamicPickOrchestrator
 
     public async Task<DynamicDashboardSummary> GetDashboardSummaryAsync()
     {
-        var stockCandidates = await _stockRepo.GetRecentCandidatesAsync(100);
-        var optionCandidates = await _optionsRepo.GetAllPaperCandidatesEnhancedAsync(100);
-        var optionStats = await _optionsRepo.GetAllOptionLearningStatsAsync();
-        var stockStats = await _stockRepo.GetAllLearningStatsAsync();
-        var stockOutcomes = await _stockRepo.GetRecentOutcomesAsync(100);
-        var optionOutcomes = await _optionsRepo.GetRecentOutcomesEnhancedAsync(100);
+        var todayStart = DateTimeOffset.UtcNow;
+        todayStart = new DateTimeOffset(todayStart.Year, todayStart.Month, todayStart.Day, 0, 0, 0, TimeSpan.Zero);
+        var tomorrowStart = todayStart.AddDays(1);
+        var last7DaysStart = todayStart.AddDays(-6);
 
-        var today = DateTimeOffset.UtcNow.Date;
+        var createdTodayFilter = BuildUtcRangeFilter("created_at", todayStart, tomorrowStart);
+        var evaluatedTodayFilter = BuildUtcRangeFilter("evaluation_time", todayStart, tomorrowStart);
+        var evaluatedLast7DaysFilter = BuildUtcRangeFilter("evaluation_time", last7DaysStart, tomorrowStart);
 
-        var stockToday = stockCandidates.Count(c => c.CreatedAt.UtcDateTime.Date == today);
-        var optionToday = optionCandidates.Count(c => c.CreatedAt.UtcDateTime.Date == today);
-        var evaluatedToday = stockOutcomes.Count(o => o.EvaluationTime.UtcDateTime.Date == today)
-                           + optionOutcomes.Count(o => o.EvaluationTime.UtcDateTime.Date == today);
+        var stockTodayTask = _stockRepo.CountCandidatesAsync(createdTodayFilter);
+        var optionTodayTask = _optionsRepo.CountPaperCandidatesEnhancedAsync(createdTodayFilter);
+        var openStockTask = _stockRepo.CountCandidatesAsync("status=eq.open");
+        var openOptionTask = _optionsRepo.CountPaperCandidatesEnhancedAsync("status=eq.open");
+        var stockEvaluatedTodayTask = _stockRepo.CountOutcomesAsync(evaluatedTodayFilter);
+        var optionEvaluatedTodayTask = _optionsRepo.CountOutcomesEnhancedAsync(evaluatedTodayFilter);
+        var stockOutcomesTotalTask = _stockRepo.CountOutcomesAsync();
+        var optionOutcomesTotalTask = _optionsRepo.CountOutcomesEnhancedAsync();
+        var stockEvaluatedLast7DaysTask = _stockRepo.CountOutcomesAsync(evaluatedLast7DaysFilter);
+        var optionEvaluatedLast7DaysTask = _optionsRepo.CountOutcomesEnhancedAsync(evaluatedLast7DaysFilter);
+        var totalStockCandidatesTask = _stockRepo.CountCandidatesAsync();
+        var totalOptionCandidatesTask = _optionsRepo.CountPaperCandidatesEnhancedAsync();
+        var optionStatsTask = _optionsRepo.GetAllOptionLearningStatsAsync();
+        var stockStatsTask = _stockRepo.GetAllLearningStatsAsync();
+        var latestMorningRunTask = _researchRepo.GetLatestResearchRunAsync(ResearchRunType.morning_scan.ToString());
+
+        await Task.WhenAll(
+            stockTodayTask,
+            optionTodayTask,
+            openStockTask,
+            openOptionTask,
+            stockEvaluatedTodayTask,
+            optionEvaluatedTodayTask,
+            stockOutcomesTotalTask,
+            optionOutcomesTotalTask,
+            stockEvaluatedLast7DaysTask,
+            optionEvaluatedLast7DaysTask,
+            totalStockCandidatesTask,
+            totalOptionCandidatesTask,
+            optionStatsTask,
+            stockStatsTask,
+            latestMorningRunTask);
+
+        var stockToday = stockTodayTask.Result;
+        var optionToday = optionTodayTask.Result;
+        var evaluatedToday = stockEvaluatedTodayTask.Result + optionEvaluatedTodayTask.Result;
+        var optionStats = optionStatsTask.Result;
+        var stockStats = stockStatsTask.Result;
+        var latestMorningRun = latestMorningRunTask.Result;
+
+        var latestRunPredictions = latestMorningRun is not null
+            ? await _researchRepo.GetPredictionsByRunAsync(latestMorningRun.Id)
+            : [];
+        var latestRunStockCandidates = latestMorningRun is not null
+            ? await _stockRepo.GetCandidatesByRunAsync(latestMorningRun.Id)
+            : [];
+        var latestRunAudits = latestMorningRun is not null
+            ? await _auditRepo.GetByRunAsync(latestMorningRun.Id)
+            : [];
+        var latestRunOptionCreated = latestRunAudits.Count(a => a.OptionCandidateCreated);
+        var latestRunBlockedOptions = latestRunAudits.Count(a => !a.OptionCandidateCreated && !string.IsNullOrWhiteSpace(a.OptionBlockReason));
+        var topBlockReason = latestRunAudits
+            .Where(a => !string.IsNullOrWhiteSpace(a.OptionBlockReason))
+            .GroupBy(a => a.OptionBlockReason!)
+            .OrderByDescending(g => g.Count())
+            .Select(g => new BlockReasonCount(g.Key, g.Count()))
+            .ToList();
+        var blockBreakdown = topBlockReason;
+        var latestRunOptionEligible = latestRunStockCandidates.Count(c => c.QualifiesForOptions);
 
         // Best/worst signals from option_learning_stats (need >= 3 samples)
         var ranked = optionStats
@@ -262,27 +429,79 @@ public class DynamicPickOrchestrator
         if (best is not null)
             insight = $"{best.StatType}:{best.StatKey} winning {best.WinRate * 100:F0}% over {best.TotalCandidates}";
 
+        var recentStockCandidates = await _stockRepo.GetRecentCandidatesAsync(500);
+        var recentStockOutcomes = await _stockRepo.GetRecentOutcomesAsync(500);
+        var qualityTierPerformance = BuildQualityTierPerformance(recentStockCandidates, recentStockOutcomes);
+        var confidenceCalibration = BuildConfidenceCalibration(recentStockCandidates, recentStockOutcomes);
+
+        var totalCandidates = totalStockCandidatesTask.Result + totalOptionCandidatesTask.Result;
+        var totalOutcomes = stockOutcomesTotalTask.Result + optionOutcomesTotalTask.Result;
+        var outcomeCoverageRate = totalCandidates > 0
+            ? Math.Round(100.0 * totalOutcomes / totalCandidates, 1)
+            : 0;
+
+        _logger.LogInformation(
+            "[dynamic-summary] stockToday={StockToday} optionToday={OptionToday} openStock={OpenStock} openOption={OpenOption} evaluatedToday={EvaluatedToday}",
+            stockToday,
+            optionToday,
+            openStockTask.Result,
+            openOptionTask.Result,
+            evaluatedToday);
+
         return new DynamicDashboardSummary
         {
             StockPicksToday = stockToday,
             OptionPicksToday = optionToday,
-            OpenStockCandidates = stockCandidates.Count(c => c.Status == PaperStockStatus.open),
-            OpenOptionCandidates = optionCandidates.Count(c => c.Status == PaperCandidateStatus.open),
+            OpenStockCandidates = openStockTask.Result,
+            OpenOptionCandidates = openOptionTask.Result,
             EvaluatedToday = evaluatedToday,
             BestSignalKey = best is null ? null : $"{best.StatType}:{best.StatKey}",
             BestSignalAccuracy = best?.WinRate ?? 0,
             WorstSignalKey = worst is null || ReferenceEquals(worst, best) ? null : $"{worst.StatType}:{worst.StatKey}",
             WorstSignalAccuracy = worst?.WinRate ?? 0,
             InsightOfTheDay = insight,
+            LatestRunStartedAt = latestMorningRun?.StartedAt,
+            LatestRunId = latestMorningRun?.Id,
+            LatestRunPredictionCandidatesGenerated = latestRunPredictions.Count,
+            LatestRunPaperStockCandidatesCreated = latestRunStockCandidates.Count,
+            LatestRunPaperOptionCandidatesCreated = latestRunOptionCreated,
+            LatestRunBlockedOptionCandidates = latestRunBlockedOptions,
+            LatestRunTopOptionBlockReason = blockBreakdown.FirstOrDefault()?.Reason,
+            TotalStockOutcomes = stockOutcomesTotalTask.Result,
+            TotalOptionOutcomes = optionOutcomesTotalTask.Result,
+            StockOutcomesAddedToday = stockEvaluatedTodayTask.Result,
+            OptionOutcomesAddedToday = optionEvaluatedTodayTask.Result,
+            StockOutcomesAddedLast7Days = stockEvaluatedLast7DaysTask.Result,
+            OptionOutcomesAddedLast7Days = optionEvaluatedLast7DaysTask.Result,
+            CandidatesAwaitingEodEvaluation = openStockTask.Result + openOptionTask.Result,
+            OutcomeCoverageRate = outcomeCoverageRate,
+            Funnel = new FunnelSummary
+            {
+                PredictionCandidates = latestRunPredictions.Count,
+                StockCandidates = latestRunStockCandidates.Count,
+                OptionEligible = latestRunOptionEligible,
+                OptionCreated = latestRunOptionCreated,
+                Evaluated = latestRunStockCandidates.Count(c => c.Status == PaperStockStatus.evaluated),
+                LearningStatsUpdated = stockStats.Count + optionStats.Count,
+            },
+            BlockReasonBreakdown = blockBreakdown,
+            QualityTierPerformance = qualityTierPerformance,
+            ConfidenceCalibration = confidenceCalibration,
         };
     }
+
+    private static string BuildUtcRangeFilter(string column, DateTimeOffset startInclusive, DateTimeOffset endExclusive)
+        => $"{column}=gte.{FormatUtc(startInclusive)}&{column}=lt.{FormatUtc(endExclusive)}";
+
+    private static string FormatUtc(DateTimeOffset value)
+        => value.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
     // -----------------------------------------------------------------------
     // Helpers: build a paper stock candidate from a prediction
     // -----------------------------------------------------------------------
 
     private async Task<PaperStockCandidate> BuildStockCandidateFromPredictionAsync(
-        PredictionCandidate pred, string runId)
+        PredictionCandidate pred, string runId, double percentileInRun, bool isTopQuartileDirectional)
     {
         var warnings = new List<string>(pred.MissingDataWarnings);
 
@@ -352,11 +571,14 @@ public class DynamicPickOrchestrator
             _ => StockTimeframe.one_day,
         };
 
-        var qualifies = pred.ConfidenceScore >= MinConfidenceForOptions
-                     && pred.RiskScore <= MaxRiskForOptions
-                     && (pred.PredictionType == PredictionType.bullish || pred.PredictionType == PredictionType.bearish)
+        var candidateMode = DetermineCandidateMode(pred);
+        var qualityTier = DetermineQualityTier(pred.ConfidenceScore);
+        var isActionable = candidateMode != CandidateMode.learning;
+        var qualifies = PredictionCategoryHelper.IsDirectional(pred.PredictionType)
                      && _optionsProvider.IsConfigured
-                     && entry is double and > 0;
+                     && entry is double and > 0
+                     && pred.RiskScore <= LearningMaxRiskForOptions
+                     && (pred.ConfidenceScore >= LearningMinConfidenceForOptions || isTopQuartileDirectional);
 
         var status = (entry is null or 0)
             ? PaperStockStatus.unavailable
@@ -364,11 +586,18 @@ public class DynamicPickOrchestrator
                 ? PaperStockStatus.watch_only
                 : PaperStockStatus.open;
 
+        var exclusionReason = DetermineOptionBlockReason(
+            pred,
+            hasMarketData: entry is > 0,
+            isTopQuartileDirectional: isTopQuartileDirectional,
+            optionsProviderConfigured: _optionsProvider.IsConfigured);
+
         var reason = $"Prediction conf={pred.ConfidenceScore}, risk={pred.RiskScore}. " +
                      $"Deterministic total {total} (catalyst={catalystScore}, trend={trendScore}, " +
                      $"volume={volumeScore}, market={marketContextScore}, histAcc={histAcc}, " +
-                     $"missingPenalty={missingPenalty}). " +
-                     $"{(qualifies ? "Qualifies" : "Does not qualify")} for options.";
+                     $"missingPenalty={missingPenalty}). Mode={candidateMode}, tier={qualityTier}, " +
+                     $"run percentile={percentileInRun:F1}. " +
+                     $"{(qualifies ? "Qualifies" : "Does not qualify")} for learning-mode options.";
 
         return new PaperStockCandidate
         {
@@ -395,6 +624,15 @@ public class DynamicPickOrchestrator
             SelectionReason = reason,
             Warnings = warnings,
             DataAvailability = dataAvailability,
+            CandidateMode = candidateMode,
+            QualityTier = qualityTier,
+            IsActionable = isActionable,
+            ThresholdPolicyVersion = ThresholdPolicyVersion,
+            InclusionReason = qualifies
+                ? $"learning-mode eligible: conf={pred.ConfidenceScore}, risk={pred.RiskScore}, percentile={percentileInRun:F1}"
+                : $"paper stock candidate retained for evaluation; option path blocked by {exclusionReason ?? "policy"}",
+            ExclusionReason = qualifies ? null : exclusionReason,
+            ScorePercentileInRun = percentileInRun,
             Status = status,
             QualifiesForOptions = qualifies,
         };
@@ -445,6 +683,146 @@ public class DynamicPickOrchestrator
         return null;
     }
 
+    private static Dictionary<string, DirectionalRanking> BuildDirectionalRankings(List<PredictionCandidate> runPredictions)
+    {
+        var directional = runPredictions
+            .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType))
+            .OrderByDescending(p => p.ConfidenceScore)
+            .ThenBy(p => p.RiskScore)
+            .ThenBy(p => p.Ticker)
+            .ToList();
+
+        var topQuartileCount = directional.Count == 0
+            ? 0
+            : Math.Max(1, (int)Math.Ceiling(directional.Count * 0.25));
+
+        var map = new Dictionary<string, DirectionalRanking>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < directional.Count; i++)
+        {
+            var percentile = directional.Count == 1
+                ? 100
+                : Math.Round(100.0 * (directional.Count - 1 - i) / (directional.Count - 1), 1);
+            map[directional[i].Id] = new DirectionalRanking(percentile, i < topQuartileCount);
+        }
+
+        return map;
+    }
+
+    private static CandidateMode DetermineCandidateMode(PredictionCandidate pred)
+    {
+        if (PredictionCategoryHelper.IsDirectional(pred.PredictionType)
+            && pred.ConfidenceScore >= LiveEligibleMinConfidence
+            && pred.RiskScore <= LiveEligibleMaxRisk)
+            return CandidateMode.live_eligible;
+
+        if (PredictionCategoryHelper.IsDirectional(pred.PredictionType)
+            && pred.ConfidenceScore >= ActionableShadowMinConfidence
+            && pred.RiskScore <= ActionableShadowMaxRisk)
+            return CandidateMode.actionable_shadow;
+
+        return CandidateMode.learning;
+    }
+
+    private static QualityTier DetermineQualityTier(int confidenceScore) => confidenceScore switch
+    {
+        <= 14 => QualityTier.very_weak,
+        <= 24 => QualityTier.weak,
+        <= 39 => QualityTier.medium,
+        <= 59 => QualityTier.strong_paper,
+        _ => QualityTier.production_candidate,
+    };
+
+    private static string? DetermineOptionBlockReason(
+        PredictionCandidate pred,
+        bool hasMarketData,
+        bool isTopQuartileDirectional,
+        bool optionsProviderConfigured)
+    {
+        if (!PredictionCategoryHelper.IsDirectional(pred.PredictionType))
+            return "non_directional_prediction";
+        if (!hasMarketData)
+            return "missing_market_data";
+        if (!optionsProviderConfigured)
+            return "missing_option_chain";
+        if (pred.RiskScore > LearningMaxRiskForOptions)
+            return "risk_too_high";
+        if (pred.ConfidenceScore < LearningMinConfidenceForOptions && !isTopQuartileDirectional)
+            return "confidence_below_learning_threshold";
+        return null;
+    }
+
+    private static List<QualityTierPerformance> BuildQualityTierPerformance(
+        List<PaperStockCandidate> candidates,
+        List<PaperStockOutcome> outcomes)
+    {
+        var outcomeMap = outcomes
+            .GroupBy(o => o.PaperStockCandidateId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
+
+        return candidates
+            .GroupBy(c => c.QualityTier.ToString())
+            .OrderBy(g => g.Key)
+            .Select(g =>
+            {
+                var withOutcomes = g
+                    .Select(c => outcomeMap.TryGetValue(c.Id, out var o) ? o : null)
+                    .Where(o => o is not null)
+                    .ToList();
+                var returns = withOutcomes
+                    .Select(o => o!.PercentMove)
+                    .Where(v => v.HasValue)
+                    .Select(v => v!.Value)
+                    .OrderBy(v => v)
+                    .ToList();
+                var wins = withOutcomes.Count(o => o!.DirectionCorrect == true);
+
+                return new QualityTierPerformance
+                {
+                    QualityTier = g.Key,
+                    CandidateCount = g.Count(),
+                    WinRate = withOutcomes.Count > 0 ? Math.Round(100.0 * wins / withOutcomes.Count, 1) : null,
+                    AverageReturn = returns.Count > 0 ? Math.Round(returns.Average(), 2) : null,
+                    MedianReturn = returns.Count > 0 ? Math.Round(returns[returns.Count / 2], 2) : null,
+                };
+            })
+            .ToList();
+    }
+
+    private static List<ConfidenceCalibrationBucket> BuildConfidenceCalibration(
+        List<PaperStockCandidate> candidates,
+        List<PaperStockOutcome> outcomes)
+    {
+        var outcomeMap = outcomes
+            .GroupBy(o => o.PaperStockCandidateId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
+
+        var buckets = new (string Label, Func<int, bool> Match)[]
+        {
+            ("0-14", c => c <= 14),
+            ("15-24", c => c >= 15 && c <= 24),
+            ("25-39", c => c >= 25 && c <= 39),
+            ("40-59", c => c >= 40 && c <= 59),
+            ("60+", c => c >= 60),
+        };
+
+        return buckets.Select(bucket =>
+        {
+            var inBucket = candidates.Where(c => bucket.Match(c.ConfidenceScore)).ToList();
+            var evaluated = inBucket
+                .Select(c => outcomeMap.TryGetValue(c.Id, out var o) ? o : null)
+                .Where(o => o is not null)
+                .ToList();
+            var wins = evaluated.Count(o => o!.DirectionCorrect == true);
+
+            return new ConfidenceCalibrationBucket
+            {
+                BucketLabel = bucket.Label,
+                CandidateCount = inBucket.Count,
+                SuccessRate = evaluated.Count > 0 ? Math.Round(100.0 * wins / evaluated.Count, 1) : null,
+            };
+        }).ToList();
+    }
+
     private static DurationPreference ChooseDuration(PaperStockCandidate stock)
     {
         // High-confidence + low-risk + short timeframe -> one week.
@@ -455,6 +833,14 @@ public class DynamicPickOrchestrator
             return DurationPreference.two_week;
         return DurationPreference.system_recommended;
     }
+
+    private sealed record DirectionalRanking(double Percentile, bool IsTopQuartile);
+
+    private sealed record StockCandidateBuild(
+        PredictionCandidate Prediction,
+        PaperStockCandidate BuiltCandidate,
+        PaperStockCandidate? SavedCandidate,
+        DirectionalRanking? Ranking);
 
     // -----------------------------------------------------------------------
     // Helpers: evaluate one paper stock candidate

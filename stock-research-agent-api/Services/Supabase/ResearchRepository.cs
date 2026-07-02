@@ -120,6 +120,19 @@ public class ResearchRepository
         return rows.Select(MapPrediction).ToList();
     }
 
+    public async Task<PredictionCandidate?> GetPredictionByIdAsync(string id)
+    {
+        var row = await _db.SelectSingleAsync("prediction_candidates", $"id=eq.{id}");
+        return row is not null ? MapPrediction(row) : null;
+    }
+
+    public async Task<List<PredictionCandidate>> GetPredictionsByRunAsync(string runId)
+    {
+        var rows = await _db.SelectAsync("prediction_candidates",
+            filter: $"run_id=eq.{runId}", order: "created_at.desc");
+        return rows.Select(MapPrediction).ToList();
+    }
+
     public async Task<List<PredictionCandidate>> GetPredictionsByDateRangeAsync(
         DateTimeOffset from, DateTimeOffset to, string? status = null, string? extraFilter = null)
     {

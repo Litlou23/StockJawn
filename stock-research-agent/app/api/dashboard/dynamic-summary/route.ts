@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET() {
   const base = process.env.AGENT_API_BASE_URL;
@@ -10,7 +12,7 @@ export async function GET() {
   if (isLocal) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
   try {
-    const res = await fetch(`${base}/api/dashboard/dynamic-summary`);
+    const res = await fetch(`${base}/api/dashboard/dynamic-summary`, { cache: 'no-store' });
     const data = await res.json();
     return NextResponse.json(data, { status: res.status });
   } catch {

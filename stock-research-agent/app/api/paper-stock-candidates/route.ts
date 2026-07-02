@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET(req: NextRequest) {
   const base = process.env.AGENT_API_BASE_URL;
@@ -11,7 +13,9 @@ export async function GET(req: NextRequest) {
 
   const limit = req.nextUrl.searchParams.get('limit') ?? '50';
   try {
-    const res = await fetch(`${base}/api/paper-stock-candidates?limit=${encodeURIComponent(limit)}`);
+    const res = await fetch(`${base}/api/paper-stock-candidates?limit=${encodeURIComponent(limit)}`, {
+      cache: 'no-store',
+    });
     const data = await res.json();
     return NextResponse.json(data, { status: res.status });
   } catch {

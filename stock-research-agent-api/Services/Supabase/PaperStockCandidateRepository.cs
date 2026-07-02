@@ -53,6 +53,13 @@ public class PaperStockCandidateRepository
                 selection_reason = c.SelectionReason,
                 warnings_json = JsonSerializer.SerializeToNode(c.Warnings),
                 data_availability = c.DataAvailability,
+                candidate_mode = c.CandidateMode.ToString(),
+                quality_tier = c.QualityTier.ToString(),
+                is_actionable = c.IsActionable,
+                threshold_policy_version = c.ThresholdPolicyVersion,
+                inclusion_reason = c.InclusionReason,
+                exclusion_reason = c.ExclusionReason,
+                score_percentile_in_run = c.ScorePercentileInRun,
                 status = c.Status.ToString(),
                 qualifies_for_options = c.QualifiesForOptions,
             }
@@ -92,6 +99,9 @@ public class PaperStockCandidateRepository
             filter: $"run_id=eq.{runId}", order: "total_score.desc");
         return rows.Select(MapCandidate).ToList();
     }
+
+    public Task<int> CountCandidatesAsync(string? filter = null)
+        => _db.CountAsync("paper_stock_candidates", filter);
 
     public async Task<bool> UpdateCandidateStatusAsync(string id, PaperStockStatus status)
     {
@@ -136,6 +146,9 @@ public class PaperStockCandidateRepository
             order: "evaluation_time.desc", limit: limit);
         return rows.Select(MapOutcome).ToList();
     }
+
+    public Task<int> CountOutcomesAsync(string? filter = null)
+        => _db.CountAsync("paper_stock_outcomes", filter);
 
     // -----------------------------------------------------------------------
     // stock_learning_stats
@@ -231,6 +244,15 @@ public class PaperStockCandidateRepository
         SelectionReason = r["selection_reason"]?.ToString() ?? "",
         Warnings = GetWarnings(r, "warnings_json"),
         DataAvailability = r["data_availability"]?.ToString() ?? "real",
+        CandidateMode = Enum.TryParse<CandidateMode>(r["candidate_mode"]?.ToString(), out var cm)
+            ? cm : CandidateMode.learning,
+        QualityTier = Enum.TryParse<QualityTier>(r["quality_tier"]?.ToString(), out var qt)
+            ? qt : QualityTier.very_weak,
+        IsActionable = GetBool(r, "is_actionable"),
+        ThresholdPolicyVersion = r["threshold_policy_version"]?.ToString() ?? "learning_options_v1",
+        InclusionReason = r["inclusion_reason"]?.ToString() ?? "",
+        ExclusionReason = r["exclusion_reason"]?.ToString(),
+        ScorePercentileInRun = GetDouble(r, "score_percentile_in_run"),
         Status = Enum.TryParse<PaperStockStatus>(r["status"]?.ToString(), out var s)
             ? s : PaperStockStatus.open,
         QualifiesForOptions = GetBool(r, "qualifies_for_options"),

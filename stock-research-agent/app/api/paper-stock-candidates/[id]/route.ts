@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -11,7 +13,9 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   if (isLocal) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
   try {
-    const res = await fetch(`${base}/api/paper-stock-candidates/${encodeURIComponent(id)}`);
+    const res = await fetch(`${base}/api/paper-stock-candidates/${encodeURIComponent(id)}`, {
+      cache: 'no-store',
+    });
     const data = await res.json();
     return NextResponse.json(data, { status: res.status });
   } catch {

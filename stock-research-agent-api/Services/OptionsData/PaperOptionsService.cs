@@ -72,8 +72,7 @@ public class PaperOptionsService
             return null;
 
         // Load prediction
-        var predictions = await _researchRepo.GetRecentPredictionsAsync(200);
-        var prediction = predictions.FirstOrDefault(p => p.Id == req.PredictionId);
+        var prediction = await _researchRepo.GetPredictionByIdAsync(req.PredictionId);
         if (prediction is null)
         {
             _logger.LogWarning("[paper-options] Prediction {Id} not found", req.PredictionId);
@@ -88,6 +87,7 @@ public class PaperOptionsService
                 Ticker = prediction.Ticker,
                 PredictionType = prediction.PredictionType.ToString(),
                 Warnings = [$"{prediction.PredictionType} predictions do not generate option candidates."],
+                BlockReason = "non_directional_prediction",
             };
         }
 
@@ -99,6 +99,7 @@ public class PaperOptionsService
                 Ticker = prediction.Ticker,
                 PredictionType = prediction.PredictionType.ToString(),
                 Warnings = ["MarketData.app token not configured — cannot generate candidates."],
+                BlockReason = "missing_option_chain",
             };
         }
 
@@ -143,6 +144,9 @@ public class PaperOptionsService
                 DurationBucket = durationBucket,
                 TargetDte = targetDte,
                 Warnings = warnings,
+                MarketDataAvailable = underlyingPrice > 0,
+                OptionChainAvailable = false,
+                BlockReason = "missing_option_chain",
             };
         }
 
@@ -186,6 +190,23 @@ public class PaperOptionsService
 
             if (filtered.Count == 0)
                 warnings.Add("Even the relaxed scan returned no contracts. Try a different duration or check chain availability.");
+        }
+
+        if (filtered.Count == 0)
+        {
+            return new GenerateCandidatesResponse
+            {
+                PredictionId = req.PredictionId,
+                Ticker = prediction.Ticker,
+                PredictionType = predictionType,
+                UnderlyingPrice = underlyingPrice,
+                DurationBucket = durationBucket,
+                TargetDte = targetDte,
+                Warnings = warnings,
+                MarketDataAvailable = underlyingPrice > 0,
+                OptionChainAvailable = chain.Contracts.Count > 0,
+                BlockReason = "liquidity_filter_failed",
+            };
         }
 
         var ranked = _filterService.ScoreAndRankEnhanced(filtered, predictionType, DefaultTopN);
@@ -249,8 +270,21 @@ public class PaperOptionsService
                 Rank = i + 1,
                 Warnings = contractWarnings,
                 Status = PaperCandidateStatus.open,
+                CandidateMode = req.CandidateMode,
+                QualityTier = req.QualityTier,
+                IsActionable = req.IsActionable,
+                ThresholdPolicyVersion = req.ThresholdPolicyVersion,
+                InclusionReason = req.InclusionReason,
+                ExclusionReason = req.ExclusionReason,
+                ScorePercentileInRun = req.ScorePercentileInRun,
             };
         }).ToList();
+
+        PaperCandidateEnhanced? savedCandidate = null;
+        if (req.AutoSave && candidates.Count > 0)
+        {
+            savedCandidate = await _repo.SavePaperCandidateEnhancedAsync(candidates[0]);
+        }
 
         var resp = new GenerateCandidatesResponse
         {
@@ -262,13 +296,10 @@ public class PaperOptionsService
             TargetDte = targetDte,
             Candidates = candidates,
             Warnings = warnings,
+            MarketDataAvailable = underlyingPrice > 0,
+            OptionChainAvailable = chain.Contracts.Count > 0,
+            SavedCandidate = savedCandidate,
         };
-
-        // Auto-save best ranked, if requested
-        if (req.AutoSave && candidates.Count > 0)
-        {
-            await _repo.SavePaperCandidateEnhancedAsync(candidates[0]);
-        }
 
         return resp;
     }

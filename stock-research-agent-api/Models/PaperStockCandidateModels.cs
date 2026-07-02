@@ -15,6 +15,12 @@ public enum StockTimeframe { one_day, two_day, one_week, one_month, three_month,
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum PaperStockStatus { open, evaluated, expired, watch_only, unavailable }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum CandidateMode { learning, actionable_shadow, live_eligible }
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum QualityTier { very_weak, weak, medium, strong_paper, production_candidate }
+
 public record PaperStockCandidate
 {
     public string Id { get; init; } = "";
@@ -47,6 +53,14 @@ public record PaperStockCandidate
     public string SelectionReason { get; init; } = "";
     public List<string> Warnings { get; init; } = [];
     public string DataAvailability { get; init; } = "real"; // real | partial | unavailable
+
+    public CandidateMode CandidateMode { get; init; } = CandidateMode.learning;
+    public QualityTier QualityTier { get; init; } = QualityTier.very_weak;
+    public bool IsActionable { get; init; }
+    public string ThresholdPolicyVersion { get; init; } = "learning_options_v1";
+    public string InclusionReason { get; init; } = "";
+    public string? ExclusionReason { get; init; }
+    public double ScorePercentileInRun { get; init; }
 
     public PaperStockStatus Status { get; init; } = PaperStockStatus.open;
     public bool QualifiesForOptions { get; init; }
@@ -140,4 +154,74 @@ public record DynamicDashboardSummary
     public string? WorstSignalKey { get; init; }
     public double WorstSignalAccuracy { get; init; }
     public string? InsightOfTheDay { get; init; }
+    public DateTimeOffset? LatestRunStartedAt { get; init; }
+    public string? LatestRunId { get; init; }
+    public int LatestRunPredictionCandidatesGenerated { get; init; }
+    public int LatestRunPaperStockCandidatesCreated { get; init; }
+    public int LatestRunPaperOptionCandidatesCreated { get; init; }
+    public int LatestRunBlockedOptionCandidates { get; init; }
+    public string? LatestRunTopOptionBlockReason { get; init; }
+    public int TotalStockOutcomes { get; init; }
+    public int TotalOptionOutcomes { get; init; }
+    public int StockOutcomesAddedToday { get; init; }
+    public int OptionOutcomesAddedToday { get; init; }
+    public int StockOutcomesAddedLast7Days { get; init; }
+    public int OptionOutcomesAddedLast7Days { get; init; }
+    public int CandidatesAwaitingEodEvaluation { get; init; }
+    public double OutcomeCoverageRate { get; init; }
+    public FunnelSummary Funnel { get; init; } = new();
+    public List<BlockReasonCount> BlockReasonBreakdown { get; init; } = [];
+    public List<QualityTierPerformance> QualityTierPerformance { get; init; } = [];
+    public List<ConfidenceCalibrationBucket> ConfidenceCalibration { get; init; } = [];
+}
+
+public record CandidateGenerationAuditEntry
+{
+    public string Id { get; init; } = "";
+    public string? RunId { get; init; }
+    public string Ticker { get; init; } = "";
+    public string? PredictionCandidateId { get; init; }
+    public string? PaperStockCandidateId { get; init; }
+    public string? PaperOptionCandidateId { get; init; }
+    public string PredictionType { get; init; } = "";
+    public int ConfidenceScore { get; init; }
+    public int RiskScore { get; init; }
+    public double ScorePercentileInRun { get; init; }
+    public bool StockCandidateCreated { get; init; }
+    public bool OptionCandidateCreated { get; init; }
+    public CandidateMode CandidateMode { get; init; } = CandidateMode.learning;
+    public QualityTier QualityTier { get; init; } = QualityTier.very_weak;
+    public string? OptionBlockReason { get; init; }
+    public bool MarketDataAvailable { get; init; }
+    public bool OptionChainAvailable { get; init; }
+    public string ThresholdPolicyVersion { get; init; } = "learning_options_v1";
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
+public record BlockReasonCount(string Reason, int Count);
+
+public record FunnelSummary
+{
+    public int PredictionCandidates { get; init; }
+    public int StockCandidates { get; init; }
+    public int OptionEligible { get; init; }
+    public int OptionCreated { get; init; }
+    public int Evaluated { get; init; }
+    public int LearningStatsUpdated { get; init; }
+}
+
+public record QualityTierPerformance
+{
+    public string QualityTier { get; init; } = "";
+    public int CandidateCount { get; init; }
+    public double? WinRate { get; init; }
+    public double? AverageReturn { get; init; }
+    public double? MedianReturn { get; init; }
+}
+
+public record ConfidenceCalibrationBucket
+{
+    public string BucketLabel { get; init; } = "";
+    public int CandidateCount { get; init; }
+    public double? SuccessRate { get; init; }
 }

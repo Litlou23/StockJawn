@@ -419,6 +419,13 @@ public class GenerateCandidatesRequest
     /// generation. Persisted on the option candidate when AutoSave is true.
     /// </summary>
     public string? PaperStockCandidateId { get; set; }
+    public CandidateMode CandidateMode { get; set; } = CandidateMode.learning;
+    public QualityTier QualityTier { get; set; } = QualityTier.very_weak;
+    public bool IsActionable { get; set; }
+    public string ThresholdPolicyVersion { get; set; } = "learning_options_v1";
+    public string InclusionReason { get; set; } = "";
+    public string? ExclusionReason { get; set; }
+    public double ScorePercentileInRun { get; set; }
 }
 
 public record PaperCandidateEnhanced
@@ -458,6 +465,13 @@ public record PaperCandidateEnhanced
     public string? DataDelayLabel { get; init; }
     public int Rank { get; init; }
     public List<string> Warnings { get; init; } = [];
+    public CandidateMode CandidateMode { get; init; } = CandidateMode.learning;
+    public QualityTier QualityTier { get; init; } = QualityTier.very_weak;
+    public bool IsActionable { get; init; }
+    public string ThresholdPolicyVersion { get; init; } = "learning_options_v1";
+    public string InclusionReason { get; init; } = "";
+    public string? ExclusionReason { get; init; }
+    public double ScorePercentileInRun { get; init; }
 }
 
 public record GenerateCandidatesResponse
@@ -470,6 +484,10 @@ public record GenerateCandidatesResponse
     public int TargetDte { get; init; }
     public List<PaperCandidateEnhanced> Candidates { get; init; } = [];
     public List<string> Warnings { get; init; } = [];
+    public bool MarketDataAvailable { get; init; }
+    public bool OptionChainAvailable { get; init; }
+    public string? BlockReason { get; init; }
+    public PaperCandidateEnhanced? SavedCandidate { get; init; }
 }
 
 public record PaperOutcomeEnhanced

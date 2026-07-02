@@ -93,8 +93,9 @@ try
     // Options Data — real MarketData.app integration
     builder.Services.AddSingleton<MarketDataOptionsProvider>();
     builder.Services.AddSingleton<OptionContractFilterService>();
-    builder.Services.AddSingleton<OptionsDataRepository>();
-    builder.Services.AddSingleton<OptionsDataService>();
+builder.Services.AddSingleton<OptionsDataRepository>();
+builder.Services.AddSingleton<CandidateGenerationAuditRepository>();
+builder.Services.AddSingleton<OptionsDataService>();
 
     // Paper Options — enhanced flow for /paper-options page
     builder.Services.AddSingleton<PaperOptionsService>();

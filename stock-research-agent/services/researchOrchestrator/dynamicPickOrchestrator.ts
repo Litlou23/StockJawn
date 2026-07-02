@@ -123,6 +123,45 @@ export interface DynamicDashboardSummary {
   worstSignalKey: string | null;
   worstSignalAccuracy: number;
   insightOfTheDay: string | null;
+  latestRunStartedAt: string | null;
+  latestRunId: string | null;
+  latestRunPredictionCandidatesGenerated: number;
+  latestRunPaperStockCandidatesCreated: number;
+  latestRunPaperOptionCandidatesCreated: number;
+  latestRunBlockedOptionCandidates: number;
+  latestRunTopOptionBlockReason: string | null;
+  totalStockOutcomes: number;
+  totalOptionOutcomes: number;
+  stockOutcomesAddedToday: number;
+  optionOutcomesAddedToday: number;
+  stockOutcomesAddedLast7Days: number;
+  optionOutcomesAddedLast7Days: number;
+  candidatesAwaitingEodEvaluation: number;
+  outcomeCoverageRate: number;
+  funnel: {
+    predictionCandidates: number;
+    stockCandidates: number;
+    optionEligible: number;
+    optionCreated: number;
+    evaluated: number;
+    learningStatsUpdated: number;
+  };
+  blockReasonBreakdown: Array<{
+    reason: string;
+    count: number;
+  }>;
+  qualityTierPerformance: Array<{
+    qualityTier: string;
+    candidateCount: number;
+    winRate: number | null;
+    averageReturn: number | null;
+    medianReturn: number | null;
+  }>;
+  confidenceCalibration: Array<{
+    bucketLabel: string;
+    candidateCount: number;
+    successRate: number | null;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +230,7 @@ export async function pollJobUntilDone(
 }
 
 async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(url, { cache: 'no-store' });
   const data = await res.json();
   if (!res.ok) throw new Error(typeof data?.error === 'string' ? data.error : `HTTP ${res.status}`);
   return data as T;
