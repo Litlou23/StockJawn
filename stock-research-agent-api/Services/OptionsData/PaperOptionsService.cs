@@ -81,15 +81,14 @@ public class PaperOptionsService
             return null;
         }
 
-        // Neutral predictions are not supported for naked call/put paper trades yet.
-        if (prediction.PredictionType == PredictionType.neutral)
+        if (!PredictionCategoryHelper.IsDirectional(prediction.PredictionType))
         {
             return new GenerateCandidatesResponse
             {
                 PredictionId = req.PredictionId,
                 Ticker = prediction.Ticker,
                 PredictionType = prediction.PredictionType.ToString(),
-                Warnings = ["Neutral predictions are not supported for naked call/put paper candidates."],
+                Warnings = [$"{prediction.PredictionType} predictions do not generate option candidates."],
             };
         }
 
@@ -293,6 +292,30 @@ public class PaperOptionsService
     public async Task<List<PaperCandidateEnhanced>> GetOpenCandidatesAsync()
     {
         return await _repo.GetOpenPaperCandidatesEnhancedAsync();
+    }
+
+    // -----------------------------------------------------------------------
+    // 4b. All candidates with latest outcomes
+    // -----------------------------------------------------------------------
+
+    public async Task<List<PaperCandidateWithOutcomeEnhanced>> GetAllCandidatesWithOutcomesAsync(int limit = 200)
+    {
+        var candidates = await _repo.GetAllPaperCandidatesEnhancedAsync(limit);
+        var outcomes = await _repo.GetRecentOutcomesEnhancedAsync(500);
+
+        var outcomeMap = outcomes
+            .GroupBy(o => o.PaperCandidateId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
+
+        return candidates.Select(c =>
+        {
+            outcomeMap.TryGetValue(c.Id, out var outcome);
+            return new PaperCandidateWithOutcomeEnhanced
+            {
+                Candidate = c,
+                LatestOutcome = outcome,
+            };
+        }).ToList();
     }
 
     // -----------------------------------------------------------------------

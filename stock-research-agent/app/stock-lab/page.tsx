@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
+import { InfoBanner } from '@/components/InfoTip';
+import { useSort, SortHeader } from '@/components/SortableTable';
 import {
   dynamicPickOrchestrator,
   pollJobUntilDone,
@@ -161,6 +163,24 @@ export default function StockLabPage() {
           No real trades are placed. Not financial advice.
         </div>
 
+        <div className="mb-6">
+          <InfoBanner items={[
+            { term: 'Generate Dynamic Picks', definition: 'Runs the full morning scan: fetches watchlist tickers, generates predictions, creates paper stock candidates, and auto-generates option candidates for qualifying picks.' },
+            { term: 'Evaluate Results', definition: 'Runs the EOD review: checks each open stock candidate against current market prices to determine if predictions were correct.' },
+            { term: 'Run Learning Update', definition: 'Analyzes evaluated outcomes to update signal weights and generate insights about what\'s working.' },
+            { term: 'Total Score', definition: 'Deterministic score (0-100) combining catalyst, trend, volume, market context, and historical accuracy signals minus risk penalties.' },
+            { term: 'Catalyst Score', definition: 'Strength of news catalysts driving the prediction. High = strong news event (earnings, FDA approval, etc).' },
+            { term: 'Trend Score', definition: 'Technical trend alignment. High = price action confirms the predicted direction.' },
+            { term: 'Volume Score', definition: 'Volume confirmation. High = unusual volume supporting the thesis.' },
+            { term: 'Market Context', definition: 'Broader market conditions. High = sector and market are favorable for the trade direction.' },
+            { term: 'Risk Penalty', definition: 'Points subtracted for risk factors like high volatility, earnings proximity, or conflicting signals.' },
+            { term: 'Missing Data Penalty', definition: 'Points subtracted when data sources were unavailable (no news feed, API errors, etc).' },
+            { term: 'Qualifies for Options', definition: 'Pick meets the threshold for auto-generating paper option candidates: bullish/bearish, confidence >= 40, risk <= 85, and MarketData.app configured.' },
+            { term: 'Entry Price', definition: 'Real stock price at prediction time from Twelve Data. Used as the baseline for P&L calculations.' },
+            { term: 'Target / Stop', definition: 'System-calculated price targets. Target = expected move if correct. Stop = invalidation price where the thesis breaks.' },
+          ]} />
+        </div>
+
         {error && (
           <div className="mb-4 rounded-lg border border-red-800 bg-red-950/50 px-4 py-2 text-sm text-red-300">
             {error}
@@ -217,52 +237,8 @@ export default function StockLabPage() {
         )}
 
         {/* Stock candidates table */}
-        <Section title="Dynamic stock candidates">
-          {candidates.length === 0 ? (
-            <Empty>No candidates yet. Click Generate Dynamic Picks.</Empty>
-          ) : (
-            <div className="overflow-x-auto rounded-lg border border-zinc-800">
-              <table className="w-full text-left text-xs">
-                <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
-                  <tr>
-                    {['Ticker', 'Type', 'Timeframe', 'Entry', 'Target', 'Stop',
-                      'Total', 'Conf', 'Risk', 'Catalyst', 'Data', 'Opts?', 'Status', 'Created'].map(h => (
-                      <th key={h} className="px-2 py-2 whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {candidates.map(c => (
-                    <tr key={c.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                      <td className="px-2 py-2 font-semibold text-zinc-100">{c.ticker}</td>
-                      <td className="px-2 py-2"><Pill type={c.predictionType} /></td>
-                      <td className="px-2 py-2 text-zinc-400">{c.timeframe}</td>
-                      <td className="px-2 py-2 text-zinc-200">{fmtMoney(c.entryPrice)}</td>
-                      <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.targetPrice)}</td>
-                      <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.stopPrice)}</td>
-                      <td className="px-2 py-2">
-                        <span className={`font-medium ${c.totalScore >= 60 ? 'text-emerald-300' : c.totalScore >= 40 ? 'text-zinc-200' : 'text-red-300'}`}>
-                          {c.totalScore.toFixed(0)}
-                        </span>
-                      </td>
-                      <td className="px-2 py-2 text-zinc-300">{c.confidenceScore}</td>
-                      <td className="px-2 py-2 text-zinc-300">{c.riskScore}</td>
-                      <td className="px-2 py-2 text-zinc-400">{c.catalystType ?? '—'}</td>
-                      <td className="px-2 py-2">
-                        <DataPill v={c.dataAvailability} />
-                      </td>
-                      <td className="px-2 py-2 text-zinc-300">{c.qualifiesForOptions ? '✓' : '—'}</td>
-                      <td className="px-2 py-2">
-                        <StatusPill v={c.status} />
-                      </td>
-                      <td className="px-2 py-2 text-zinc-500">{fmtDate(c.createdAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Section>
+        <SortableCandidatesTable candidates={candidates} />
+
 
         {/* Outcomes */}
         {outcomes.length > 0 && (
@@ -301,37 +277,7 @@ export default function StockLabPage() {
           ) : (
             <div className="space-y-3">
               {Array.from(grouped.entries()).map(([type, rows]) => (
-                <div key={type} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-                  <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-400">{type}</div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left text-xs">
-                      <thead className="text-zinc-500">
-                        <tr>
-                          <th className="px-2 py-1">Key</th>
-                          <th className="px-2 py-1">N</th>
-                          <th className="px-2 py-1">Accuracy</th>
-                          <th className="px-2 py-1">Avg move</th>
-                          <th className="px-2 py-1">Avg score</th>
-                          <th className="px-2 py-1">Updated</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.slice(0, 10).map(r => (
-                          <tr key={r.id} className="border-t border-zinc-800/60">
-                            <td className="px-2 py-1 text-zinc-200">{r.statKey}</td>
-                            <td className="px-2 py-1 text-zinc-300">{r.totalCandidates}</td>
-                            <td className={`px-2 py-1 ${r.accuracy >= 0.5 ? 'text-emerald-300' : 'text-red-300'}`}>
-                              {(r.accuracy * 100).toFixed(0)}%
-                            </td>
-                            <td className="px-2 py-1 text-zinc-300">{fmtPct(r.averagePercentMove)}</td>
-                            <td className="px-2 py-1 text-zinc-300">{r.averageOutcomeScore.toFixed(1)}</td>
-                            <td className="px-2 py-1 text-zinc-500">{fmtDate(r.lastUpdatedAt)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
+                <SortableLearningTable key={type} type={type} rows={rows} />
               ))}
             </div>
           )}
@@ -392,4 +338,114 @@ function StatusPill({ v }: { v: string }) {
     : v === 'watch_only' ? 'bg-zinc-800 text-zinc-300'
     : 'bg-red-900/30 text-red-300';
   return <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${cls}`}>{v}</span>;
+}
+
+function SortableLearningTable({ type, rows }: { type: string; rows: StockLearningStat[] }) {
+  const { sorted, sort, toggle } = useSort(rows);
+  const COLS = [
+    { label: 'Key', key: 'statKey' },
+    { label: 'N', key: 'totalCandidates' },
+    { label: 'Accuracy', key: 'accuracy' },
+    { label: 'Avg move', key: 'averagePercentMove' },
+    { label: 'Avg score', key: 'averageOutcomeScore' },
+    { label: 'Updated', key: 'lastUpdatedAt' },
+  ];
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-400">{type}</div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead className="text-zinc-500">
+            <tr>
+              {COLS.map(col => (
+                <SortHeader key={col.key} label={col.label} sortKey={col.key} current={sort} onToggle={toggle} className="px-2 py-1" />
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.slice(0, 10).map(r => (
+              <tr key={r.id} className="border-t border-zinc-800/60">
+                <td className="px-2 py-1 text-zinc-200">{r.statKey}</td>
+                <td className="px-2 py-1 text-zinc-300">{r.totalCandidates}</td>
+                <td className={`px-2 py-1 ${r.accuracy >= 0.5 ? 'text-emerald-300' : 'text-red-300'}`}>
+                  {(r.accuracy * 100).toFixed(0)}%
+                </td>
+                <td className="px-2 py-1 text-zinc-300">{fmtPct(r.averagePercentMove)}</td>
+                <td className="px-2 py-1 text-zinc-300">{r.averageOutcomeScore.toFixed(1)}</td>
+                <td className="px-2 py-1 text-zinc-500">{fmtDate(r.lastUpdatedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+const CANDIDATE_COLS: { label: string; key: string }[] = [
+  { label: 'Ticker', key: 'ticker' },
+  { label: 'Type', key: 'predictionType' },
+  { label: 'Timeframe', key: 'timeframe' },
+  { label: 'Entry', key: 'entryPrice' },
+  { label: 'Target', key: 'targetPrice' },
+  { label: 'Stop', key: 'stopPrice' },
+  { label: 'Total', key: 'totalScore' },
+  { label: 'Conf', key: 'confidenceScore' },
+  { label: 'Risk', key: 'riskScore' },
+  { label: 'Catalyst', key: 'catalystType' },
+  { label: 'Data', key: 'dataAvailability' },
+  { label: 'Opts?', key: 'qualifiesForOptions' },
+  { label: 'Status', key: 'status' },
+  { label: 'Created', key: 'createdAt' },
+];
+
+function SortableCandidatesTable({ candidates }: { candidates: PaperStockCandidate[] }) {
+  const { sorted, sort, toggle } = useSort(candidates);
+  return (
+    <Section title="Dynamic stock candidates">
+      {candidates.length === 0 ? (
+        <Empty>No candidates yet. Click Generate Dynamic Picks.</Empty>
+      ) : (
+        <div className="overflow-x-auto rounded-lg border border-zinc-800">
+          <table className="w-full text-left text-xs">
+            <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
+              <tr>
+                {CANDIDATE_COLS.map(col => (
+                  <SortHeader key={col.key} label={col.label} sortKey={col.key} current={sort} onToggle={toggle} />
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map(c => (
+                <tr key={c.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
+                  <td className="px-2 py-2 font-semibold text-zinc-100">{c.ticker}</td>
+                  <td className="px-2 py-2"><Pill type={c.predictionType} /></td>
+                  <td className="px-2 py-2 text-zinc-400">{c.timeframe}</td>
+                  <td className="px-2 py-2 text-zinc-200">{fmtMoney(c.entryPrice)}</td>
+                  <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.targetPrice)}</td>
+                  <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.stopPrice)}</td>
+                  <td className="px-2 py-2">
+                    <span className={`font-medium ${c.totalScore >= 60 ? 'text-emerald-300' : c.totalScore >= 40 ? 'text-zinc-200' : 'text-red-300'}`}>
+                      {c.totalScore.toFixed(0)}
+                    </span>
+                  </td>
+                  <td className="px-2 py-2 text-zinc-300">{c.confidenceScore}</td>
+                  <td className="px-2 py-2 text-zinc-300">{c.riskScore}</td>
+                  <td className="px-2 py-2 text-zinc-400">{c.catalystType ?? '—'}</td>
+                  <td className="px-2 py-2">
+                    <DataPill v={c.dataAvailability} />
+                  </td>
+                  <td className="px-2 py-2 text-zinc-300">{c.qualifiesForOptions ? '✓' : '—'}</td>
+                  <td className="px-2 py-2">
+                    <StatusPill v={c.status} />
+                  </td>
+                  <td className="px-2 py-2 text-zinc-500">{fmtDate(c.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Section>
+  );
 }

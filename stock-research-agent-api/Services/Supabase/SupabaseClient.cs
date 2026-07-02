@@ -108,6 +108,60 @@ public class SupabaseClient
     }
 
     // -----------------------------------------------------------------------
+    // COUNT (aggregate — no row data loaded)
+    // -----------------------------------------------------------------------
+
+    public async Task<int> CountAsync(string table, string? filter = null)
+    {
+        if (!_configured) return 0;
+
+        var url = $"{_baseUrl}/{table}?select=*";
+        if (filter is not null) url += $"&{filter}";
+
+        var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Add("Prefer", "count=exact");
+        req.Headers.TryAddWithoutValidation("Range-Unit", "items");
+        req.Headers.TryAddWithoutValidation("Range", "0-0");
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        try
+        {
+            var resp = await _http.SendAsync(req);
+
+            // PostgREST returns Content-Range on the response (not content) headers
+            // Format: "0-0/TOTAL" or "*/TOTAL" when empty
+            if (resp.Headers.TryGetValues("Content-Range", out var respValues))
+            {
+                var range = respValues.FirstOrDefault();
+                if (range is not null)
+                {
+                    var slashIndex = range.LastIndexOf('/');
+                    if (slashIndex >= 0 && int.TryParse(range[(slashIndex + 1)..], out var count))
+                        return count;
+                }
+            }
+            if (resp.Content.Headers.TryGetValues("Content-Range", out var contentValues))
+            {
+                var range = contentValues.FirstOrDefault();
+                if (range is not null)
+                {
+                    var slashIndex = range.LastIndexOf('/');
+                    if (slashIndex >= 0 && int.TryParse(range[(slashIndex + 1)..], out var count))
+                        return count;
+                }
+            }
+
+            _logger.LogWarning("[supabase] COUNT {Table} no Content-Range header found. Status: {Status}", table, resp.StatusCode);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[supabase] COUNT {Table} error", table);
+            return 0;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // INSERT
     // -----------------------------------------------------------------------
 

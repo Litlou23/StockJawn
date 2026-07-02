@@ -22,9 +22,9 @@ namespace StockResearchAgent.Api.Services.ResearchEngine;
 /// </summary>
 public class DynamicPickOrchestrator
 {
-    // Option-qualification thresholds (from spec).
-    private const int MinConfidenceForOptions = 65;
-    private const int MaxRiskForOptions = 70;
+    // Option-qualification thresholds — lowered to build data faster.
+    private const int MinConfidenceForOptions = 40;
+    private const int MaxRiskForOptions = 85;
 
     private readonly DailyResearchRunService _dailyService;
     private readonly ResearchRepository _researchRepo;
@@ -345,6 +345,10 @@ public class DynamicPickOrchestrator
             "1_day" => StockTimeframe.one_day,
             "2_day" => StockTimeframe.two_day,
             "1_week" => StockTimeframe.one_week,
+            "1_month" => StockTimeframe.one_month,
+            "3_month" => StockTimeframe.three_month,
+            "6_month" => StockTimeframe.six_month,
+            "1_year" => StockTimeframe.one_year,
             _ => StockTimeframe.one_day,
         };
 
@@ -356,9 +360,9 @@ public class DynamicPickOrchestrator
 
         var status = (entry is null or 0)
             ? PaperStockStatus.unavailable
-            : (pred.PredictionType == PredictionType.neutral
+            : !PredictionCategoryHelper.IsDirectional(pred.PredictionType)
                 ? PaperStockStatus.watch_only
-                : PaperStockStatus.open);
+                : PaperStockStatus.open;
 
         var reason = $"Prediction conf={pred.ConfidenceScore}, risk={pred.RiskScore}. " +
                      $"Deterministic total {total} (catalyst={catalystScore}, trend={trendScore}, " +
@@ -458,6 +462,12 @@ public class DynamicPickOrchestrator
 
     private async Task<bool> EvaluateStockCandidateAsync(PaperStockCandidate c)
     {
+        if (c.Status == PaperStockStatus.watch_only || c.Status == PaperStockStatus.unavailable)
+            return false;
+
+        if (!PredictionCategoryHelper.IsDirectional(c.PredictionType))
+            return false;
+
         if (c.EntryPrice is null or 0)
         {
             await _stockRepo.SaveOutcomeAsync(new PaperStockOutcome
@@ -518,6 +528,13 @@ public class DynamicPickOrchestrator
         if (stopHit) outcomeScore -= 10;
         outcomeScore = Math.Clamp(outcomeScore, 0, 100);
 
+        var maxFavorable = c.PredictionType == PredictionType.bullish
+            ? ((quote.High - entry) / entry) * 100
+            : ((entry - quote.Low) / entry) * 100;
+        var maxAdverse = c.PredictionType == PredictionType.bullish
+            ? ((entry - quote.Low) / entry) * 100
+            : ((quote.High - entry) / entry) * 100;
+
         var lesson = BuildStockLesson(c, move, directionCorrect, targetHit, stopHit);
 
         var outcome = new PaperStockOutcome
@@ -536,7 +553,8 @@ public class DynamicPickOrchestrator
             InvalidationHit = invalidation,
             OutcomeScore = outcomeScore,
             OutcomeSummary = $"{c.Ticker} moved {move:F2}%. Direction {(directionCorrect == true ? "correct" : directionCorrect == false ? "wrong" : "n/a")}. " +
-                             $"Target hit: {targetHit}. Stop hit: {stopHit}.",
+                             $"Target hit: {targetHit}. Stop hit: {stopHit}. " +
+                             $"Max favorable: {maxFavorable:F2}%, max adverse: {maxAdverse:F2}%.",
             Lesson = lesson,
         };
 

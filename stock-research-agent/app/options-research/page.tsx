@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import FullScreenLoader from '@/components/FullScreenLoader';
+import { useSortWithAccessor, SortHeader, type SortState } from '@/components/SortableTable';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -310,68 +311,7 @@ export default function OptionsResearchPage() {
                   <p className="mt-1 text-sm text-zinc-500">Try widening the DTE range or removing the side filter.</p>
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-lg border border-zinc-800">
-                  <table className="w-full text-left text-sm">
-                    <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-400">
-                      <tr>
-                        <th className="px-3 py-2">Symbol</th>
-                        <th className="px-3 py-2">Side</th>
-                        <th className="px-3 py-2">Strike</th>
-                        <th className="px-3 py-2">DTE</th>
-                        <th className="px-3 py-2">Bid</th>
-                        <th className="px-3 py-2">Ask</th>
-                        <th className="px-3 py-2">Mid</th>
-                        <th className="px-3 py-2">IV</th>
-                        <th className="px-3 py-2">Delta</th>
-                        <th className="px-3 py-2">OI</th>
-                        <th className="px-3 py-2">Vol</th>
-                        <th className="px-3 py-2">Spread%</th>
-                        <th className="px-3 py-2">Score</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {topContracts.topContracts.map((s, i) => {
-                        const c = s.contract;
-                        return (
-                          <tr
-                            key={i}
-                            className="border-b border-zinc-800/50 transition-colors hover:bg-zinc-800/30"
-                          >
-                            <td className="px-3 py-2 font-mono text-xs text-zinc-300">{c.optionSymbol}</td>
-                            <td className="px-3 py-2">
-                              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
-                                c.side === 'call' ? 'bg-emerald-900/50 text-emerald-300' : 'bg-red-900/50 text-red-300'
-                              }`}>
-                                {c.side.toUpperCase()}
-                              </span>
-                            </td>
-                            <td className="px-3 py-2 text-zinc-200">${c.strike.toFixed(2)}</td>
-                            <td className="px-3 py-2 text-zinc-300">{c.dte}d</td>
-                            <td className="px-3 py-2 text-zinc-300">${c.bid.toFixed(2)}</td>
-                            <td className="px-3 py-2 text-zinc-300">${c.ask.toFixed(2)}</td>
-                            <td className="px-3 py-2 font-medium text-zinc-100">${c.mid.toFixed(2)}</td>
-                            <td className="px-3 py-2 text-zinc-300">{(c.iv * 100).toFixed(1)}%</td>
-                            <td className="px-3 py-2 text-zinc-300">{c.delta.toFixed(3)}</td>
-                            <td className="px-3 py-2 text-zinc-300">{c.openInterest.toLocaleString()}</td>
-                            <td className="px-3 py-2 text-zinc-300">{c.volume.toLocaleString()}</td>
-                            <td className="px-3 py-2 text-zinc-300">{c.bidAskSpreadPercent.toFixed(1)}%</td>
-                            <td className="px-3 py-2">
-                              <div className="flex items-center gap-2">
-                                <div className="h-1.5 w-16 rounded-full bg-zinc-700">
-                                  <div
-                                    className="h-full rounded-full bg-violet-500"
-                                    style={{ width: `${Math.min(100, s.overallScore)}%` }}
-                                  />
-                                </div>
-                                <span className="text-xs text-zinc-400">{s.overallScore.toFixed(0)}</span>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                <SortableContractsTable contracts={topContracts.topContracts} />
               )}
             </>
           )}
@@ -489,6 +429,91 @@ export default function OptionsResearchPage() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+const CONTRACT_ACCESSORS: Record<string, (item: ContractScore) => unknown> = {
+  optionSymbol: (s) => s.contract.optionSymbol,
+  side: (s) => s.contract.side,
+  strike: (s) => s.contract.strike,
+  dte: (s) => s.contract.dte,
+  bid: (s) => s.contract.bid,
+  ask: (s) => s.contract.ask,
+  mid: (s) => s.contract.mid,
+  iv: (s) => s.contract.iv,
+  delta: (s) => s.contract.delta,
+  openInterest: (s) => s.contract.openInterest,
+  volume: (s) => s.contract.volume,
+  spreadPercent: (s) => s.contract.bidAskSpreadPercent,
+  overallScore: (s) => s.overallScore,
+};
+
+const CONTRACT_COLS = [
+  { label: 'Symbol', key: 'optionSymbol' },
+  { label: 'Side', key: 'side' },
+  { label: 'Strike', key: 'strike' },
+  { label: 'DTE', key: 'dte' },
+  { label: 'Bid', key: 'bid' },
+  { label: 'Ask', key: 'ask' },
+  { label: 'Mid', key: 'mid' },
+  { label: 'IV', key: 'iv' },
+  { label: 'Delta', key: 'delta' },
+  { label: 'OI', key: 'openInterest' },
+  { label: 'Vol', key: 'volume' },
+  { label: 'Spread%', key: 'spreadPercent' },
+  { label: 'Score', key: 'overallScore' },
+];
+
+function SortableContractsTable({ contracts }: { contracts: ContractScore[] }) {
+  const { sorted, sort, toggle } = useSortWithAccessor(contracts, CONTRACT_ACCESSORS);
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-zinc-800">
+      <table className="w-full text-left text-sm">
+        <thead className="border-b border-zinc-800 bg-zinc-900/80 text-xs uppercase text-zinc-400">
+          <tr>
+            {CONTRACT_COLS.map(col => (
+              <SortHeader key={col.key} label={col.label} sortKey={col.key} current={sort} onToggle={toggle} className="px-3 py-2" />
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((s, i) => {
+            const c = s.contract;
+            return (
+              <tr key={i} className="border-b border-zinc-800/50 transition-colors hover:bg-zinc-800/30">
+                <td className="px-3 py-2 font-mono text-xs text-zinc-300">{c.optionSymbol}</td>
+                <td className="px-3 py-2">
+                  <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
+                    c.side === 'call' ? 'bg-emerald-900/50 text-emerald-300' : 'bg-red-900/50 text-red-300'
+                  }`}>
+                    {c.side.toUpperCase()}
+                  </span>
+                </td>
+                <td className="px-3 py-2 text-zinc-200">${c.strike.toFixed(2)}</td>
+                <td className="px-3 py-2 text-zinc-300">{c.dte}d</td>
+                <td className="px-3 py-2 text-zinc-300">${c.bid.toFixed(2)}</td>
+                <td className="px-3 py-2 text-zinc-300">${c.ask.toFixed(2)}</td>
+                <td className="px-3 py-2 font-medium text-zinc-100">${c.mid.toFixed(2)}</td>
+                <td className="px-3 py-2 text-zinc-300">{(c.iv * 100).toFixed(1)}%</td>
+                <td className="px-3 py-2 text-zinc-300">{c.delta.toFixed(3)}</td>
+                <td className="px-3 py-2 text-zinc-300">{c.openInterest.toLocaleString()}</td>
+                <td className="px-3 py-2 text-zinc-300">{c.volume.toLocaleString()}</td>
+                <td className="px-3 py-2 text-zinc-300">{c.bidAskSpreadPercent.toFixed(1)}%</td>
+                <td className="px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 w-16 rounded-full bg-zinc-700">
+                      <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.min(100, s.overallScore)}%` }} />
+                    </div>
+                    <span className="text-xs text-zinc-400">{s.overallScore.toFixed(0)}</span>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

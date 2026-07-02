@@ -33,6 +33,9 @@ public class OutcomeEvaluator
 
     public async Task<EvaluationResult?> EvaluatePredictionAsync(PredictionCandidate prediction)
     {
+        if (!PredictionCategoryHelper.IsDirectional(prediction.PredictionType))
+            return null;
+
         if (prediction.EntryReferencePrice is null or 0)
         {
             _logger.LogWarning("[outcome-evaluator] {Ticker}: no entry reference price, cannot evaluate", prediction.Ticker);
@@ -50,6 +53,18 @@ public class OutcomeEvaluator
         var closePrice = quote.Price;
         var percentMove = ((closePrice - startPrice) / startPrice) * 100;
 
+        // SPY relative performance for short-term picks
+        double? relativePerformance = null;
+        if (PredictionTimeWindows.ShortTerm.Contains(prediction.TimeWindow))
+        {
+            var spyQuote = await _marketData.GetQuoteAsync("SPY");
+            if (spyQuote is not null && spyQuote.PreviousClose > 0)
+            {
+                var spyMove = ((spyQuote.Price - spyQuote.PreviousClose) / spyQuote.PreviousClose) * 100;
+                relativePerformance = Math.Round(percentMove - spyMove, 2);
+            }
+        }
+
         bool? directionCorrect = prediction.PredictionType switch
         {
             PredictionType.bullish => percentMove > 0,
@@ -60,15 +75,84 @@ public class OutcomeEvaluator
         var invalidationHit = (prediction.PredictionType == PredictionType.bullish && percentMove < -2)
             || (prediction.PredictionType == PredictionType.bearish && percentMove > 2);
 
+        var maxFavorable = prediction.PredictionType == PredictionType.bullish
+            ? ((quote.High - startPrice) / startPrice) * 100
+            : ((startPrice - quote.Low) / startPrice) * 100;
+        var maxAdverse = prediction.PredictionType == PredictionType.bullish
+            ? ((startPrice - quote.Low) / startPrice) * 100
+            : ((quote.High - startPrice) / startPrice) * 100;
+
+        bool? targetHit = null;
+        bool? stopHit = null;
+        if (prediction.TargetPrice is double tp and > 0)
+        {
+            targetHit = prediction.PredictionType == PredictionType.bullish
+                ? quote.High >= tp
+                : quote.Low <= tp;
+        }
+        if (prediction.StopPrice is double sp and > 0)
+        {
+            stopHit = prediction.PredictionType == PredictionType.bullish
+                ? quote.Low <= sp
+                : quote.High >= sp;
+        }
+
+        // Price accuracy: how close was the predicted price to the actual close?
+        double? priceAccuracyPercent = null;
+        double? pricePredictionErrorPercent = null;
+        if (prediction.PredictedPrice is double predPrice and > 0)
+        {
+            var priceError = Math.Abs(closePrice - predPrice);
+            priceAccuracyPercent = Math.Round(Math.Max(0, 100 - (priceError / startPrice * 100)), 2);
+            pricePredictionErrorPercent = Math.Round((priceError / startPrice) * 100, 2);
+        }
+
+        // Projected zone evaluation
+        bool? wasInProjectedZone = null;
+        bool? invalidationHitCheck = null;
+        if (prediction.ProjectedPriceLow is double zoneLow && prediction.ProjectedPriceHigh is double zoneHigh)
+        {
+            wasInProjectedZone = closePrice >= zoneLow && closePrice <= zoneHigh;
+        }
+        if (prediction.InvalidationPrice is double invPrice and > 0)
+        {
+            invalidationHitCheck = prediction.PredictionType == PredictionType.bullish
+                ? quote.Low <= invPrice
+                : quote.High >= invPrice;
+        }
+
         double outcomeScore = 50;
         if (directionCorrect == true)
             outcomeScore += Math.Min(Math.Abs(percentMove) * 10, 40);
         else if (directionCorrect == false)
             outcomeScore -= Math.Min(Math.Abs(percentMove) * 10, 40);
-        if (invalidationHit) outcomeScore -= 10;
+        if (priceAccuracyPercent is double pa)
+            outcomeScore += (pa - 95) * 2;
+        if (wasInProjectedZone == true) outcomeScore += 5;
+        if (targetHit == true) outcomeScore += 5;
+        if (stopHit == true) outcomeScore -= 10;
+        if (invalidationHit || invalidationHitCheck == true) outcomeScore -= 10;
         outcomeScore = Math.Clamp(outcomeScore, 0, 100);
 
         var lesson = GenerateLesson(prediction, percentMove, directionCorrect, invalidationHit);
+
+        var summaryParts = new List<string>
+        {
+            $"{prediction.Ticker}: {prediction.PredictionType} prediction.",
+            $"Entry ${startPrice:F2}, current ${closePrice:F2} ({(percentMove > 0 ? "+" : "")}{percentMove:F2}%).",
+            $"Direction {(directionCorrect == true ? "correct" : directionCorrect == false ? "wrong" : "N/A")}.",
+        };
+        if (prediction.ProjectedPriceLow is double zl && prediction.ProjectedPriceHigh is double zh)
+            summaryParts.Add($"Projected zone ${zl:F2}–${zh:F2}, actual ${closePrice:F2} ({(wasInProjectedZone == true ? "IN zone" : "OUTSIDE zone")}).");
+        if (prediction.PredictedPrice is double pp)
+            summaryParts.Add($"Predicted ${pp:F2}, actual ${closePrice:F2} ({priceAccuracyPercent:F1}% accurate).");
+        if (prediction.TargetPrice is double tgt)
+            summaryParts.Add($"Target ${tgt:F2} {(targetHit == true ? "HIT" : "not reached")}.");
+        if (prediction.StopPrice is double stp)
+            summaryParts.Add($"Stop ${stp:F2} {(stopHit == true ? "TRIGGERED" : "held")}.");
+        summaryParts.Add($"Max favorable: {maxFavorable:F2}%, max adverse: {maxAdverse:F2}%.");
+        if (relativePerformance is not null)
+            summaryParts.Add($"vs SPY: {(relativePerformance > 0 ? "+" : "")}{relativePerformance}%.");
 
         var outcomeData = new
         {
@@ -80,9 +164,20 @@ public class OutcomeEvaluator
             low_after_prediction = quote.Low,
             percent_move = Math.Round(percentMove, 2),
             direction_correct = directionCorrect,
-            invalidation_hit = invalidationHit,
+            predicted_price = prediction.PredictedPrice,
+            predicted_move_percent = prediction.PredictedMovePercent,
+            projected_price_low = prediction.ProjectedPriceLow,
+            projected_price_high = prediction.ProjectedPriceHigh,
+            price_accuracy_percent = priceAccuracyPercent,
+            price_prediction_error_percent = pricePredictionErrorPercent,
+            was_in_projected_zone = wasInProjectedZone,
+            target_hit = targetHit,
+            stop_hit = stopHit,
+            invalidation_hit = invalidationHit || invalidationHitCheck == true,
+            max_favorable_percent = Math.Round(maxFavorable, 2),
+            max_adverse_percent = Math.Round(maxAdverse, 2),
             outcome_score = outcomeScore,
-            outcome_summary = $"{prediction.Ticker}: {prediction.PredictionType} prediction. Entry ${startPrice:F2}, current ${closePrice:F2} ({(percentMove > 0 ? "+" : "")}{percentMove:F2}%). Direction {(directionCorrect == true ? "correct" : directionCorrect == false ? "wrong" : "N/A")}.",
+            outcome_summary = string.Join(" ", summaryParts),
             lesson,
         };
 
@@ -99,7 +194,18 @@ public class OutcomeEvaluator
             LowAfterPrediction = quote.Low,
             PercentMove = Math.Round(percentMove, 2),
             DirectionCorrect = directionCorrect,
-            InvalidationHit = invalidationHit,
+            PredictedPrice = prediction.PredictedPrice,
+            PredictedMovePercent = prediction.PredictedMovePercent,
+            ProjectedPriceLow = prediction.ProjectedPriceLow,
+            ProjectedPriceHigh = prediction.ProjectedPriceHigh,
+            PriceAccuracyPercent = priceAccuracyPercent,
+            PricePredictionErrorPercent = pricePredictionErrorPercent,
+            WasInProjectedZone = wasInProjectedZone,
+            TargetHit = targetHit,
+            StopHit = stopHit,
+            InvalidationHit = invalidationHit || invalidationHitCheck == true,
+            MaxFavorablePercent = Math.Round(maxFavorable, 2),
+            MaxAdversePercent = Math.Round(maxAdverse, 2),
             OutcomeScore = outcomeScore,
             OutcomeSummary = outcomeData.outcome_summary,
             Lesson = lesson,
@@ -121,6 +227,14 @@ public class OutcomeEvaluator
         var now = DateTimeOffset.UtcNow;
         foreach (var prediction in openPredictions)
         {
+            // Skip non-directional predictions — they are scan results, not picks
+            if (!PredictionCategoryHelper.IsDirectional(prediction.PredictionType))
+            {
+                await _repo.UpdatePredictionStatusAsync(prediction.Id, "expired");
+                skipped.Add($"{prediction.Ticker}: scan result ({prediction.PredictionType}), not a directional pick");
+                continue;
+            }
+
             var ageHours = (now - prediction.CreatedAt).TotalHours;
 
             var minHours = prediction.TimeWindow switch
@@ -129,8 +243,16 @@ public class OutcomeEvaluator
                 "1_day" => 6,
                 "3_day" => 48,
                 "1_week" => 120,
+                "1_month" => 504,    // 21 days
+                "3_month" => 1512,   // 63 days
+                "6_month" => 3024,   // 126 days
+                "1_year" => 6048,    // 252 days
                 _ => 6,
             };
+
+            var maxHours = PredictionTimeWindows.LongTerm.Contains(prediction.TimeWindow)
+                ? minHours * 2
+                : 240;
 
             if (ageHours < minHours)
             {
@@ -138,7 +260,7 @@ public class OutcomeEvaluator
                 continue;
             }
 
-            if (ageHours > 240)
+            if (ageHours > maxHours)
             {
                 await _repo.UpdatePredictionStatusAsync(prediction.Id, "expired");
                 skipped.Add($"{prediction.Ticker}: expired ({ageHours:F0}h old)");

@@ -37,15 +37,22 @@ public class DashboardController : ControllerBase
             var candidatesTask = _watchlistRepo.GetRecentCandidatesAsync(10);
             var changesTask = _watchlistRepo.GetRecentChangeLogsAsync(10);
             var recentRunsTask = _researchRepo.GetRecentResearchRunsAsync(10);
-            var predictionsTask = _researchRepo.GetRecentPredictionsAsync(10);
-            var outcomesTask = _researchRepo.GetRecentOutcomesAsync(10);
+            var predictionStatsTask = _researchRepo.GetPredictionStatsAsync();
+            var directionalStatsTask = _researchRepo.GetDirectionalStockStatsAsync();
+            var longTermStatsTask = _researchRepo.GetLongTermStockStatsAsync();
+            var scanResultStatsTask = _researchRepo.GetScanResultStatsAsync();
+            var paperOptionStatsTask = _researchRepo.GetPaperOptionStatsAsync();
+            var recentPredictionsTask = _researchRepo.GetRecentPredictionsWithOutcomesAsync(10);
+            var recentScanResultsTask = _researchRepo.GetRecentScanResultsAsync(10);
             var signalPerfTask = _researchRepo.GetAllSignalPerformanceAsync();
             var insightsTask = _researchRepo.GetRecentLearningInsightsAsync(5);
             var weightsTask = _researchRepo.GetScoringWeightsAsync();
 
             await Task.WhenAll(
                 activeTask, reviewTask, swapTask, candidatesTask, changesTask,
-                recentRunsTask, predictionsTask, outcomesTask, signalPerfTask,
+                recentRunsTask, predictionStatsTask, directionalStatsTask,
+                longTermStatsTask, scanResultStatsTask, paperOptionStatsTask,
+                recentPredictionsTask, recentScanResultsTask, signalPerfTask,
                 insightsTask, weightsTask);
 
             var active = activeTask.Result;
@@ -54,8 +61,13 @@ public class DashboardController : ControllerBase
             var candidates = candidatesTask.Result;
             var changes = changesTask.Result;
             var runs = recentRunsTask.Result;
-            var predictions = predictionsTask.Result;
-            var outcomes = outcomesTask.Result;
+            var predictionStats = predictionStatsTask.Result;
+            var directionalStats = directionalStatsTask.Result;
+            var longTermStats = longTermStatsTask.Result;
+            var scanResultStats = scanResultStatsTask.Result;
+            var paperOptionStats = paperOptionStatsTask.Result;
+            var recentPredictions = recentPredictionsTask.Result;
+            var recentScanResults = recentScanResultsTask.Result;
             var signalPerf = signalPerfTask.Result;
             var insights = insightsTask.Result;
             var weights = weightsTask.Result;
@@ -68,8 +80,8 @@ public class DashboardController : ControllerBase
             // Data quality warnings
             var warnings = new List<string>();
             if (active.Count == 0) warnings.Add("No active watchlist items — run weekly research to populate.");
-            if (predictions.Count == 0) warnings.Add("No predictions generated yet — run a morning scan.");
-            if (outcomes.Count == 0) warnings.Add("No outcomes recorded yet — run an EOD review after predictions have had time.");
+            if (predictionStats.TotalPredictions == 0) warnings.Add("No predictions generated yet — run a morning scan.");
+            if (predictionStats.EvaluatedPredictions == 0) warnings.Add("No outcomes recorded yet — run an EOD review after predictions have had time.");
             if (signalPerf.Count == 0) warnings.Add("No signal performance data — the learning engine hasn't run yet.");
 
             // Check for items with missing data
@@ -86,13 +98,6 @@ public class DashboardController : ControllerBase
             if (itemsWithMissingData.Count > 0)
                 warnings.Add($"{itemsWithMissingData.Count} watchlist item(s) have missing data warnings.");
 
-            // Prediction accuracy stats
-            var evaluatedOutcomes = outcomes.Where(o => o.DirectionCorrect.HasValue).ToList();
-            var correctCount = evaluatedOutcomes.Count(o => o.DirectionCorrect == true);
-            var accuracyPct = evaluatedOutcomes.Count > 0
-                ? Math.Round((double)correctCount / evaluatedOutcomes.Count * 100, 1)
-                : (double?)null;
-
             return Ok(new
             {
                 overview = new
@@ -101,9 +106,54 @@ public class DashboardController : ControllerBase
                     reviewNeededCount = review.Count,
                     swapCandidateCount = swap.Count,
                     candidatesScored = candidates.Count,
-                    totalPredictions = predictions.Count,
-                    evaluatedOutcomes = evaluatedOutcomes.Count,
-                    accuracyPct,
+                },
+                predictionStats = new
+                {
+                    predictionStats.TotalPredictions,
+                    predictionStats.EvaluatedPredictions,
+                    predictionStats.CorrectPredictions,
+                    predictionStats.IncorrectPredictions,
+                    predictionStats.InconclusivePredictions,
+                    predictionStats.PendingPredictions,
+                    predictionStats.AccuracyPercent,
+                },
+                directionalStockStats = new
+                {
+                    directionalStats.Total,
+                    directionalStats.Evaluated,
+                    directionalStats.Correct,
+                    directionalStats.Incorrect,
+                    directionalStats.Pending,
+                    directionalStats.AccuracyPercent,
+                },
+                longTermStockStats = new
+                {
+                    longTermStats.Total,
+                    longTermStats.Evaluated,
+                    longTermStats.Correct,
+                    longTermStats.Incorrect,
+                    longTermStats.Pending,
+                    longTermStats.AccuracyPercent,
+                },
+                paperOptionStats = new
+                {
+                    paperOptionStats.Total,
+                    paperOptionStats.Evaluated,
+                    paperOptionStats.Profitable,
+                    paperOptionStats.Unprofitable,
+                    paperOptionStats.Open,
+                    paperOptionStats.WinRatePercent,
+                },
+                scanResultStats = new
+                {
+                    scanResultStats.Total,
+                    scanResultStats.NeutralNoEdge,
+                    scanResultStats.NeutralRangeBound,
+                    scanResultStats.NeutralHighVolatility,
+                    scanResultStats.WatchOnly,
+                    scanResultStats.Rejected,
+                    scanResultStats.Unavailable,
+                    scanResultStats.Legacy,
                 },
                 watchlist = new
                 {
@@ -136,12 +186,61 @@ public class DashboardController : ControllerBase
                     eodReview = FormatJobStatus(latestEodReview),
                     learningUpdate = FormatJobStatus(latestLearningUpdate),
                 },
-                predictions = predictions.Select(p => new
+                recentPredictions = recentPredictions.Select(pw => new
                 {
-                    p.Ticker, p.PredictionType, p.ConfidenceScore,
-                    p.ImportanceScore, p.RiskScore, p.Status,
-                    p.PredictionReason, p.TimeWindow,
-                    p.MissingDataWarnings,
+                    pw.Prediction.Id,
+                    pw.Prediction.Ticker,
+                    pw.Prediction.PredictionType,
+                    pw.Prediction.ConfidenceScore,
+                    pw.Prediction.ImportanceScore,
+                    pw.Prediction.RiskScore,
+                    pw.Prediction.Status,
+                    pw.Prediction.PredictionReason,
+                    pw.Prediction.BullishCase,
+                    pw.Prediction.BearishCase,
+                    pw.Prediction.EntryReferencePrice,
+                    pw.Prediction.Atr14,
+                    pw.Prediction.AtrPercent,
+                    pw.Prediction.ExpectedMoveDollar,
+                    pw.Prediction.ExpectedMovePercent,
+                    pw.Prediction.PredictedPrice,
+                    pw.Prediction.PredictedMovePercent,
+                    pw.Prediction.ProjectedPriceLow,
+                    pw.Prediction.ProjectedPriceHigh,
+                    pw.Prediction.TargetPrice,
+                    pw.Prediction.StopPrice,
+                    pw.Prediction.InvalidationPrice,
+                    pw.Prediction.SupportLevel,
+                    pw.Prediction.ResistanceLevel,
+                    pw.Prediction.RiskRewardRatio,
+                    pw.Prediction.PricePredictionMethod,
+                    pw.Prediction.PricePredictionWarnings,
+                    pw.Prediction.InvalidationRule,
+                    pw.Prediction.TimeWindow,
+                    pw.Prediction.DataSourcesUsed,
+                    pw.Prediction.MissingDataWarnings,
+                    createdAt = pw.Prediction.CreatedAt.ToString("o"),
+                    hasOutcome = pw.Outcome is not null,
+                    verdict = pw.Outcome?.DirectionCorrect,
+                    targetHit = pw.Outcome?.TargetHit,
+                    stopHit = pw.Outcome?.StopHit,
+                    wasInProjectedZone = pw.Outcome?.WasInProjectedZone,
+                    priceAccuracyPercent = pw.Outcome?.PriceAccuracyPercent,
+                    pricePredictionErrorPercent = pw.Outcome?.PricePredictionErrorPercent,
+                    finalMovePercent = pw.Outcome?.PercentMove,
+                    maxFavorablePercent = pw.Outcome?.MaxFavorablePercent,
+                    maxAdversePercent = pw.Outcome?.MaxAdversePercent,
+                    evaluatedAt = pw.Outcome?.EvaluationTime.ToString("o"),
+                }),
+                recentScanResults = recentScanResults.Select(p => new
+                {
+                    p.Id,
+                    p.Ticker,
+                    predictionType = p.PredictionType.ToString(),
+                    p.ConfidenceScore,
+                    p.RiskScore,
+                    p.PredictionReason,
+                    p.TimeWindow,
                     createdAt = p.CreatedAt.ToString("o"),
                 }),
                 learning = new

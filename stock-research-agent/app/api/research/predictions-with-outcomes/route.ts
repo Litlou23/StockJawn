@@ -10,8 +10,22 @@ export async function GET(req: NextRequest) {
   if (isLocal) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
   try {
-    const limit = req.nextUrl.searchParams.get('limit') || '50';
-    const res = await fetch(`${base}/api/research/predictions-with-outcomes?limit=${limit}`, {
+    const params = new URLSearchParams();
+
+    const from = req.nextUrl.searchParams.get('from');
+    const to = req.nextUrl.searchParams.get('to');
+    const limit = req.nextUrl.searchParams.get('limit');
+    const category = req.nextUrl.searchParams.get('category');
+
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    if (limit) params.set('limit', limit);
+    if (category) params.set('category', category);
+
+    const qs = params.toString();
+    const url = `${base}/api/research/predictions-with-outcomes${qs ? `?${qs}` : ''}`;
+
+    const res = await fetch(url, {
       headers: { 'Content-Type': 'application/json' },
     });
     const data = await res.json();

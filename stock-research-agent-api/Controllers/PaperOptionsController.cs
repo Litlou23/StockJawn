@@ -97,6 +97,31 @@ public class PaperOptionsController : ControllerBase
         return Ok(new { count = outcomes.Count, outcomes });
     }
 
+    /// <summary>GET /api/paper-options/all-with-outcomes — all candidates joined with latest outcome.</summary>
+    [HttpGet("all-with-outcomes")]
+    public async Task<IActionResult> AllWithOutcomes([FromQuery] int limit = 200)
+    {
+        var candidates = await _service.GetAllCandidatesWithOutcomesAsync(limit);
+        var profitable = candidates.Count(c => c.LatestOutcome?.ContractProfitable == true);
+        var unprofitable = candidates.Count(c => c.LatestOutcome?.ContractProfitable == false);
+        var evaluated = profitable + unprofitable;
+        var open = candidates.Count(c => c.Candidate.Status == PaperCandidateStatus.open);
+
+        return Ok(new
+        {
+            stats = new
+            {
+                total = candidates.Count,
+                evaluated,
+                profitable,
+                unprofitable,
+                open,
+                winRate = evaluated > 0 ? Math.Round(100.0 * profitable / evaluated, 1) : 0,
+            },
+            items = candidates,
+        });
+    }
+
     /// <summary>GET /api/paper-options/debug — counts, learning stats, provider config.</summary>
     [HttpGet("debug")]
     public async Task<IActionResult> Debug()

@@ -297,6 +297,12 @@ public record PaperCandidateWithOutcome
     public PaperOptionOutcome? LatestOutcome { get; init; }
 }
 
+public record PaperCandidateWithOutcomeEnhanced
+{
+    public PaperCandidateEnhanced Candidate { get; init; } = null!;
+    public PaperOutcomeEnhanced? LatestOutcome { get; init; }
+}
+
 // ---------------------------------------------------------------------------
 // MarketData.app Stock Quote — parallel arrays (single element for single symbol)
 // ---------------------------------------------------------------------------

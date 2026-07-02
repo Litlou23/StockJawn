@@ -2,6 +2,7 @@ using System.Text.Json;
 using OpenAI.Chat;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.Providers.StockFit;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -26,17 +27,20 @@ public class PredictionGenerator
 {
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
+    private readonly StockFitProvider _stockFit;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
 
     public PredictionGenerator(
         MarketDataService marketData,
         ResearchRepository repo,
+        StockFitProvider stockFit,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
         _marketData = marketData;
         _repo = repo;
+        _stockFit = stockFit;
         _logger = logger;
 
         var apiKey = configuration["OPENAI_API_KEY"];
@@ -60,6 +64,79 @@ public class PredictionGenerator
         var (quote, bars, technical, warnings) = await _marketData.GetFullContextAsync(ticker);
 
         var newsContext = new List<MarketSnapshotNews>();
+
+        // StockFit — company news + SEC filings + earnings context. Never a
+        // source of price/technical data. If not configured or the endpoint
+        // errors, we log a warning and continue with an empty catalyst set —
+        // never fake filings/articles.
+        if (_stockFit.IsConfigured)
+        {
+            try
+            {
+                var news = await _stockFit.GetNewsAsync(ticker, limit: 15);
+                foreach (var w in news.Warnings) warnings.Add($"stockfit_news:{w}");
+                foreach (var a in news.Data ?? [])
+                {
+                    newsContext.Add(new MarketSnapshotNews
+                    {
+                        Title = a.Title,
+                        SourceName = a.Publisher ?? "stockfit",
+                        Url = a.ArticleUrl ?? "",
+                        PublishedAt = (a.PublishedAt ?? DateTimeOffset.UtcNow).ToString("o"),
+                        CatalystType = "news",
+                        Sentiment = a.Sentiment,
+                        ImportanceScore = ScoreNewsImportance(a),
+                    });
+                }
+
+                var filings = await _stockFit.GetFilingsAsync(ticker, limit: 10);
+                foreach (var w in filings.Warnings) warnings.Add($"stockfit_filings:{w}");
+                foreach (var f in filings.Data ?? [])
+                {
+                    newsContext.Add(new MarketSnapshotNews
+                    {
+                        Title = f.Headline,
+                        SourceName = "SEC via stockfit",
+                        Url = f.FilingUrl ?? "",
+                        PublishedAt = (f.FilingDate ?? DateTimeOffset.UtcNow).ToString("o"),
+                        CatalystType = MapFilingToCatalystType(f.FilingType, f.EventType),
+                        Sentiment = null, // filings are structural — no sentiment invented
+                        ImportanceScore = f.CatalystStrengthScore,
+                    });
+                }
+
+                var earnings = await _stockFit.GetEarningsCalendarAsync(ticker);
+                foreach (var w in earnings.Warnings) warnings.Add($"stockfit_earnings:{w}");
+                foreach (var e in (earnings.Data ?? []).Where(x => x.DaysUntilReport is >= 0 and <= 14))
+                {
+                    newsContext.Add(new MarketSnapshotNews
+                    {
+                        Title = $"Earnings in {e.DaysUntilReport}d ({e.FiscalPeriod ?? "?"}{(e.Time is null ? "" : " " + e.Time)})",
+                        SourceName = "earnings via stockfit",
+                        Url = "",
+                        PublishedAt = DateTimeOffset.UtcNow.ToString("o"),
+                        CatalystType = "earnings",
+                        Sentiment = null,
+                        ImportanceScore = e.DaysUntilReport switch
+                        {
+                            <= 1 => 95,
+                            <= 3 => 85,
+                            <= 7 => 70,
+                            _ => 55,
+                        },
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[prediction] StockFit fetch failed for {Ticker}", ticker);
+                warnings.Add($"stockfit_exception:{ex.Message}");
+            }
+        }
+        else
+        {
+            warnings.Add("stockfit_not_configured");
+        }
 
         var availability = new MarketSnapshotAvailability
         {
@@ -96,20 +173,37 @@ public class PredictionGenerator
     public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
         GeneratePredictionForTickerAsync(string ticker, string runId, MarketSnapshot snapshot)
     {
-        // ── Step 1: Compute real signals and scores ──────────────────
+        // ── Step 1: Compute indicators, benchmark, and scores ────────
         var weights = (await _repo.GetScoringWeightsAsync())
             .ToDictionary(w => w.SignalName, w => w.Weight);
         var lessons = (await _repo.GetRecentLearningInsightsAsync(10))
             .Select(i => i.Summary).ToList();
 
-        var (techScore, techSignals) = ScoreTechnicalSignals(snapshot, weights);
-        var (catScore, catSignals) = ScoreCatalystSignals(snapshot, weights);
-        var totalScore = techScore + catScore;
-        var allSignals = techSignals.Concat(catSignals).ToList();
+        var indicators = IndicatorEngine.Compute(snapshot.RecentBars);
 
-        var predType = DeterminePredictionType(totalScore);
-        var confidence = CalculateConfidence(snapshot, totalScore);
-        var risk = CalculateRisk(snapshot, predType);
+        // Fetch SPY/QQQ for market context (best-effort)
+        MarketSnapshotQuote? spyQuote = null, qqqQuote = null;
+        try
+        {
+            var spyTask = _marketData.GetQuoteAsync("SPY");
+            var qqqTask = _marketData.GetQuoteAsync("QQQ");
+            await Task.WhenAll(spyTask, qqqTask);
+            spyQuote = spyTask.Result;
+            qqqQuote = qqqTask.Result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Failed to fetch SPY/QQQ benchmark quotes for {Ticker}", ticker);
+        }
+
+        var benchmark = IndicatorEngine.ComputeBenchmarkContext(snapshot.Quote, spyQuote, qqqQuote);
+
+        var scoring = ScoringEngine.Score(snapshot, indicators, benchmark, weights, lessons);
+        var predType = scoring.PredictionType;
+        var confidence = scoring.Confidence;
+        var risk = scoring.Risk;
+        var totalScore = scoring.DirectionalScore;
+        var allSignals = scoring.Signals;
 
         if (confidence < 5 && predType == "watch_only") return (null, []);
 
@@ -148,24 +242,63 @@ public class PredictionGenerator
                     ? "Invalidate if price rises >2% from entry or bullish catalyst emerges"
                     : "Invalidate if major catalyst changes thesis direction");
 
-        // ── Step 4: Assemble prediction (scores from engine, text from AI) ──
+        // ── Step 4: ATR-based price prediction engine ──
+        var entryPrice = snapshot.Quote?.Price;
+        var priceCalc = ComputeAtrPriceForecast(
+            entryPrice, predType, "1_day", snapshot, confidence, risk);
+
+        // Second-pass finalization: apply R/R-aware caps + actionability tier
+        // now that we know the risk/reward ratio.
+        scoring = ScoringEngine.FinalizeWithRiskReward(scoring, priceCalc.RiskRewardRatio);
+        confidence = scoring.Confidence;
+
+        // If R:R ratio is too low, downgrade to watch_only
+        if (priceCalc.RiskRewardRatio is double rr and < 1.5
+            && (predType == "bullish" || predType == "bearish"))
+        {
+            predType = "watch_only";
+            priceCalc.Warnings.Add($"Downgraded to watch_only: R:R ratio {rr:F2} < 1.5 minimum");
+        }
+
+        // ── Step 5: Assemble prediction (scores from engine, text from AI) ──
         var prediction = new PredictionCandidate
         {
             RunId = runId,
             Ticker = ticker,
-            PredictionType = Enum.TryParse<PredictionType>(predType, out var pt) ? pt : PredictionType.neutral,
+            PredictionType = Enum.TryParse<PredictionType>(predType, out var pt) ? pt : PredictionType.neutral_no_edge,
             AssetType = PredictionAssetType.stock,
             TimeWindow = "1_day",
             ConfidenceScore = confidence,
             ImportanceScore = Math.Min(Math.Abs((int)totalScore), 100),
             RiskScore = risk,
-            EntryReferencePrice = snapshot.Quote?.Price,
+            EntryReferencePrice = entryPrice,
+            Atr14 = priceCalc.Atr14,
+            AtrPercent = priceCalc.AtrPercent,
+            TimeframeMultiplier = priceCalc.TimeframeMultiplier,
+            SignalModifier = priceCalc.SignalModifier,
+            ExpectedMoveDollar = priceCalc.ExpectedMoveDollar,
+            ExpectedMovePercent = priceCalc.ExpectedMovePercent,
+            PredictedPrice = priceCalc.PredictedPrice,
+            PredictedMovePercent = priceCalc.PredictedMovePercent,
+            ProjectedPriceLow = priceCalc.ProjectedPriceLow,
+            ProjectedPriceHigh = priceCalc.ProjectedPriceHigh,
+            TargetPrice = priceCalc.TargetPrice,
+            StopPrice = priceCalc.StopPrice,
+            InvalidationPrice = priceCalc.InvalidationPrice,
+            SupportLevel = priceCalc.SupportLevel,
+            ResistanceLevel = priceCalc.ResistanceLevel,
+            RiskRewardRatio = priceCalc.RiskRewardRatio,
+            PricePredictionMethod = priceCalc.Method,
+            PricePredictionWarnings = priceCalc.Warnings,
             BullishCase = string.IsNullOrEmpty(bullishCase) ? "No strong bullish signals" : bullishCase,
             BearishCase = string.IsNullOrEmpty(bearishCase) ? "No strong bearish signals identified" : bearishCase,
             PredictionReason = thesis,
             InvalidationRule = invalidation,
             DataSourcesUsed = dataSources,
             MissingDataWarnings = missingWarnings,
+            ScoreDebugJson = JsonSerializer.Serialize(scoring.Breakdown, new JsonSerializerOptions { WriteIndented = false }),
+            ActionabilityScore = scoring.Breakdown.ActionabilityScore,
+            ActionabilityTier = scoring.Breakdown.ActionabilityTier,
             Status = "open",
         };
 
@@ -277,7 +410,9 @@ public class PredictionGenerator
               "bullish_case": "<specific bullish factors from the provided signals and data>",
               "bearish_case": "<specific bearish factors from the provided signals and data>",
               "invalidation_rule": "<specific price level or condition that would invalidate this prediction>",
-              "key_levels": { "support": <price or null>, "resistance": <price or null> }
+              "key_levels": { "support": <price or null>, "resistance": <price or null> },
+              "predicted_price": <number or null — your best estimate of where this stock will close at the end of the time window>,
+              "predicted_move_percent": <number or null — expected % move from current price, positive for up, negative for down>
             }
 
             Rules:
@@ -286,6 +421,8 @@ public class PredictionGenerator
             - Explain the reasoning behind the computed direction — don't override it.
             - Keep thesis to 1-3 sentences. Be concise and insightful.
             - Invalidation rule should reference specific price levels when possible.
+            - predicted_price must be a realistic price based on the current price, signals, and key levels.
+            - predicted_move_percent should match the direction (positive for bullish, negative for bearish).
             """;
     }
 
@@ -418,97 +555,242 @@ public class PredictionGenerator
         return inputs;
     }
 
+    // Old ScoreTechnicalSignals, ScoreCatalystSignals, DeterminePredictionType,
+    // CalculateConfidence, CalculateRisk removed — replaced by ScoringEngine.Score()
+
     // -----------------------------------------------------------------------
-    // Rule-based scoring engine — the source of truth for all predictions
+    // ATR-based price prediction engine
     // -----------------------------------------------------------------------
 
-    private static (double Score, List<string> Signals) ScoreTechnicalSignals(
-        MarketSnapshot snapshot, Dictionary<string, double> weights)
+    private static readonly Dictionary<string, double> TimeframeMultipliers = new()
     {
-        var tech = snapshot.TechnicalContext;
-        if (tech is null) return (0, ["No technical data available"]);
+        ["intraday"] = 0.5,
+        ["1_day"] = 1.0,
+        ["2_day"] = 1.4,
+        ["3_day"] = 1.7,
+        ["1_week"] = 2.2,
+        ["1_month"] = 4.5,
+        ["3_month"] = 8.0,
+        ["6_month"] = 12.0,
+        ["1_year"] = 17.0,
+    };
 
-        double score = 0;
-        var signals = new List<string>();
-
-        var trendW = weights.GetValueOrDefault("technical_trend", 1.0);
-        if (tech.TrendDirection == "bullish") { score += 20 * trendW; signals.Add("Trend: bullish"); }
-        else if (tech.TrendDirection == "bearish") { score -= 15 * trendW; signals.Add("Trend: bearish"); }
-        else signals.Add("Trend: neutral/unknown");
-
-        var momW = weights.GetValueOrDefault("technical_momentum", 1.0);
-        if (tech.MomentumSummary.Contains("up", StringComparison.OrdinalIgnoreCase))
-        { score += 10 * momW; signals.Add("Momentum: positive"); }
-        else if (tech.MomentumSummary.Contains("down", StringComparison.OrdinalIgnoreCase))
-        { score -= 10 * momW; signals.Add("Momentum: negative"); }
-
-        var volW = weights.GetValueOrDefault("technical_volume", 1.0);
-        if (tech.VolumeSummary.Contains("elevated", StringComparison.OrdinalIgnoreCase))
-        { score += 10 * volW; signals.Add("Volume: elevated"); }
-        else if (tech.VolumeSummary.Contains("below", StringComparison.OrdinalIgnoreCase))
-        { score -= 5 * volW; signals.Add("Volume: below average"); }
-
-        return (score, signals);
+    internal class AtrPriceForecast
+    {
+        public double? Atr14 { get; set; }
+        public double? AtrPercent { get; set; }
+        public double? TimeframeMultiplier { get; set; }
+        public double? SignalModifier { get; set; }
+        public double? ExpectedMoveDollar { get; set; }
+        public double? ExpectedMovePercent { get; set; }
+        public double? PredictedPrice { get; set; }
+        public double? PredictedMovePercent { get; set; }
+        public double? ProjectedPriceLow { get; set; }
+        public double? ProjectedPriceHigh { get; set; }
+        public double? TargetPrice { get; set; }
+        public double? StopPrice { get; set; }
+        public double? InvalidationPrice { get; set; }
+        public double? SupportLevel { get; set; }
+        public double? ResistanceLevel { get; set; }
+        public double? RiskRewardRatio { get; set; }
+        public string Method { get; set; } = "unavailable";
+        public List<string> Warnings { get; set; } = [];
     }
 
-    private static (double Score, List<string> Signals) ScoreCatalystSignals(
-        MarketSnapshot snapshot, Dictionary<string, double> weights)
+    private static AtrPriceForecast ComputeAtrPriceForecast(
+        double? entryPrice, string predType, string timeWindow,
+        MarketSnapshot snapshot, int confidence, int risk)
     {
-        var news = snapshot.NewsContext;
-        if (news.Count == 0) return (0, ["No recent news/catalysts"]);
+        var result = new AtrPriceForecast();
+        if (entryPrice is not double ep || ep == 0) return result;
+        if (predType != "bullish" && predType != "bearish") return result;
 
-        double score = 0;
-        var signals = new List<string>();
-
-        var volW = weights.GetValueOrDefault("news_volume", 1.0);
-        if (news.Count >= 3) { score += 10 * volW; signals.Add($"High news volume: {news.Count} items"); }
-
-        foreach (var item in news)
+        var bars = snapshot.RecentBars;
+        if (bars.Count < 2)
         {
-            var catKey = item.CatalystType is not null ? $"catalyst_{item.CatalystType}" : null;
-            var catW = catKey is not null ? weights.GetValueOrDefault(catKey, 1.0) : 1.0;
-
-            var impactScore = item.ImportanceScore * catW * 5;
-            score += item.Sentiment == "bearish" ? -impactScore : impactScore;
-
-            var sentW = item.Sentiment == "bearish"
-                ? weights.GetValueOrDefault("news_sentiment_bearish", 1.0)
-                : weights.GetValueOrDefault("news_sentiment_bullish", 1.0);
-            score += (item.Sentiment == "bullish" ? 5 : item.Sentiment == "bearish" ? -5 : 0) * sentW;
-
-            var titlePreview = item.Title.Length > 60 ? item.Title[..60] : item.Title;
-            signals.Add($"{item.CatalystType ?? "news"}: \"{titlePreview}\" ({item.Sentiment ?? "neutral"}, imp={item.ImportanceScore})");
+            result.Warnings.Add("Not enough bars for ATR calculation");
+            return result;
         }
 
-        return (score, signals);
-    }
-
-    private static string DeterminePredictionType(double totalScore) =>
-        totalScore >= 30 ? "bullish"
-        : totalScore <= -20 ? "bearish"
-        : Math.Abs(totalScore) >= 10 ? "neutral"
-        : "watch_only";
-
-    private static int CalculateConfidence(MarketSnapshot snapshot, double totalScore)
-    {
-        double confidence = Math.Min(Math.Abs(totalScore), 100);
-        if (!snapshot.DataAvailability.MarketDataAvailable) confidence *= 0.5;
-        if (!snapshot.DataAvailability.NewsAvailable) confidence *= 0.7;
-        if (!snapshot.DataAvailability.OptionsChainAvailable) confidence *= 0.9;
-        return (int)Math.Round(confidence);
-    }
-
-    private static int CalculateRisk(MarketSnapshot snapshot, string predictionType)
-    {
-        int risk = 50;
-        if (snapshot.TechnicalContext is not null)
+        // --- ATR14 from TrueRange ---
+        var trueRanges = new List<double>();
+        for (int i = 1; i < bars.Count; i++)
         {
-            if (predictionType == "bullish" && snapshot.TechnicalContext.TrendDirection == "bearish") risk += 20;
-            if (predictionType == "bearish" && snapshot.TechnicalContext.TrendDirection == "bullish") risk += 20;
+            var high = bars[i].High;
+            var low = bars[i].Low;
+            var prevClose = bars[i - 1].Close;
+            var tr = Math.Max(high - low, Math.Max(Math.Abs(high - prevClose), Math.Abs(low - prevClose)));
+            trueRanges.Add(tr);
         }
-        if (!snapshot.DataAvailability.MarketDataAvailable) risk += 15;
-        if (!snapshot.DataAvailability.NewsAvailable) risk += 10;
-        return Math.Min(risk, 100);
+
+        int atrPeriod = Math.Min(14, trueRanges.Count);
+        if (atrPeriod < 5)
+        {
+            result.Warnings.Add($"Only {atrPeriod} bars for ATR (need 14 for best accuracy)");
+        }
+        var atr14 = trueRanges.Take(atrPeriod).Average();
+        result.Atr14 = Math.Round(atr14, 4);
+        result.AtrPercent = Math.Round((atr14 / ep) * 100, 2);
+
+        // Sanity checks on ATR
+        if (result.AtrPercent > 10)
+            result.Warnings.Add($"ATR is unusually high ({result.AtrPercent}% of price) — wide projected range");
+        if (result.AtrPercent < 0.3)
+            result.Warnings.Add($"ATR is unusually low ({result.AtrPercent}% of price) — stock may be range-bound");
+
+        // --- Timeframe multiplier ---
+        var tfMultiplier = TimeframeMultipliers.GetValueOrDefault(timeWindow, 1.0);
+        result.TimeframeMultiplier = tfMultiplier;
+
+        // --- Signal modifier: 1.0 + (catalyst*0.25) + (volume*0.15) + (trend*0.15) - (risk*0.25) ---
+        var catalystScore = ScoreCatalystFactor(snapshot);
+        var volumeScore = ScoreVolumeFactor(snapshot);
+        var trendScore = ScoreTrendFactor(snapshot);
+        var riskScore = risk / 100.0;
+
+        var modifier = 1.0
+            + (catalystScore * 0.25)
+            + (volumeScore * 0.15)
+            + (trendScore * 0.15)
+            - (riskScore * 0.25);
+        modifier = Math.Clamp(modifier, 0.75, 1.75);
+        result.SignalModifier = Math.Round(modifier, 3);
+
+        // --- Expected move ---
+        var expectedMove = atr14 * tfMultiplier * modifier;
+        result.ExpectedMoveDollar = Math.Round(expectedMove, 2);
+        result.ExpectedMovePercent = Math.Round((expectedMove / ep) * 100, 2);
+
+        // --- Support / resistance from bars ---
+        var lookbackBars = bars.Take(Math.Min(10, bars.Count)).ToList();
+        var support = lookbackBars.Min(b => b.Low);
+        var resistance = lookbackBars.Max(b => b.High);
+        result.SupportLevel = Math.Round(support, 2);
+        result.ResistanceLevel = Math.Round(resistance, 2);
+
+        // --- Projected price zone ---
+        if (predType == "bullish")
+        {
+            result.ProjectedPriceLow = Math.Round(ep, 2);
+            result.ProjectedPriceHigh = Math.Round(ep + expectedMove, 2);
+            result.PredictedPrice = Math.Round(ep + expectedMove * 0.6, 2);
+            result.PredictedMovePercent = Math.Round((expectedMove * 0.6 / ep) * 100, 2);
+
+            var rawTarget = ep + expectedMove;
+            result.TargetPrice = Math.Round(Math.Min(rawTarget, resistance), 2);
+
+            var atrStop = ep - atr14;
+            var supportStop = support - 0.25 * atr14;
+            result.StopPrice = Math.Round(Math.Max(atrStop, supportStop), 2);
+
+            result.InvalidationPrice = Math.Round(ep - 1.5 * atr14, 2);
+        }
+        else
+        {
+            result.ProjectedPriceLow = Math.Round(ep - expectedMove, 2);
+            result.ProjectedPriceHigh = Math.Round(ep, 2);
+            result.PredictedPrice = Math.Round(ep - expectedMove * 0.6, 2);
+            result.PredictedMovePercent = Math.Round((-expectedMove * 0.6 / ep) * 100, 2);
+
+            var rawTarget = ep - expectedMove;
+            result.TargetPrice = Math.Round(Math.Max(rawTarget, support), 2);
+
+            var atrStop = ep + atr14;
+            var resistanceStop = resistance + 0.25 * atr14;
+            result.StopPrice = Math.Round(Math.Min(atrStop, resistanceStop), 2);
+
+            result.InvalidationPrice = Math.Round(ep + 1.5 * atr14, 2);
+        }
+
+        // --- Risk/reward ratio ---
+        var reward = Math.Abs(result.TargetPrice!.Value - ep);
+        var riskDollar = Math.Abs(ep - result.StopPrice!.Value);
+        result.RiskRewardRatio = riskDollar > 0 ? Math.Round(reward / riskDollar, 2) : 0;
+
+        if (result.RiskRewardRatio < 1.5)
+            result.Warnings.Add($"Poor risk/reward ratio: {result.RiskRewardRatio:F2} (minimum 1.5)");
+
+        if (predType == "bullish" && result.TargetPrice <= resistance * 0.99)
+            result.Warnings.Add("Target near resistance — upside may be capped");
+
+        result.Method = atrPeriod >= 14 ? "atr14_full" : $"atr{atrPeriod}_partial";
+        return result;
+    }
+
+    private static double ScoreCatalystFactor(MarketSnapshot snapshot)
+    {
+        if (snapshot.NewsContext.Count == 0) return 0;
+        var avgImportance = snapshot.NewsContext.Average(n => n.ImportanceScore);
+        return Math.Clamp(avgImportance / 5.0, 0, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // StockFit → MarketSnapshotNews helpers
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Deterministic importance score for a StockFit news article. Blends
+    /// provider-supplied relevance with a small sentiment lift; never
+    /// invents. Missing signals default to 30 (neutral placeholder in the
+    /// 0..100 range that catalyst scoring reads).
+    /// </summary>
+    private static double ScoreNewsImportance(NormalizedNewsArticle a)
+    {
+        double baseScore = 40;
+        if (a.RelevanceScore is double rel) baseScore = Math.Clamp(rel * 100.0, 10, 90);
+        if (a.SentimentScore is double s && Math.Abs(s) > 0.3) baseScore += 10;
+        // Recency lift — news from the last 24h counts more than a week-old article.
+        if (a.PublishedAt is DateTimeOffset p)
+        {
+            var hours = (DateTimeOffset.UtcNow - p).TotalHours;
+            if (hours <= 6) baseScore += 15;
+            else if (hours <= 24) baseScore += 8;
+            else if (hours > 168) baseScore *= 0.5;
+        }
+        return Math.Round(Math.Clamp(baseScore, 0, 100), 1);
+    }
+
+    private static string MapFilingToCatalystType(string filingType, string? eventType)
+    {
+        // For 8-K, prefer the inferred event (earnings_release, acquisition,
+        // etc.) since those score differently in the learning engine. Fall
+        // back to filing-type shorthand for non-8-K filings.
+        var ft = filingType.ToUpperInvariant();
+        if (ft == "8-K" && !string.IsNullOrWhiteSpace(eventType))
+            return $"8k_{eventType}";
+
+        return ft switch
+        {
+            "8-K" => "8k_filing",
+            "10-Q" => "quarterly_report",
+            "10-K" => "annual_report",
+            "S-1" or "S-3" => "shelf_or_ipo",
+            "4" => "insider_transaction",
+            "13D" => "beneficial_ownership_change",
+            "13G" or "13F" or "13F-HR" => "institutional_holding",
+            _ => eventType ?? "filing",
+        };
+    }
+
+    private static double ScoreVolumeFactor(MarketSnapshot snapshot)
+    {
+        if (snapshot.TechnicalContext is null) return 0;
+        if (snapshot.TechnicalContext.VolumeSummary.Contains("elevated", StringComparison.OrdinalIgnoreCase))
+            return 0.8;
+        if (snapshot.TechnicalContext.VolumeSummary.Contains("below", StringComparison.OrdinalIgnoreCase))
+            return -0.3;
+        return 0;
+    }
+
+    private static double ScoreTrendFactor(MarketSnapshot snapshot)
+    {
+        if (snapshot.TechnicalContext is null) return 0;
+        return snapshot.TechnicalContext.TrendDirection switch
+        {
+            "bullish" => 0.7,
+            "bearish" => -0.5,
+            _ => 0,
+        };
     }
 }
 
@@ -523,6 +805,8 @@ internal class AiExplanationResponse
     public string? BearishCase { get; set; }
     public string? InvalidationRule { get; set; }
     public AiKeyLevels? KeyLevels { get; set; }
+    public double? PredictedPrice { get; set; }
+    public double? PredictedMovePercent { get; set; }
 }
 
 internal class AiKeyLevels

@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
+import { InfoBanner } from '@/components/InfoTip';
+import { useSort, SortHeader } from '@/components/SortableTable';
 
 export const dynamic = 'force-dynamic';
 
@@ -349,9 +351,9 @@ export default function PaperOptionsPage() {
       <div className="mx-auto max-w-7xl px-4 py-8">
         {/* Header */}
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-zinc-100">Paper Options</h1>
+          <h1 className="text-2xl font-bold text-zinc-100">Manual Paper Options</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Track how real option contracts would have performed against system predictions.
+            Manually generate, compare, and track real option contracts against system predictions.
           </p>
         </div>
 
@@ -360,6 +362,24 @@ export default function PaperOptionsPage() {
           <span className="font-medium">Paper trading only.</span>{' '}
           Uses real option-chain data when available, but no real trades are placed.
           Delayed options data may not reflect current live market prices.
+        </div>
+
+        <div className="mb-6">
+          <InfoBanner items={[
+            { term: 'Step 1: Select Prediction', definition: 'Choose an open bullish/bearish prediction to generate option candidates for. Only directional picks can have options.' },
+            { term: 'Step 2: Duration', definition: 'How long you expect the trade to play out. System Recommended auto-selects based on confidence and risk.' },
+            { term: 'Auto-save', definition: 'Automatically saves the top-ranked candidate. Otherwise you review and save manually.' },
+            { term: 'Contract Score', definition: 'Composite score (0-100) ranking how well the contract fits the prediction. Factors: delta alignment, spread tightness, volume/OI, DTE fit.' },
+            { term: 'Strike', definition: 'The price at which the option can be exercised. Closer to current price = more expensive but higher delta.' },
+            { term: 'DTE', definition: 'Days to expiration. Shorter DTE = cheaper but faster time decay (theta).' },
+            { term: 'Bid / Ask / Mid', definition: 'Bid = what buyers pay. Ask = what sellers want. Mid = average, used for paper P&L calculations.' },
+            { term: 'IV (Implied Volatility)', definition: 'Market\'s expected future volatility priced into the option. Higher IV = more expensive premiums.' },
+            { term: 'Delta', definition: 'How much the option price moves per $1 move in the stock. 0.50 delta ≈ 50% chance of expiring in the money.' },
+            { term: 'Theta', definition: 'Daily time decay — how much value the option loses per day just from time passing.' },
+            { term: 'Spread %', definition: 'Bid-ask spread as a percentage. Lower = more liquid, easier to trade. Above 15% is a warning sign.' },
+            { term: 'Open Interest', definition: 'Total open contracts. Higher OI = more liquid. Low OI can mean wide spreads and difficulty exiting.' },
+            { term: 'Evaluate', definition: 'Fetches current option prices and calculates paper P&L, direction accuracy, and updates learning stats.' },
+          ]} />
         </div>
 
         {(error || info) && (
@@ -478,67 +498,11 @@ export default function PaperOptionsPage() {
             {generated.candidates.length === 0 ? (
               <EmptyState>No contracts passed the filters. Try a different duration.</EmptyState>
             ) : (
-              <>
-                <div className="overflow-x-auto rounded-lg border border-zinc-800">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
-                      <tr>
-                        {['Rank', 'Ticker', 'Type', 'Exp', 'DTE', 'Strike', 'Bid', 'Ask', 'Mid',
-                          'Cost', 'Vol', 'OI', 'IV', 'Δ', 'Θ', 'Spread%', 'Score', 'Bucket',
-                          'Warnings', 'Reason'].map(h => (
-                          <th key={h} className="px-2 py-2 whitespace-nowrap">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {generated.candidates.map((c, idx) => (
-                        <tr
-                          key={c.optionSymbol + idx}
-                          onClick={() => setSelectedCandidateIndex(idx)}
-                          className={`border-b border-zinc-800/50 cursor-pointer transition-colors ${
-                            selectedCandidateIndex === idx ? 'bg-violet-950/40' : 'hover:bg-zinc-800/30'
-                          }`}
-                        >
-                          <td className="px-2 py-2 text-zinc-100">{c.rank}</td>
-                          <td className="px-2 py-2 text-zinc-200">{c.ticker}</td>
-                          <td className="px-2 py-2">
-                            <SidePill side={c.side} />
-                          </td>
-                          <td className="px-2 py-2 text-zinc-300">{fmtDateShort(c.expiration)}</td>
-                          <td className="px-2 py-2 text-zinc-300">{c.dteAtEntry}d</td>
-                          <td className="px-2 py-2 text-zinc-200">{fmtMoney(c.strike)}</td>
-                          <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.entryBid)}</td>
-                          <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.entryAsk)}</td>
-                          <td className="px-2 py-2 font-medium text-zinc-100">{fmtMoney(c.entryMid)}</td>
-                          <td className="px-2 py-2 text-zinc-200">{fmtMoney(c.estimatedContractCost, 0)}</td>
-                          <td className="px-2 py-2 text-zinc-300">{c.entryVolume.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-zinc-300">{c.entryOpenInterest.toLocaleString()}</td>
-                          <td className="px-2 py-2 text-zinc-300">{(c.entryIv * 100).toFixed(1)}%</td>
-                          <td className="px-2 py-2 text-zinc-300">{c.entryDelta.toFixed(2)}</td>
-                          <td className="px-2 py-2 text-zinc-300">{c.entryTheta.toFixed(2)}</td>
-                          <td className="px-2 py-2 text-zinc-300">{c.spreadPercent.toFixed(1)}%</td>
-                          <td className="px-2 py-2">
-                            <div className="flex items-center gap-1.5">
-                              <div className="h-1.5 w-12 rounded-full bg-zinc-700">
-                                <div className="h-full rounded-full bg-violet-500"
-                                  style={{ width: `${Math.min(100, c.contractScore)}%` }} />
-                              </div>
-                              <span className="text-zinc-300">{c.contractScore.toFixed(0)}</span>
-                            </div>
-                          </td>
-                          <td className="px-2 py-2 text-zinc-400">{c.priceBucket}</td>
-                          <td className="px-2 py-2 text-zinc-400">
-                            {c.warnings.length === 0 ? '—' : `${c.warnings.length}`}
-                          </td>
-                          <td className="px-2 py-2 max-w-xs truncate text-zinc-400" title={c.selectionReason}>
-                            {c.selectionReason}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
+              <SortableOptionCandidatesTable
+                candidates={generated.candidates}
+                selectedIndex={selectedCandidateIndex}
+                onSelect={setSelectedCandidateIndex}
+              />
             )}
           </Section>
         )}
@@ -867,39 +831,7 @@ function LearningSummary({
       </div>
 
       {Array.from(grouped.entries()).map(([type, rows]) => (
-        <div key={type} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-400">{type}</div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="text-zinc-500">
-                <tr>
-                  <th className="px-2 py-1">Key</th>
-                  <th className="px-2 py-1">N</th>
-                  <th className="px-2 py-1">Win rate</th>
-                  <th className="px-2 py-1">Avg option %</th>
-                  <th className="px-2 py-1">Avg underlying %</th>
-                  <th className="px-2 py-1">Avg score</th>
-                  <th className="px-2 py-1">Updated</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.slice(0, 10).map(r => (
-                  <tr key={r.id} className="border-t border-zinc-800/60">
-                    <td className="px-2 py-1 text-zinc-200">{r.statKey}</td>
-                    <td className="px-2 py-1 text-zinc-300">{r.totalCandidates}</td>
-                    <td className={`px-2 py-1 ${r.winRate >= 0.5 ? 'text-emerald-300' : 'text-red-300'}`}>
-                      {(r.winRate * 100).toFixed(0)}%
-                    </td>
-                    <td className="px-2 py-1 text-zinc-300">{fmtPct(r.averageOptionMovePercent)}</td>
-                    <td className="px-2 py-1 text-zinc-300">{fmtPct(r.averageUnderlyingMovePercent)}</td>
-                    <td className="px-2 py-1 text-zinc-300">{r.averageOutcomeScore.toFixed(1)}</td>
-                    <td className="px-2 py-1 text-zinc-500">{fmtDate(r.lastUpdatedAt)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <SortableOptionLearningTable key={type} type={type} rows={rows} />
       ))}
 
       <div className="rounded-lg border border-violet-800/40 bg-violet-950/20 p-3 text-xs text-violet-200">
@@ -918,6 +850,128 @@ function StatCard({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3">
       <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
       <div className="text-2xl font-semibold text-zinc-100">{value}</div>
+    </div>
+  );
+}
+
+const OPTION_CANDIDATE_COLS: { label: string; key: string }[] = [
+  { label: 'Rank', key: 'rank' },
+  { label: 'Ticker', key: 'ticker' },
+  { label: 'Type', key: 'side' },
+  { label: 'Exp', key: 'expiration' },
+  { label: 'DTE', key: 'dteAtEntry' },
+  { label: 'Strike', key: 'strike' },
+  { label: 'Bid', key: 'entryBid' },
+  { label: 'Ask', key: 'entryAsk' },
+  { label: 'Mid', key: 'entryMid' },
+  { label: 'Cost', key: 'estimatedContractCost' },
+  { label: 'Vol', key: 'entryVolume' },
+  { label: 'OI', key: 'entryOpenInterest' },
+  { label: 'IV', key: 'entryIv' },
+  { label: 'Δ', key: 'entryDelta' },
+  { label: 'Θ', key: 'entryTheta' },
+  { label: 'Spread%', key: 'spreadPercent' },
+  { label: 'Score', key: 'contractScore' },
+  { label: 'Bucket', key: 'priceBucket' },
+];
+
+function SortableOptionCandidatesTable({
+  candidates, selectedIndex, onSelect,
+}: { candidates: PaperCandidate[]; selectedIndex: number | null; onSelect: (idx: number) => void }) {
+  const { sorted, sort, toggle } = useSort(candidates);
+
+  return (
+    <div className="overflow-x-auto rounded-lg border border-zinc-800">
+      <table className="w-full text-left text-xs">
+        <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
+          <tr>
+            {OPTION_CANDIDATE_COLS.map(col => (
+              <SortHeader key={col.key} label={col.label} sortKey={col.key} current={sort} onToggle={toggle} />
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((c, idx) => (
+            <tr
+              key={c.optionSymbol + idx}
+              onClick={() => onSelect(candidates.indexOf(c))}
+              className={`border-b border-zinc-800/50 cursor-pointer transition-colors ${
+                candidates.indexOf(c) === selectedIndex ? 'bg-violet-950/40' : 'hover:bg-zinc-800/30'
+              }`}
+            >
+              <td className="px-2 py-2 text-zinc-100">{c.rank}</td>
+              <td className="px-2 py-2 text-zinc-200">{c.ticker}</td>
+              <td className="px-2 py-2"><SidePill side={c.side} /></td>
+              <td className="px-2 py-2 text-zinc-300">{fmtDateShort(c.expiration)}</td>
+              <td className="px-2 py-2 text-zinc-300">{c.dteAtEntry}d</td>
+              <td className="px-2 py-2 text-zinc-200">{fmtMoney(c.strike)}</td>
+              <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.entryBid)}</td>
+              <td className="px-2 py-2 text-zinc-300">{fmtMoney(c.entryAsk)}</td>
+              <td className="px-2 py-2 font-medium text-zinc-100">{fmtMoney(c.entryMid)}</td>
+              <td className="px-2 py-2 text-zinc-200">{fmtMoney(c.estimatedContractCost, 0)}</td>
+              <td className="px-2 py-2 text-zinc-300">{c.entryVolume.toLocaleString()}</td>
+              <td className="px-2 py-2 text-zinc-300">{c.entryOpenInterest.toLocaleString()}</td>
+              <td className="px-2 py-2 text-zinc-300">{(c.entryIv * 100).toFixed(1)}%</td>
+              <td className="px-2 py-2 text-zinc-300">{c.entryDelta.toFixed(2)}</td>
+              <td className="px-2 py-2 text-zinc-300">{c.entryTheta.toFixed(2)}</td>
+              <td className="px-2 py-2 text-zinc-300">{c.spreadPercent.toFixed(1)}%</td>
+              <td className="px-2 py-2">
+                <div className="flex items-center gap-1.5">
+                  <div className="h-1.5 w-12 rounded-full bg-zinc-700">
+                    <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.min(100, c.contractScore)}%` }} />
+                  </div>
+                  <span className="text-zinc-300">{c.contractScore.toFixed(0)}</span>
+                </div>
+              </td>
+              <td className="px-2 py-2 text-zinc-400">{c.priceBucket}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SortableOptionLearningTable({ type, rows }: { type: string; rows: OptionLearningStat[] }) {
+  const { sorted, sort, toggle } = useSort(rows);
+  const COLS = [
+    { label: 'Key', key: 'statKey' },
+    { label: 'N', key: 'totalCandidates' },
+    { label: 'Win rate', key: 'winRate' },
+    { label: 'Avg option %', key: 'averageOptionMovePercent' },
+    { label: 'Avg underlying %', key: 'averageUnderlyingMovePercent' },
+    { label: 'Avg score', key: 'averageOutcomeScore' },
+    { label: 'Updated', key: 'lastUpdatedAt' },
+  ];
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-400">{type}</div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-xs">
+          <thead className="text-zinc-500">
+            <tr>
+              {COLS.map(col => (
+                <SortHeader key={col.key} label={col.label} sortKey={col.key} current={sort} onToggle={toggle} className="px-2 py-1" />
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.slice(0, 10).map(r => (
+              <tr key={r.id} className="border-t border-zinc-800/60">
+                <td className="px-2 py-1 text-zinc-200">{r.statKey}</td>
+                <td className="px-2 py-1 text-zinc-300">{r.totalCandidates}</td>
+                <td className={`px-2 py-1 ${r.winRate >= 0.5 ? 'text-emerald-300' : 'text-red-300'}`}>
+                  {(r.winRate * 100).toFixed(0)}%
+                </td>
+                <td className="px-2 py-1 text-zinc-300">{fmtPct(r.averageOptionMovePercent)}</td>
+                <td className="px-2 py-1 text-zinc-300">{fmtPct(r.averageUnderlyingMovePercent)}</td>
+                <td className="px-2 py-1 text-zinc-300">{r.averageOutcomeScore.toFixed(1)}</td>
+                <td className="px-2 py-1 text-zinc-500">{fmtDate(r.lastUpdatedAt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

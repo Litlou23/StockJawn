@@ -10,7 +10,7 @@ namespace StockResearchAgent.Api.Models;
 // -----------------------------------------------------------------------
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
-public enum StockTimeframe { one_day, two_day, one_week }
+public enum StockTimeframe { one_day, two_day, one_week, one_month, three_month, six_month, one_year }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum PaperStockStatus { open, evaluated, expired, watch_only, unavailable }

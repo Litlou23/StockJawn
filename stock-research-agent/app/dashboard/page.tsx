@@ -2,6 +2,9 @@ import AppShell from '@/components/AppShell';
 import JobTriggerButtons from '@/components/dashboard/JobTriggerButtons';
 import DynamicSummaryCards from '@/components/dashboard/DynamicSummaryCards';
 import CatalystIntelligenceSection from '@/components/dashboard/CatalystIntelligenceSection';
+import SortableWatchlistTable from '@/components/dashboard/SortableWatchlistTable';
+import SortableSignalTable from '@/components/dashboard/SortableSignalTable';
+import { InfoBanner } from '@/components/InfoTip';
 import Link from 'next/link';
 
 // Force dynamic rendering — never serve a cached page
@@ -11,16 +14,66 @@ export const dynamic = 'force-dynamic';
 // Types matching GET /api/dashboard/summary response
 // ---------------------------------------------------------------------------
 
+interface CategoryStats {
+  total: number;
+  evaluated: number;
+  correct: number;
+  incorrect: number;
+  pending: number;
+  accuracyPercent: number | null;
+}
+
+interface ScanResultStatsData {
+  total: number;
+  neutralNoEdge: number;
+  neutralRangeBound: number;
+  neutralHighVolatility: number;
+  watchOnly: number;
+  rejected: number;
+  unavailable: number;
+  legacy: number;
+}
+
+interface PaperOptionStatsData {
+  total: number;
+  evaluated: number;
+  profitable: number;
+  unprofitable: number;
+  open: number;
+  winRatePercent: number | null;
+}
+
+interface ScanResultEntry {
+  id: string;
+  ticker: string;
+  predictionType: string;
+  confidenceScore: number;
+  riskScore: number;
+  predictionReason: string;
+  timeWindow: string;
+  createdAt: string;
+}
+
 interface DashboardSummary {
   overview: {
     activeCount: number;
     reviewNeededCount: number;
     swapCandidateCount: number;
     candidatesScored: number;
-    totalPredictions: number;
-    evaluatedOutcomes: number;
-    accuracyPct: number | null;
   };
+  predictionStats?: {
+    totalPredictions: number;
+    evaluatedPredictions: number;
+    correctPredictions: number;
+    incorrectPredictions: number;
+    inconclusivePredictions: number;
+    pendingPredictions: number;
+    accuracyPercent: number | null;
+  };
+  directionalStockStats?: CategoryStats;
+  longTermStockStats?: CategoryStats;
+  paperOptionStats?: PaperOptionStatsData;
+  scanResultStats?: ScanResultStatsData;
   watchlist: {
     active: WatchlistItemSummary[];
     reviewNeeded: ReviewItem[];
@@ -32,7 +85,9 @@ interface DashboardSummary {
     eodReview: JobStatus;
     learningUpdate: JobStatus;
   };
-  predictions: PredictionEntry[];
+  recentPredictions?: PredictionEntry[];
+  recentScanResults?: ScanResultEntry[];
+  predictions?: PredictionEntry[];
   learning: {
     signalPerformance: SignalPerf[];
     recentInsights: Insight[];
@@ -98,6 +153,7 @@ interface JobStatus {
 }
 
 interface PredictionEntry {
+  id: string;
   ticker: string;
   predictionType: string;
   confidenceScore: number;
@@ -107,10 +163,39 @@ interface PredictionEntry {
   predictionReason: string;
   bullishCase: string;
   bearishCase: string;
+  entryReferencePrice: number | null;
+  atr14: number | null;
+  atrPercent: number | null;
+  expectedMoveDollar: number | null;
+  expectedMovePercent: number | null;
+  predictedPrice: number | null;
+  predictedMovePercent: number | null;
+  projectedPriceLow: number | null;
+  projectedPriceHigh: number | null;
+  targetPrice: number | null;
+  stopPrice: number | null;
+  invalidationPrice: number | null;
+  supportLevel: number | null;
+  resistanceLevel: number | null;
+  riskRewardRatio: number | null;
+  pricePredictionMethod: string | null;
+  pricePredictionWarnings: string[];
+  invalidationRule: string;
   timeWindow: string;
   dataSourcesUsed: string[];
   missingDataWarnings: string[];
   createdAt: string;
+  hasOutcome: boolean;
+  verdict: boolean | null;
+  targetHit: boolean | null;
+  stopHit: boolean | null;
+  wasInProjectedZone: boolean | null;
+  priceAccuracyPercent: number | null;
+  pricePredictionErrorPercent: number | null;
+  finalMovePercent: number | null;
+  maxFavorablePercent: number | null;
+  maxAdversePercent: number | null;
+  evaluatedAt: string | null;
 }
 
 interface SignalPerf {
@@ -228,8 +313,19 @@ function changeTypeBadge(type: string) {
 function predictionBadge(type: string) {
   const color = type === 'bullish' ? 'text-green-400 bg-green-500/10'
     : type === 'bearish' ? 'text-red-400 bg-red-500/10'
+    : type.startsWith('neutral') ? 'text-blue-400 bg-blue-500/10'
+    : type === 'watch_only' ? 'text-yellow-400 bg-yellow-500/10'
+    : type === 'unavailable' ? 'text-zinc-500 bg-zinc-800'
+    : type === 'rejected' ? 'text-orange-400 bg-orange-500/10'
     : 'text-zinc-400 bg-zinc-800';
-  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>{type}</span>;
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>{type.replace(/_/g, ' ')}</span>;
+}
+
+function verdictBadge(verdict: boolean | null) {
+  if (verdict === null || verdict === undefined) return <span className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">Pending</span>;
+  return verdict
+    ? <span className="rounded border border-green-500/30 bg-green-500/10 px-1.5 py-0.5 text-[10px] font-bold text-green-400">CORRECT</span>
+    : <span className="rounded border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-bold text-red-400">WRONG</span>;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +361,17 @@ export default async function DashboardPage() {
     );
   }
 
-  const { overview, watchlist, recentChanges, jobs, predictions, learning, dataQuality } = data;
+  const { overview, watchlist, recentChanges, jobs, learning, dataQuality } = data;
+  const predictionStats = data.predictionStats ?? {
+    totalPredictions: 0, evaluatedPredictions: 0, correctPredictions: 0,
+    incorrectPredictions: 0, inconclusivePredictions: 0, pendingPredictions: 0, accuracyPercent: null,
+  };
+  const directionalStats = data.directionalStockStats ?? { total: 0, evaluated: 0, correct: 0, incorrect: 0, pending: 0, accuracyPercent: null };
+  const longTermStats = data.longTermStockStats ?? { total: 0, evaluated: 0, correct: 0, incorrect: 0, pending: 0, accuracyPercent: null };
+  const optionStats = data.paperOptionStats ?? { total: 0, evaluated: 0, profitable: 0, unprofitable: 0, open: 0, winRatePercent: null };
+  const scanStats = data.scanResultStats ?? { total: 0, neutralNoEdge: 0, neutralRangeBound: 0, neutralHighVolatility: 0, watchOnly: 0, rejected: 0, unavailable: 0, legacy: 0 };
+  const recentPredictions = data.recentPredictions ?? data.predictions ?? [];
+  const recentScanResults = data.recentScanResults ?? [];
 
   return (
     <AppShell>
@@ -280,27 +386,119 @@ export default async function DashboardPage() {
           <StatCard label="Active Watchlist" value={overview.activeCount} />
           <StatCard label="Review Needed" value={overview.reviewNeededCount} accent={overview.reviewNeededCount > 0 ? 'yellow' : undefined} />
           <StatCard label="Swap Candidates" value={overview.swapCandidateCount} accent={overview.swapCandidateCount > 0 ? 'red' : undefined} />
-          <StatCard label="Accuracy" value={overview.accuracyPct !== null ? `${overview.accuracyPct}%` : '—'} accent={overview.accuracyPct !== null && overview.accuracyPct >= 60 ? 'green' : undefined} />
+          <StatCard label="Directional Accuracy" value={directionalStats.accuracyPercent !== null ? `${directionalStats.accuracyPercent}%` : '—'} accent={directionalStats.accuracyPercent !== null && directionalStats.accuracyPercent >= 60 ? 'green' : undefined} />
         </div>
+
+        <InfoBanner items={[
+          { term: 'Active Watchlist', definition: 'Number of tickers the system is actively tracking for daily scans.' },
+          { term: 'Review Needed', definition: 'Watchlist items flagged for manual review due to score drops or data issues.' },
+          { term: 'Swap Candidates', definition: 'Tickers performing poorly that could be replaced with better opportunities.' },
+          { term: 'Directional Accuracy', definition: 'Percentage of bullish/bearish predictions where the stock moved in the predicted direction. Only evaluated picks count.' },
+          { term: 'Confidence Score', definition: 'How confident the system is in the prediction (0-100). Based on signal strength, data quality, and catalyst presence. Picks need 40+ to qualify for options.' },
+          { term: 'Risk Score', definition: 'How risky the trade is (0-100). Factors in volatility, sector risk, and conflicting signals. Lower is safer.' },
+          { term: 'Importance Score', definition: 'How significant this prediction is relative to others. High importance = strong catalyst or major technical signal.' },
+          { term: 'Directional Stock Picks', definition: 'Bullish or bearish predictions with short-term time windows (intraday to 1 week). These are measured for accuracy.' },
+          { term: 'Paper Option Picks', definition: 'Simulated call/put trades auto-generated from high-confidence directional picks. Uses real option chain data but no real money.' },
+          { term: 'Scan Results', definition: 'Tickers scanned where the system decided NOT to take a position. Neutral, watch-only, or rejected — not counted in accuracy.' },
+          { term: 'No Edge', definition: 'System scanned the ticker but found no clear bullish or bearish signal.' },
+          { term: 'Range Bound', definition: 'Conflicting signals — stock appears stuck in a range with no breakout catalyst.' },
+          { term: 'Watch Only', definition: 'Signals too weak to act on, but worth monitoring for changes.' },
+        ]} />
 
         {/* Dynamic pick orchestrator summary — fetched client-side */}
         <Section title="Dynamic picks today" subtitle="Auto-generated stock + linked option candidates">
           <DynamicSummaryCards />
         </Section>
 
-        {/* ── 2. Research Predictions ──────────────────────────────── */}
-        <Section title="Recent Predictions" subtitle={`${predictions.length} prediction(s)`}>
-          {predictions.length === 0 ? (
+        {/* ── 2a. Directional Stock Picks ────────────────────────── */}
+        <Section title="Directional Stock Picks" subtitle="Bullish/bearish short-term picks only"
+          link={{ href: '/predictions', label: 'View all picks →' }}>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <StatCard label="Total" value={directionalStats.total} />
+            <StatCard label="Correct" value={directionalStats.correct} accent={directionalStats.correct > 0 ? 'green' : undefined} />
+            <StatCard label="Incorrect" value={directionalStats.incorrect} accent={directionalStats.incorrect > 0 ? 'red' : undefined} />
+            <StatCard label="Pending" value={directionalStats.pending} accent={directionalStats.pending > 0 ? 'yellow' : undefined} />
+            <StatCard label="Accuracy" value={directionalStats.accuracyPercent !== null ? `${directionalStats.accuracyPercent}%` : '—'} accent={directionalStats.accuracyPercent !== null && directionalStats.accuracyPercent >= 60 ? 'green' : undefined} />
+            <StatCard label="Evaluated" value={directionalStats.evaluated} />
+          </div>
+          <p className="mt-2 text-[10px] text-zinc-600">
+            Only bullish/bearish picks with short-term time windows. Neutral and watch-only results are tracked separately.
+          </p>
+        </Section>
+
+        {/* ── 2b. Long-Term Stock Picks ──────────────────────────── */}
+        {longTermStats.total > 0 && (
+          <Section title="Long-Term Stock Picks" subtitle="1 month+ thesis-driven picks">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <StatCard label="Total" value={longTermStats.total} />
+              <StatCard label="Correct" value={longTermStats.correct} accent={longTermStats.correct > 0 ? 'green' : undefined} />
+              <StatCard label="Incorrect" value={longTermStats.incorrect} accent={longTermStats.incorrect > 0 ? 'red' : undefined} />
+              <StatCard label="Pending" value={longTermStats.pending} accent={longTermStats.pending > 0 ? 'yellow' : undefined} />
+              <StatCard label="Accuracy" value={longTermStats.accuracyPercent !== null ? `${longTermStats.accuracyPercent}%` : '—'} accent={longTermStats.accuracyPercent !== null && longTermStats.accuracyPercent >= 60 ? 'green' : undefined} />
+              <StatCard label="Evaluated" value={longTermStats.evaluated} />
+            </div>
+          </Section>
+        )}
+
+        {/* ── 2c. Paper Option Picks ─────────────────────────────── */}
+        <Section title="Paper Option Picks" subtitle="Calls/puts from actionable stock picks">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <StatCard label="Total" value={optionStats.total} />
+            <StatCard label="Profitable" value={optionStats.profitable} accent={optionStats.profitable > 0 ? 'green' : undefined} />
+            <StatCard label="Unprofitable" value={optionStats.unprofitable} accent={optionStats.unprofitable > 0 ? 'red' : undefined} />
+            <StatCard label="Open" value={optionStats.open} accent={optionStats.open > 0 ? 'yellow' : undefined} />
+            <StatCard label="Win Rate" value={optionStats.winRatePercent !== null ? `${optionStats.winRatePercent}%` : '—'} accent={optionStats.winRatePercent !== null && optionStats.winRatePercent >= 60 ? 'green' : undefined} />
+            <StatCard label="Evaluated" value={optionStats.evaluated} />
+          </div>
+        </Section>
+
+        {/* ── 2d. Scan Results / No-Trade Decisions ──────────────── */}
+        <Section title="Scan Results / No-Trade Decisions" subtitle={`${scanStats.total} non-directional results`}>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+            <StatCard label="Total" value={scanStats.total} />
+            <StatCard label="No Edge" value={scanStats.neutralNoEdge} />
+            <StatCard label="Range Bound" value={scanStats.neutralRangeBound} />
+            <StatCard label="High Volatility" value={scanStats.neutralHighVolatility} />
+            <StatCard label="Watch Only" value={scanStats.watchOnly} />
+            <StatCard label="Rejected" value={scanStats.rejected} />
+            <StatCard label="Unavailable" value={scanStats.unavailable} />
+          </div>
+          <p className="mt-2 text-[10px] text-zinc-600">
+            These are not counted in directional accuracy. They track when the system correctly decided not to take a position.
+          </p>
+          {recentScanResults.length > 0 && (
+            <div className="mt-3 flex flex-col gap-1.5">
+              <h3 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Recent no-trade decisions</h3>
+              {recentScanResults.slice(0, 5).map((s) => (
+                <div key={s.id} className="flex items-center gap-2 text-xs">
+                  <span className="w-12 shrink-0 text-[10px] text-zinc-600">{timeAgo(s.createdAt)}</span>
+                  <span className="font-semibold text-zinc-200">{s.ticker}</span>
+                  {predictionBadge(s.predictionType)}
+                  <span className="truncate text-[10px] text-zinc-500">{s.predictionReason}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Section>
+
+        {/* ── 2e. Most Recent Directional Picks ──────────────────── */}
+        <Section
+          title="Most Recent Directional Picks"
+          subtitle={`Showing latest ${recentPredictions.length}`}
+          link={{ href: '/predictions', label: 'View all predictions →' }}
+        >
+          {recentPredictions.length === 0 ? (
             <EmptyState text="No predictions yet. Run a morning scan to generate them." />
           ) : (
             <div className="flex flex-col gap-2">
-              {predictions.map((p, i) => (
-                <div key={i} className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5">
+              {recentPredictions.map((p) => (
+                <div key={p.id} className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5">
                   <div className="flex items-start gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-semibold text-zinc-100">{p.ticker}</span>
                         {predictionBadge(p.predictionType)}
+                        {verdictBadge(p.verdict)}
                         <div className="flex items-center gap-1">
                           <div className="h-1.5 w-10 overflow-hidden rounded-full bg-zinc-800">
                             <div className={`h-full rounded-full ${p.confidenceScore >= 70 ? 'bg-green-500' : p.confidenceScore >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${p.confidenceScore}%` }} />
@@ -308,17 +506,46 @@ export default async function DashboardPage() {
                           <span className="text-[10px] text-zinc-500">{p.confidenceScore}</span>
                         </div>
                         <span className="text-[10px] text-zinc-500">{p.timeWindow.replace(/_/g, ' ')}</span>
-                        <span className={`text-[10px] ${p.status === 'open' ? 'text-blue-400' : p.status === 'evaluated' ? 'text-green-400' : 'text-zinc-500'}`}>
-                          {p.status}
-                        </span>
                         {p.dataSourcesUsed?.includes('openai-analysis') && (
                           <span className="rounded bg-violet-500/10 px-1 py-0.5 text-[9px] font-medium text-violet-400">AI</span>
                         )}
                       </div>
                       <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
-                      <div className="mt-1.5 flex gap-3 text-[10px]">
+                      <div className="mt-1.5 flex flex-wrap gap-3 text-[10px]">
                         <span className="text-zinc-500">Risk: <span className={`font-medium ${p.riskScore >= 70 ? 'text-red-400' : p.riskScore >= 40 ? 'text-yellow-400' : 'text-green-400'}`}>{p.riskScore}</span></span>
                         <span className="text-zinc-500">Importance: <span className="text-zinc-400">{p.importanceScore}</span></span>
+                        {p.entryReferencePrice != null && (
+                          <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
+                        )}
+                        {p.projectedPriceLow != null && p.projectedPriceHigh != null && (
+                          <span className="text-zinc-500">Zone: <span className="font-bold text-violet-400">${p.projectedPriceLow.toFixed(2)}–${p.projectedPriceHigh.toFixed(2)}</span></span>
+                        )}
+                        {p.targetPrice != null && (
+                          <span className="text-zinc-500">Target: <span className="text-green-400">${p.targetPrice.toFixed(2)}</span></span>
+                        )}
+                        {p.stopPrice != null && (
+                          <span className="text-zinc-500">Stop: <span className="text-red-400">${p.stopPrice.toFixed(2)}</span></span>
+                        )}
+                        {p.riskRewardRatio != null && (
+                          <span className="text-zinc-500">R:R: <span className={p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}>{p.riskRewardRatio.toFixed(1)}</span></span>
+                        )}
+                        {p.priceAccuracyPercent != null && (
+                          <span className={p.priceAccuracyPercent >= 98 ? 'font-bold text-green-400' : p.priceAccuracyPercent >= 95 ? 'text-yellow-400' : 'text-red-400'}>
+                            {p.priceAccuracyPercent.toFixed(1)}% accurate
+                          </span>
+                        )}
+                        {p.finalMovePercent != null && (
+                          <span className="text-zinc-500">Move: <span className={`font-bold ${p.finalMovePercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>{p.finalMovePercent > 0 ? '+' : ''}{p.finalMovePercent.toFixed(2)}%</span></span>
+                        )}
+                        {p.targetHit != null && (
+                          <span className={p.targetHit ? 'font-bold text-green-400' : 'text-zinc-500'}>{p.targetHit ? 'Target HIT' : ''}</span>
+                        )}
+                        {p.stopHit != null && (
+                          <span className={p.stopHit ? 'font-bold text-red-400' : 'text-zinc-500'}>{p.stopHit ? 'Stop TRIGGERED' : ''}</span>
+                        )}
+                        {p.evaluatedAt && (
+                          <span className="text-zinc-500">Evaluated: <span className="text-zinc-400">{timeAgo(p.evaluatedAt)}</span></span>
+                        )}
                       </div>
                     </div>
                     <span className="shrink-0 text-[10px] text-zinc-600">{timeAgo(p.createdAt)}</span>
@@ -343,39 +570,7 @@ export default async function DashboardPage() {
           {watchlist.active.length === 0 ? (
             <EmptyState text="No active watchlist items. Run weekly research to build the watchlist." />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-zinc-800 text-zinc-500">
-                    <th className="pb-2 pr-3 font-medium">Ticker</th>
-                    <th className="pb-2 pr-3 font-medium">Score</th>
-                    <th className="pb-2 pr-3 font-medium">Category</th>
-                    <th className="pb-2 pr-3 font-medium">Confidence</th>
-                    <th className="hidden pb-2 pr-3 font-medium sm:table-cell">Thesis</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...watchlist.active].sort((a, b) => (b.totalScore ?? 0) - (a.totalScore ?? 0)).map((item) => (
-                    <tr key={item.ticker} className="border-b border-zinc-800/50">
-                      <td className="py-2 pr-3">
-                        <span className="font-semibold text-zinc-100">{item.ticker}</span>
-                        {item.companyName && <span className="ml-1.5 text-[10px] text-zinc-500">{item.companyName}</span>}
-                      </td>
-                      <td className="py-2 pr-3">
-                        <span className={`font-semibold ${scoreColor(item.totalScore)}`}>
-                          {item.totalScore?.toFixed(0) ?? '—'}
-                        </span>
-                      </td>
-                      <td className="py-2 pr-3 text-zinc-400">{item.category}</td>
-                      <td className="py-2 pr-3">{confidenceBadge(item.dataConfidence)}</td>
-                      <td className="hidden py-2 pr-3 text-zinc-500 sm:table-cell">
-                        <span className="line-clamp-1">{item.thesisSummary ?? '—'}</span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <SortableWatchlistTable items={watchlist.active} />
           )}
 
           {(watchlist.reviewNeeded.length > 0 || watchlist.swapCandidates.length > 0) && (
@@ -462,30 +657,7 @@ export default async function DashboardPage() {
           ) : (
             <>
               {learning.signalPerformance.length > 0 && (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-zinc-800 text-zinc-500">
-                        <th className="pb-2 pr-3 font-medium">Signal</th>
-                        <th className="pb-2 pr-3 font-medium">Accuracy</th>
-                        <th className="pb-2 pr-3 font-medium">Correct / Total</th>
-                        <th className="hidden pb-2 pr-3 font-medium sm:table-cell">Avg Score</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {learning.signalPerformance.map((s) => (
-                        <tr key={s.signalName} className="border-b border-zinc-800/50">
-                          <td className="py-2 pr-3 text-zinc-200">{s.signalName.replace(/_/g, ' ')}</td>
-                          <td className="py-2 pr-3">
-                            <span className={scoreColor(s.accuracy * 100)}>{(s.accuracy * 100).toFixed(1)}%</span>
-                          </td>
-                          <td className="py-2 pr-3 text-zinc-400">{s.correctPredictions} / {s.totalPredictions}</td>
-                          <td className="hidden py-2 pr-3 text-zinc-400 sm:table-cell">{s.averageOutcomeScore.toFixed(1)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <SortableSignalTable signals={learning.signalPerformance} />
               )}
 
               {learning.recentInsights.length > 0 && (

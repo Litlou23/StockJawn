@@ -89,7 +89,7 @@ export const navEntries: NavEntry[] = [
     children: [
       { href: '/options-research', label: 'Options Data' },
       { href: '/options-lab', label: 'Options Lab' },
-      { href: '/paper-options', label: 'Paper Options' },
+      { href: '/paper-options', label: 'Manual Paper Options' },
     ],
   },
   {

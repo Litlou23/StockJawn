@@ -109,17 +109,93 @@ public class ResearchRepository
         return rows.Select(MapPrediction).ToList();
     }
 
-    public async Task<List<PredictionCandidate>> GetRecentPredictionsAsync(int limit = 30, string? status = null)
+    public async Task<List<PredictionCandidate>> GetRecentPredictionsAsync(int limit = 30, string? status = null, string? extraFilter = null)
     {
-        var filter = status is not null ? $"status=eq.{status}" : null;
+        var parts = new List<string>();
+        if (status is not null) parts.Add($"status=eq.{status}");
+        if (extraFilter is not null) parts.Add(extraFilter);
+        var filter = parts.Count > 0 ? string.Join("&", parts) : null;
         var rows = await _db.SelectAsync("prediction_candidates",
             filter: filter, order: "created_at.desc", limit: limit);
+        return rows.Select(MapPrediction).ToList();
+    }
+
+    public async Task<List<PredictionCandidate>> GetPredictionsByDateRangeAsync(
+        DateTimeOffset from, DateTimeOffset to, string? status = null, string? extraFilter = null)
+    {
+        var filters = new List<string>
+        {
+            $"created_at=gte.{from.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
+            $"created_at=lte.{to.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
+        };
+        if (status is not null) filters.Add($"status=eq.{status}");
+        if (extraFilter is not null) filters.Add(extraFilter);
+
+        var filter = string.Join("&", filters);
+        var rows = await _db.SelectAsync("prediction_candidates",
+            filter: filter, order: "created_at.desc");
         return rows.Select(MapPrediction).ToList();
     }
 
     public async Task<bool> UpdatePredictionStatusAsync(string id, string status)
     {
         return await _db.UpdateAsync("prediction_candidates", $"id=eq.{id}", new { status });
+    }
+
+    public async Task<PredictionStatsAggregate> GetPredictionStatsAsync()
+    {
+        var totalTask = _db.CountAsync("prediction_candidates");
+        var outcomesTotalTask = _db.CountAsync("prediction_outcomes");
+        var correctTask = _db.CountAsync("prediction_outcomes", "direction_correct=eq.true");
+        var incorrectTask = _db.CountAsync("prediction_outcomes", "direction_correct=eq.false");
+
+        await Task.WhenAll(totalTask, outcomesTotalTask, correctTask, incorrectTask);
+
+        var total = totalTask.Result;
+        var outcomesTotal = outcomesTotalTask.Result;
+        var correct = correctTask.Result;
+        var incorrect = incorrectTask.Result;
+        var inconclusive = outcomesTotal - correct - incorrect;
+        var pending = total - outcomesTotal;
+        var denominator = correct + incorrect;
+
+        return new PredictionStatsAggregate
+        {
+            TotalPredictions = total,
+            EvaluatedPredictions = correct + incorrect,
+            CorrectPredictions = correct,
+            IncorrectPredictions = incorrect,
+            InconclusivePredictions = inconclusive > 0 ? inconclusive : 0,
+            PendingPredictions = pending > 0 ? pending : 0,
+            AccuracyPercent = denominator > 0
+                ? Math.Round(100.0 * correct / denominator, 1)
+                : null,
+        };
+    }
+
+    public async Task<List<PredictionWithOutcome>> GetRecentPredictionsWithOutcomesAsync(int limit = 10)
+    {
+        var predictions = await GetRecentPredictionsAsync(limit);
+        if (predictions.Count == 0) return [];
+
+        var predictionIds = predictions.Select(p => p.Id).ToList();
+        var filter = $"prediction_id=in.({string.Join(",", predictionIds)})";
+        var outcomeRows = await _db.SelectAsync("prediction_outcomes", filter: filter);
+        var outcomes = outcomeRows.Select(MapOutcome).ToList();
+
+        var outcomeMap = outcomes
+            .GroupBy(o => o.PredictionId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
+
+        return predictions.Select(p =>
+        {
+            outcomeMap.TryGetValue(p.Id, out var outcome);
+            return new PredictionWithOutcome
+            {
+                Prediction = p,
+                Outcome = outcome,
+            };
+        }).ToList();
     }
 
     // -----------------------------------------------------------------------
@@ -147,6 +223,14 @@ public class ResearchRepository
     {
         var rows = await _db.SelectAsync("prediction_outcomes",
             order: "created_at.desc", limit: limit);
+        return rows.Select(MapOutcome).ToList();
+    }
+
+    public async Task<List<PredictionOutcome>> GetOutcomesForPredictionsAsync(List<string> predictionIds)
+    {
+        if (predictionIds.Count == 0) return [];
+        var filter = $"prediction_id=in.({string.Join(",", predictionIds)})";
+        var rows = await _db.SelectAsync("prediction_outcomes", filter: filter);
         return rows.Select(MapOutcome).ToList();
     }
 
@@ -221,6 +305,135 @@ public class ResearchRepository
     }
 
     // -----------------------------------------------------------------------
+    // Category-based stats
+    // -----------------------------------------------------------------------
+
+    private static readonly string DirectionalTypes = "prediction_type=in.(bullish,bearish)";
+    private static readonly string ShortTermWindows = "time_window=in.(intraday,1_day,3_day,1_week)";
+    private static readonly string LongTermWindows = "time_window=in.(1_month,3_month,6_month,1_year)";
+    private static readonly string NonDirectionalTypes =
+        "prediction_type=in.(neutral_no_edge,neutral_range_bound,neutral_high_volatility,watch_only,rejected,unavailable,neutral)";
+
+    public async Task<CategoryStatsAggregate> GetDirectionalStockStatsAsync()
+    {
+        var filter = $"{DirectionalTypes}&{ShortTermWindows}";
+        return await BuildCategoryStats(PredictionCategory.short_term_stock, filter);
+    }
+
+    public async Task<CategoryStatsAggregate> GetLongTermStockStatsAsync()
+    {
+        var filter = $"{DirectionalTypes}&{LongTermWindows}";
+        return await BuildCategoryStats(PredictionCategory.long_term_stock, filter);
+    }
+
+    private async Task<CategoryStatsAggregate> BuildCategoryStats(PredictionCategory category, string predFilter)
+    {
+        var totalTask = _db.CountAsync("prediction_candidates", predFilter);
+
+        var predRows = await _db.SelectAsync("prediction_candidates",
+            select: "id", filter: predFilter, limit: 10000);
+        var predIds = predRows.Select(r => r["id"]?.ToString() ?? "").Where(id => id != "").ToList();
+
+        var total = await totalTask;
+
+        if (predIds.Count == 0)
+            return new CategoryStatsAggregate { Category = category };
+
+        var idsFilter = $"prediction_id=in.({string.Join(",", predIds)})";
+        var correctTask = _db.CountAsync("prediction_outcomes", $"{idsFilter}&direction_correct=eq.true");
+        var incorrectTask = _db.CountAsync("prediction_outcomes", $"{idsFilter}&direction_correct=eq.false");
+
+        await Task.WhenAll(correctTask, incorrectTask);
+        var correct = correctTask.Result;
+        var incorrect = incorrectTask.Result;
+        var evaluated = correct + incorrect;
+        var pending = total - evaluated;
+        var denom = correct + incorrect;
+
+        return new CategoryStatsAggregate
+        {
+            Category = category,
+            Total = total,
+            Evaluated = evaluated,
+            Correct = correct,
+            Incorrect = incorrect,
+            Pending = pending > 0 ? pending : 0,
+            AccuracyPercent = denom > 0 ? Math.Round(100.0 * correct / denom, 1) : null,
+        };
+    }
+
+    public async Task<ScanResultStats> GetScanResultStatsAsync()
+    {
+        var totalTask = _db.CountAsync("prediction_candidates", NonDirectionalTypes);
+        var noEdgeTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.neutral_no_edge");
+        var rangeBoundTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.neutral_range_bound");
+        var highVolTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.neutral_high_volatility");
+        var watchTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.watch_only");
+        var rejectedTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.rejected");
+        var unavailTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.unavailable");
+        var legacyTask = _db.CountAsync("prediction_candidates", "prediction_type=eq.neutral");
+
+        await Task.WhenAll(totalTask, noEdgeTask, rangeBoundTask, highVolTask,
+            watchTask, rejectedTask, unavailTask, legacyTask);
+
+        return new ScanResultStats
+        {
+            Total = totalTask.Result,
+            NeutralNoEdge = noEdgeTask.Result,
+            NeutralRangeBound = rangeBoundTask.Result,
+            NeutralHighVolatility = highVolTask.Result,
+            WatchOnly = watchTask.Result,
+            Rejected = rejectedTask.Result,
+            Unavailable = unavailTask.Result,
+            Legacy = legacyTask.Result,
+        };
+    }
+
+    public async Task<List<PredictionCandidate>> GetRecentScanResultsAsync(int limit = 20)
+    {
+        var rows = await _db.SelectAsync("prediction_candidates",
+            filter: NonDirectionalTypes,
+            order: "created_at.desc",
+            limit: limit);
+        return rows.Select(MapPrediction).ToList();
+    }
+
+    public async Task<List<PredictionCandidate>> GetRecentDirectionalPredictionsAsync(int limit = 10)
+    {
+        var rows = await _db.SelectAsync("prediction_candidates",
+            filter: DirectionalTypes,
+            order: "created_at.desc",
+            limit: limit);
+        return rows.Select(MapPrediction).ToList();
+    }
+
+    public async Task<PaperOptionStatsAggregate> GetPaperOptionStatsAsync()
+    {
+        var totalTask = _db.CountAsync("paper_option_candidates");
+        var openTask = _db.CountAsync("paper_option_candidates", "status=eq.open");
+        var profitableTask = _db.CountAsync("paper_option_outcomes", "contract_profitable=eq.true");
+        var unprofitableTask = _db.CountAsync("paper_option_outcomes", "contract_profitable=eq.false");
+
+        await Task.WhenAll(totalTask, openTask, profitableTask, unprofitableTask);
+        var total = totalTask.Result;
+        var open = openTask.Result;
+        var profitable = profitableTask.Result;
+        var unprofitable = unprofitableTask.Result;
+        var evaluated = profitable + unprofitable;
+        var denom = profitable + unprofitable;
+
+        return new PaperOptionStatsAggregate
+        {
+            Total = total,
+            Evaluated = evaluated,
+            Profitable = profitable,
+            Unprofitable = unprofitable,
+            Open = open,
+            WinRatePercent = denom > 0 ? Math.Round(100.0 * profitable / denom, 1) : null,
+        };
+    }
+
+    // -----------------------------------------------------------------------
     // Generic insert (for options lab and future tables)
     // -----------------------------------------------------------------------
 
@@ -252,13 +465,35 @@ public class ResearchRepository
         Id = r["id"]?.ToString() ?? "",
         RunId = r["run_id"]?.ToString() ?? "",
         Ticker = r["ticker"]?.ToString() ?? "",
-        PredictionType = Enum.TryParse<PredictionType>(r["prediction_type"]?.ToString(), out var pt) ? pt : PredictionType.neutral,
+        PredictionType = Enum.TryParse<PredictionType>(r["prediction_type"]?.ToString(), out var pt) ? pt : PredictionType.neutral_no_edge,
         AssetType = Enum.TryParse<PredictionAssetType>(r["asset_type"]?.ToString(), out var at) ? at : PredictionAssetType.stock,
         TimeWindow = r["time_window"]?.ToString() ?? "1_day",
         ConfidenceScore = GetInt(r, "confidence_score"),
         ImportanceScore = GetInt(r, "importance_score"),
         RiskScore = GetInt(r, "risk_score"),
         EntryReferencePrice = r["entry_reference_price"]?.GetValue<double?>(),
+        Atr14 = GetNullableDouble(r, "atr14"),
+        AtrPercent = GetNullableDouble(r, "atr_percent"),
+        TimeframeMultiplier = GetNullableDouble(r, "timeframe_multiplier"),
+        SignalModifier = GetNullableDouble(r, "signal_modifier"),
+        ExpectedMoveDollar = GetNullableDouble(r, "expected_move_dollar"),
+        ExpectedMovePercent = GetNullableDouble(r, "expected_move_percent"),
+        PredictedPrice = GetNullableDouble(r, "predicted_price"),
+        PredictedMovePercent = GetNullableDouble(r, "predicted_move_percent"),
+        ProjectedPriceLow = GetNullableDouble(r, "projected_price_low"),
+        ProjectedPriceHigh = GetNullableDouble(r, "projected_price_high"),
+        TargetPrice = GetNullableDouble(r, "target_price"),
+        StopPrice = GetNullableDouble(r, "stop_price"),
+        InvalidationPrice = GetNullableDouble(r, "invalidation_price"),
+        SupportLevel = GetNullableDouble(r, "support_level"),
+        ResistanceLevel = GetNullableDouble(r, "resistance_level"),
+        RiskRewardRatio = GetNullableDouble(r, "risk_reward_ratio"),
+        PricePredictionMethod = r["price_prediction_method"]?.ToString(),
+        PricePredictionWarnings = GetStringList(r, "price_prediction_warnings"),
+        ScoreDebugJson = r["score_debug_json"]?.ToString(),
+        ActionabilityScore = r["actionability_score"] is null ? null : GetInt(r, "actionability_score"),
+        ActionabilityTier = Enum.TryParse<ActionabilityTier>(r["actionability_tier"]?.ToString(), out var actTier)
+            ? actTier : (ActionabilityTier?)null,
         BullishCase = r["bullish_case"]?.ToString() ?? "",
         BearishCase = r["bearish_case"]?.ToString() ?? "",
         PredictionReason = r["prediction_reason"]?.ToString() ?? "",
@@ -280,7 +515,18 @@ public class ResearchRepository
         LowAfterPrediction = GetNullableDouble(r, "low_after_prediction"),
         PercentMove = GetNullableDouble(r, "percent_move"),
         DirectionCorrect = GetNullableBool(r, "direction_correct"),
+        PredictedPrice = GetNullableDouble(r, "predicted_price"),
+        PredictedMovePercent = GetNullableDouble(r, "predicted_move_percent"),
+        ProjectedPriceLow = GetNullableDouble(r, "projected_price_low"),
+        ProjectedPriceHigh = GetNullableDouble(r, "projected_price_high"),
+        PriceAccuracyPercent = GetNullableDouble(r, "price_accuracy_percent"),
+        PricePredictionErrorPercent = GetNullableDouble(r, "price_prediction_error_percent"),
+        WasInProjectedZone = GetNullableBool(r, "was_in_projected_zone"),
+        TargetHit = GetNullableBool(r, "target_hit"),
+        StopHit = GetNullableBool(r, "stop_hit"),
         InvalidationHit = GetNullableBool(r, "invalidation_hit"),
+        MaxFavorablePercent = GetNullableDouble(r, "max_favorable_percent"),
+        MaxAdversePercent = GetNullableDouble(r, "max_adverse_percent"),
         OutcomeScore = GetNullableDouble(r, "outcome_score"),
         OutcomeSummary = r["outcome_summary"]?.ToString(),
         Lesson = r["lesson"]?.ToString(),

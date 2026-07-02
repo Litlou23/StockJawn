@@ -16,13 +16,13 @@
 `id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`
 
 ### prediction_candidates
-`id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `created_at`
+`id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `created_at`
 
 ### prediction_inputs
 `id`, `prediction_id`, `input_type`, `input_data`, `created_at`
 
 ### prediction_outcomes
-`id`, `prediction_id`, `evaluation_time`, `start_price`, `close_price`, `high_after_prediction`, `low_after_prediction`, `actual_move_percent`, `outcome_direction`, `was_correct`, `score`, `notes`
+`id`, `prediction_id`, `evaluation_time`, `start_price`, `close_price`, `high_after_prediction`, `low_after_prediction`, `percent_move`, `direction_correct`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `price_accuracy_percent`, `price_prediction_error_percent`, `was_in_projected_zone`, `target_hit`, `stop_hit`, `invalidation_hit`, `max_favorable_percent`, `max_adverse_percent`, `outcome_score`, `outcome_summary`, `lesson`, `created_at`
 
 ### signal_performance
 `id`, `signal_name`, `total_predictions`, `correct_predictions`, `accuracy`, `avg_confidence_when_correct`, `avg_confidence_when_wrong`, `last_updated`

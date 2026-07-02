@@ -8,6 +8,7 @@ using StockResearchAgent.Api.Services.Watchlist;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 using StockResearchAgent.Api.Services.OptionsLab;
 using StockResearchAgent.Api.Services.OptionsData;
+using StockResearchAgent.Api.Services.Providers.StockFit;
 
 // =====================================================================
 // TOP-LEVEL TRY/CATCH — catches fatal startup exceptions and writes
@@ -50,6 +51,7 @@ try
     BootstrapLogger.Log("BOOT 006", $"  SupabaseServiceKeyConfigured: {!string.IsNullOrWhiteSpace(tempConfig["SUPABASE_SERVICE_KEY"])}");
     BootstrapLogger.Log("BOOT 006", $"  JobSecretConfigured: {!string.IsNullOrWhiteSpace(tempConfig["JOB_RUN_SECRET"])}");
     BootstrapLogger.Log("BOOT 006", $"  MarketDataConfigured: {!string.IsNullOrWhiteSpace(tempConfig["MARKETDATA_TOKEN"])}");
+    BootstrapLogger.Log("BOOT 006", $"  StockFitConfigured: {!string.IsNullOrWhiteSpace(tempConfig["STOCKFIT_API_KEY"])}");
 
     BootstrapLogger.Log("BOOT 007", "Builder created successfully");
 
@@ -96,6 +98,12 @@ try
 
     // Paper Options — enhanced flow for /paper-options page
     builder.Services.AddSingleton<PaperOptionsService>();
+
+    // StockFit — fundamentals, filings, insider, institutional. Never used
+    // for live quotes / bars / technicals / options chains (those stay with
+    // Twelve Data + MarketData.app). Marked unavailable if key missing.
+    builder.Services.AddSingleton<StockFitClient>();
+    builder.Services.AddSingleton<StockFitProvider>();
 
     // Dynamic pick orchestrator — wraps research engine + paper options
     // services to auto-generate stock + linked option candidates daily.
@@ -218,7 +226,8 @@ try
         TwelveDataProvider twelveData,
         IOpenAiCompletionService openAi,
         FinnhubProvider finnhub,
-        MarketDataOptionsProvider marketData) =>
+        MarketDataOptionsProvider marketData,
+        StockFitProvider stockFit) =>
     {
         return Results.Json(new
         {
@@ -231,6 +240,7 @@ try
                 openAi = new { configured = openAi.IsConfigured },
                 finnhub = new { configured = finnhub.IsConfigured },
                 marketData = new { configured = marketData.IsConfigured, provider = "MarketData.app" },
+                stockFit = new { configured = stockFit.IsConfigured, baseUrl = stockFit.BaseUrl, provider = "StockFit" },
             }
         });
     });
