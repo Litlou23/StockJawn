@@ -11,8 +11,8 @@ export default async function HistoryPage() {
   return (
     <AppShell>
       <div className="mx-auto max-w-3xl space-y-4 p-4">
-        <h1 className="text-lg font-bold text-zinc-100">Pick History</h1>
-        <p className="text-sm text-zinc-500">Previous picks and how they tracked against SPY and QQQ.</p>
+        <h1 className="text-lg font-bold text-zinc-100">Past Predictions</h1>
+        <p className="text-sm text-zinc-500">How past predictions performed compared to the overall market.</p>
 
         <div className="flex flex-col gap-3">
           {picks.map((pick, i) => (

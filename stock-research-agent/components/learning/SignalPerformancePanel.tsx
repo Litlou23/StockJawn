@@ -17,9 +17,10 @@ export default function SignalPerformancePanel({ signals }: { signals: SignalPer
   if (signals.length === 0) {
     return (
       <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-        <h2 className="text-sm font-semibold text-zinc-100">Signal performance</h2>
+        <h2 className="text-sm font-semibold text-zinc-100">How Each Signal Is Doing</h2>
         <p className="mt-2 text-xs text-zinc-500">
-          No signal performance recorded yet. Run POST /api/jobs/analyze-learning after entering at least a few outcomes.
+          No data yet. After the system has checked some predictions against real results
+          (via the End of Day Check), this table will show which signals are working best.
         </p>
       </div>
     );
@@ -27,18 +28,18 @@ export default function SignalPerformancePanel({ signals }: { signals: SignalPer
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-      <h2 className="text-sm font-semibold text-zinc-100">Signal performance</h2>
+      <h2 className="text-sm font-semibold text-zinc-100">How Each Signal Is Doing</h2>
       <p className="mt-1 text-[11px] text-zinc-500">
-        Computed only from picks with a recorded outcome. Confidence reflects sample size, not necessarily accuracy.
+        Based on predictions that have been checked against real prices. Confidence goes up as the system gets more data.
       </p>
       <div className="mt-3 overflow-x-auto">
         <table className="w-full text-left text-xs">
           <thead>
             <tr className="border-b border-zinc-800 text-zinc-500">
               <th className="px-2 py-1.5">Signal</th>
-              <th className="px-2 py-1.5">Times used</th>
-              <th className="px-2 py-1.5">Win rate</th>
-              <th className="px-2 py-1.5">Avg return</th>
+              <th className="px-2 py-1.5">Times Used</th>
+              <th className="px-2 py-1.5">Success Rate</th>
+              <th className="px-2 py-1.5">Avg Result</th>
               <th className="px-2 py-1.5">Confidence</th>
               <th className="px-2 py-1.5">Notes</th>
             </tr>

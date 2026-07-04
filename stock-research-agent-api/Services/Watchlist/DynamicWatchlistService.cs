@@ -17,8 +17,8 @@ public class DynamicWatchlistService
     private const int MinActiveTarget = 5;
     // With news-driven discovery, we have catalyst data. Tickers that were
     // discovered by news get a catalyst boost, so this threshold works.
-    private const double MinScoreForCandidate = 5.0;
-    private const double SwapThresholdDelta = 20.0;
+    private const double MinScoreForCandidate = 15.0;
+    private const double SwapThresholdDelta = 25.0;
     private const int StaleDaysThreshold = 14;
     private const double HighRiskThreshold = 80.0;
     private const double LowConfidenceThreshold = 15.0;
@@ -107,7 +107,7 @@ public class DynamicWatchlistService
         foreach (var ticker in universe)
         {
             discoveryMap.TryGetValue(ticker, out var discovery);
-            var scored = await ScoreTickerAsync(ticker, scoringWeights, tickerAccuracy, discovery);
+            var scored = await ScoreTickerAsync(ticker, scoringWeights, tickerAccuracy, recentPredictions, discovery);
             candidates.Add(scored);
             if (scored.HasMarketData) tickersWithData++;
             if (scored.HasNews) tickersWithNews++;
@@ -137,7 +137,7 @@ public class DynamicWatchlistService
             var scored = candidates.FirstOrDefault(c => c.Ticker == item.Ticker);
             if (scored is null)
             {
-                scored = await ScoreTickerAsync(item.Ticker, scoringWeights, tickerAccuracy);
+                scored = await ScoreTickerAsync(item.Ticker, scoringWeights, tickerAccuracy, recentPredictions);
                 candidates.Add(scored);
             }
             existingScored[item.Ticker] = scored;
@@ -169,6 +169,7 @@ public class DynamicWatchlistService
                             risk_score = scored.RiskScore,
                             data_confidence = scored.DataConfidence,
                             last_reviewed_at = DateTimeOffset.UtcNow.ToString("o"),
+                            watch_reason = scored.Reason,
                             bullish_case = scored.BullishCase,
                             bearish_case = scored.BearishCase,
                             missing_data_warnings = scored.MissingWarnings.ToArray(),
@@ -348,13 +349,14 @@ public class DynamicWatchlistService
         string ticker,
         Dictionary<string, double> weights,
         Dictionary<string, (int Correct, int Total)> tickerAccuracy,
+        List<PredictionCandidate> recentPredictions,
         TickerDiscoveryContext? discovery = null)
     {
         var (quote, bars, technical, mktWarnings) = await _marketData.GetFullContextAsync(ticker);
 
         double techScore = 0;
         double catalystScore = 0;
-        double riskScore = 50;
+        double riskScore = 25; // Start low — let actual bearish signals raise it
         var signals = new List<string>();
         var bearishSignals = new List<string>();
         var sources = new List<string>();
@@ -364,7 +366,9 @@ public class DynamicWatchlistService
         // Track exact points per signal for the breakdown
         var scoreBreakdown = new List<object>();
 
-        // Technical scoring
+        // =================================================================
+        // Technical scoring (max ~60 points)
+        // =================================================================
         if (technical is not null)
         {
             sources.Add("twelve-data");
@@ -372,43 +376,83 @@ public class DynamicWatchlistService
             var momW = weights.GetValueOrDefault("technical_momentum", 1.0);
             var volW = weights.GetValueOrDefault("technical_volume", 1.0);
 
+            // Trend direction (+30 / -20)
             if (technical.TrendDirection == "bullish")
             {
-                var pts = Math.Round(20 * trendW, 1);
+                var pts = Math.Round(30 * trendW, 1);
                 techScore += pts; signals.Add("Trend bullish");
                 scoreBreakdown.Add(new { signal = "Trend bullish", points = pts, category = "technical", weight = trendW });
             }
             else if (technical.TrendDirection == "bearish")
             {
-                var pts = Math.Round(-15 * trendW, 1);
+                var pts = Math.Round(-20 * trendW, 1);
                 techScore += pts; bearishSignals.Add("Trend bearish");
                 scoreBreakdown.Add(new { signal = "Trend bearish", points = pts, category = "technical", weight = trendW });
             }
 
+            // Momentum (+15 / -12)
             if (technical.MomentumSummary.Contains("up", StringComparison.OrdinalIgnoreCase))
             {
-                var pts = Math.Round(10 * momW, 1);
+                var pts = Math.Round(15 * momW, 1);
                 techScore += pts; signals.Add("Momentum positive");
                 scoreBreakdown.Add(new { signal = "Momentum positive", points = pts, category = "technical", weight = momW });
             }
             else if (technical.MomentumSummary.Contains("down", StringComparison.OrdinalIgnoreCase))
             {
-                var pts = Math.Round(-10 * momW, 1);
+                var pts = Math.Round(-12 * momW, 1);
                 techScore += pts; bearishSignals.Add("Momentum negative");
                 scoreBreakdown.Add(new { signal = "Momentum negative", points = pts, category = "technical", weight = momW });
             }
 
+            // Volume (+12 / -8)
             if (technical.VolumeSummary.Contains("elevated", StringComparison.OrdinalIgnoreCase))
             {
-                var pts = Math.Round(10 * volW, 1);
+                var pts = Math.Round(12 * volW, 1);
                 techScore += pts; signals.Add("Volume elevated");
                 scoreBreakdown.Add(new { signal = "Volume elevated", points = pts, category = "technical", weight = volW });
             }
             else if (technical.VolumeSummary.Contains("below", StringComparison.OrdinalIgnoreCase))
             {
-                var pts = Math.Round(-5 * volW, 1);
+                var pts = Math.Round(-8 * volW, 1);
                 techScore += pts; bearishSignals.Add("Volume below average");
                 scoreBreakdown.Add(new { signal = "Volume below average", points = pts, category = "technical", weight = volW });
+            }
+
+            // Moving average alignment (NEW — up to +10)
+            if (!string.IsNullOrEmpty(technical.MovingAverageSummary))
+            {
+                var maSummary = technical.MovingAverageSummary.ToLowerInvariant();
+                if (maSummary.Contains("above") && maSummary.Contains("bullish"))
+                {
+                    techScore += 10; signals.Add("Price above key moving averages");
+                    scoreBreakdown.Add(new { signal = "Price above key moving averages", points = 10.0, category = "technical", weight = 1.0 });
+                }
+                else if (maSummary.Contains("below") && maSummary.Contains("bearish"))
+                {
+                    techScore -= 8; bearishSignals.Add("Price below key moving averages");
+                    scoreBreakdown.Add(new { signal = "Price below key moving averages", points = -8.0, category = "technical", weight = 1.0 });
+                }
+                else if (maSummary.Contains("above"))
+                {
+                    techScore += 5; signals.Add("Price near moving averages (leaning bullish)");
+                    scoreBreakdown.Add(new { signal = "Price near moving averages (leaning bullish)", points = 5.0, category = "technical", weight = 1.0 });
+                }
+            }
+
+            // Relative strength (NEW — up to +8)
+            if (!string.IsNullOrEmpty(technical.RelativeStrengthNote))
+            {
+                var rsNote = technical.RelativeStrengthNote.ToLowerInvariant();
+                if (rsNote.Contains("outperform") || rsNote.Contains("strong"))
+                {
+                    techScore += 8; signals.Add("Outperforming the broader market");
+                    scoreBreakdown.Add(new { signal = "Outperforming the broader market", points = 8.0, category = "technical", weight = 1.0 });
+                }
+                else if (rsNote.Contains("underperform") || rsNote.Contains("weak"))
+                {
+                    techScore -= 5; bearishSignals.Add("Underperforming the broader market");
+                    scoreBreakdown.Add(new { signal = "Underperforming the broader market", points = -5.0, category = "technical", weight = 1.0 });
+                }
             }
         }
         else
@@ -417,23 +461,124 @@ public class DynamicWatchlistService
             riskScore += 10;
         }
 
-        // Historical accuracy adjustment
-        if (tickerAccuracy.TryGetValue(ticker, out var acc) && acc.Total >= 3)
+        // =================================================================
+        // Price action scoring from quote (NEW — up to +10)
+        // =================================================================
+        if (quote is not null)
         {
-            var accuracy = (double)acc.Correct / acc.Total;
-            if (accuracy > 0.6)
+            // Intraday move aligns with trend = confirming (+8)
+            // Strong gap up/down = attention (+5)
+            var changePct = quote.ChangePercent;
+            var isBullishTrend = technical?.TrendDirection == "bullish";
+            var isBearishTrend = technical?.TrendDirection == "bearish";
+
+            if (Math.Abs(changePct) >= 1.0)
             {
-                techScore += 10; signals.Add($"Prior accuracy {accuracy * 100:F0}%");
-                scoreBreakdown.Add(new { signal = $"Prior accuracy {accuracy * 100:F0}%", points = 10.0, category = "technical", weight = 1.0 });
+                if ((changePct > 0 && isBullishTrend) || (changePct < 0 && isBearishTrend))
+                {
+                    techScore += 8; signals.Add($"Price confirming trend ({changePct:+0.0;-0.0}% today)");
+                    scoreBreakdown.Add(new { signal = $"Price confirming trend ({changePct:+0.0;-0.0}% today)", points = 8.0, category = "technical", weight = 1.0 });
+                }
+                else if ((changePct < 0 && isBullishTrend) || (changePct > 0 && isBearishTrend))
+                {
+                    techScore -= 5; bearishSignals.Add($"Price moving against trend ({changePct:+0.0;-0.0}% today)");
+                    scoreBreakdown.Add(new { signal = $"Price moving against trend ({changePct:+0.0;-0.0}% today)", points = -5.0, category = "technical", weight = 1.0 });
+                    riskScore += 5;
+                }
             }
-            else if (accuracy < 0.3)
+
+            // Trading near high of day = strength (+5)
+            if (quote.High > 0 && quote.Low > 0 && (quote.High - quote.Low) > 0)
             {
-                techScore -= 10; bearishSignals.Add($"Prior accuracy only {accuracy * 100:F0}%"); riskScore += 10;
-                scoreBreakdown.Add(new { signal = $"Prior accuracy only {accuracy * 100:F0}%", points = -10.0, category = "technical", weight = 1.0 });
+                var dayRange = quote.High - quote.Low;
+                var positionInRange = (quote.Price - quote.Low) / dayRange;
+                if (positionInRange >= 0.8)
+                {
+                    techScore += 5; signals.Add("Trading near high of day");
+                    scoreBreakdown.Add(new { signal = "Trading near high of day", points = 5.0, category = "technical", weight = 1.0 });
+                }
+                else if (positionInRange <= 0.2)
+                {
+                    techScore -= 3; bearishSignals.Add("Trading near low of day");
+                    scoreBreakdown.Add(new { signal = "Trading near low of day", points = -3.0, category = "technical", weight = 1.0 });
+                }
             }
         }
 
-        // Catalyst scoring from discovery context (news mentions, earnings, etc.)
+        // =================================================================
+        // Recent price bars — multi-day pattern (NEW — up to +10)
+        // =================================================================
+        if (bars.Count >= 5)
+        {
+            // Check if last 3 bars are making higher lows (bullish structure)
+            var recent = bars.TakeLast(3).ToList();
+            if (recent.Count == 3)
+            {
+                if (recent[1].Low > recent[0].Low && recent[2].Low > recent[1].Low)
+                {
+                    techScore += 8; signals.Add("Making higher lows (3 days)");
+                    scoreBreakdown.Add(new { signal = "Making higher lows (3 days)", points = 8.0, category = "technical", weight = 1.0 });
+                }
+                else if (recent[1].High < recent[0].High && recent[2].High < recent[1].High)
+                {
+                    techScore -= 6; bearishSignals.Add("Making lower highs (3 days)");
+                    scoreBreakdown.Add(new { signal = "Making lower highs (3 days)", points = -6.0, category = "technical", weight = 1.0 });
+                }
+            }
+
+            // 5-day price range — narrow range = potential breakout setup (+5)
+            var fiveDayBars = bars.TakeLast(5).ToList();
+            var highest = fiveDayBars.Max(b => b.High);
+            var lowest = fiveDayBars.Min(b => b.Low);
+            if (lowest > 0)
+            {
+                var rangePercent = (highest - lowest) / lowest * 100;
+                if (rangePercent < 3.0) // Very tight range
+                {
+                    techScore += 5; signals.Add($"Tight 5-day range ({rangePercent:F1}%) — potential breakout");
+                    scoreBreakdown.Add(new { signal = $"Tight 5-day range ({rangePercent:F1}%) — potential breakout", points = 5.0, category = "technical", weight = 1.0 });
+                }
+            }
+
+            // Volume trend — are recent bars seeing rising volume? (+5)
+            if (fiveDayBars.Count == 5)
+            {
+                var firstHalfVol = fiveDayBars.Take(2).Average(b => b.Volume);
+                var secondHalfVol = fiveDayBars.Skip(3).Average(b => b.Volume);
+                if (firstHalfVol > 0 && secondHalfVol > firstHalfVol * 1.5)
+                {
+                    techScore += 5; signals.Add("Volume increasing over last 5 days");
+                    scoreBreakdown.Add(new { signal = "Volume increasing over last 5 days", points = 5.0, category = "technical", weight = 1.0 });
+                }
+            }
+        }
+
+        // =================================================================
+        // Historical accuracy (up to +15 / -15)
+        // =================================================================
+        if (tickerAccuracy.TryGetValue(ticker, out var acc) && acc.Total >= 3)
+        {
+            var accuracy = (double)acc.Correct / acc.Total;
+            if (accuracy >= 0.7)
+            {
+                techScore += 15; signals.Add($"Strong prior accuracy {accuracy * 100:F0}%");
+                scoreBreakdown.Add(new { signal = $"Strong prior accuracy {accuracy * 100:F0}%", points = 15.0, category = "technical", weight = 1.0 });
+            }
+            else if (accuracy > 0.5)
+            {
+                techScore += 8; signals.Add($"Decent prior accuracy {accuracy * 100:F0}%");
+                scoreBreakdown.Add(new { signal = $"Decent prior accuracy {accuracy * 100:F0}%", points = 8.0, category = "technical", weight = 1.0 });
+            }
+            else if (accuracy < 0.3)
+            {
+                techScore -= 15; bearishSignals.Add($"Poor prior accuracy {accuracy * 100:F0}%"); riskScore += 10;
+                scoreBreakdown.Add(new { signal = $"Poor prior accuracy {accuracy * 100:F0}%", points = -15.0, category = "technical", weight = 1.0 });
+            }
+        }
+
+        // =================================================================
+        // Catalyst scoring (max ~35 points)
+        // =================================================================
         if (discovery is not null)
         {
             var catalystW = weights.GetValueOrDefault("catalyst_news", 1.0);
@@ -441,39 +586,60 @@ public class DynamicWatchlistService
 
             if (hasNews) sources.Add("news-discovery");
 
-            // Earnings upcoming = strong catalyst
+            // Earnings upcoming = strong catalyst (+20)
             if (discovery.HasUpcomingEarnings)
             {
-                var pts = Math.Round(15 * catalystW, 1);
+                var pts = Math.Round(20 * catalystW, 1);
                 catalystScore += pts;
                 signals.Add($"Earnings on {discovery.EarningsDate}");
                 sources.Add("finnhub-earnings");
                 scoreBreakdown.Add(new { signal = $"Earnings on {discovery.EarningsDate}", points = pts, category = "catalyst", weight = catalystW });
             }
 
-            // High news mention count = market attention
+            // News volume (+8 to +15)
             if (discovery.RssMentions >= 5)
             {
-                var pts = Math.Round(10 * catalystW, 1);
+                var pts = Math.Round(15 * catalystW, 1);
                 catalystScore += pts;
                 signals.Add($"High news volume ({discovery.RssMentions} mentions)");
                 scoreBreakdown.Add(new { signal = $"High news volume ({discovery.RssMentions} mentions)", points = pts, category = "catalyst", weight = catalystW });
             }
             else if (discovery.RssMentions >= 2)
             {
-                var pts = Math.Round(5 * catalystW, 1);
+                var pts = Math.Round(8 * catalystW, 1);
                 catalystScore += pts;
                 signals.Add($"News mentions ({discovery.RssMentions})");
                 scoreBreakdown.Add(new { signal = $"News mentions ({discovery.RssMentions})", points = pts, category = "catalyst", weight = catalystW });
             }
 
-            // Finnhub coverage
-            if (discovery.FinnhubMentions >= 3)
+            // Finnhub coverage (+5 to +10)
+            if (discovery.FinnhubMentions >= 5)
+            {
+                var pts = Math.Round(10 * catalystW, 1);
+                catalystScore += pts;
+                signals.Add($"Heavy Finnhub coverage ({discovery.FinnhubMentions} articles)");
+                scoreBreakdown.Add(new { signal = $"Heavy Finnhub coverage ({discovery.FinnhubMentions} articles)", points = pts, category = "catalyst", weight = catalystW });
+            }
+            else if (discovery.FinnhubMentions >= 3)
             {
                 var pts = Math.Round(5 * catalystW, 1);
                 catalystScore += pts;
                 signals.Add($"Finnhub coverage ({discovery.FinnhubMentions} articles)");
                 scoreBreakdown.Add(new { signal = $"Finnhub coverage ({discovery.FinnhubMentions} articles)", points = pts, category = "catalyst", weight = catalystW });
+            }
+
+            // Discovery score itself — high score = multiple reasons to watch (NEW — up to +10)
+            if (discovery.DiscoveryScore >= 8)
+            {
+                catalystScore += 10;
+                signals.Add("High discovery score — multiple reasons this ticker surfaced");
+                scoreBreakdown.Add(new { signal = "High discovery score — multiple reasons this ticker surfaced", points = 10.0, category = "catalyst", weight = 1.0 });
+            }
+            else if (discovery.DiscoveryScore >= 5)
+            {
+                catalystScore += 5;
+                signals.Add("Moderate discovery score");
+                scoreBreakdown.Add(new { signal = "Moderate discovery score", points = 5.0, category = "catalyst", weight = 1.0 });
             }
         }
         else
@@ -484,7 +650,54 @@ public class DynamicWatchlistService
         // Options data always missing (not connected)
         missingWarnings.Add("Options-chain data not connected -- options_readiness_score is null");
 
-        var totalScore = techScore + catalystScore;
+        // =================================================================
+        // Blend with prediction confidence
+        // The prediction engine already did a deep 8-bucket analysis.
+        // If a prediction exists, the watchlist score should reflect it:
+        //   Final = 50% prediction confidence + 50% watchlist signals
+        // This prevents the contradiction of "high confidence, low score".
+        // =================================================================
+        var latestPrediction = recentPredictions
+            .Where(p => p.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(p => p.CreatedAt)
+            .FirstOrDefault();
+
+        var signalScore = techScore + catalystScore;
+        // Clamp the signal-only score to 0-100 before blending
+        signalScore = Math.Max(0, Math.Min(100, signalScore));
+
+        double totalScore;
+
+        // Bearish signals should raise risk — each one makes the setup riskier
+        riskScore += bearishSignals.Count * 8;
+
+        if (latestPrediction is not null)
+        {
+            sources.Add("prediction-engine");
+            var predConf = (double)latestPrediction.ConfidenceScore;
+
+            // Blend: 50% prediction confidence, 50% watchlist signals
+            totalScore = (predConf * 0.50) + (signalScore * 0.50);
+
+            signals.Add($"Prediction confidence {latestPrediction.ConfidenceScore}/100");
+            scoreBreakdown.Add(new { signal = $"Prediction confidence {latestPrediction.ConfidenceScore}/100 (50% weight)", points = Math.Round(predConf * 0.50, 1), category = "technical", weight = 1.0 });
+            scoreBreakdown.Add(new { signal = $"Watchlist signals (50% weight)", points = Math.Round(signalScore * 0.50, 1), category = "technical", weight = 1.0 });
+
+            // Prediction risk dominates: 60% prediction, 40% signal-based risk
+            riskScore = (riskScore * 0.40) + (latestPrediction.RiskScore * 0.60);
+            if (latestPrediction.RiskScore >= 70)
+            {
+                bearishSignals.Add($"Prediction flagged high risk ({latestPrediction.RiskScore}/100)");
+            }
+        }
+        else
+        {
+            // No prediction — use signal score as-is
+            totalScore = signalScore;
+        }
+
+        // Clamp final score to 0-100
+        totalScore = Math.Max(0, Math.Min(100, totalScore));
 
         // Data confidence
         var confidence = quote is not null ? "medium" : "low";
@@ -502,7 +715,10 @@ public class DynamicWatchlistService
             RiskScore = Math.Min(riskScore, 100),
             DataConfidence = confidence,
             Category = WatchlistCategory.General,
-            Reason = $"Score: {totalScore:F1}. {signals.Count} bullish signals, {bearishSignals.Count} bearish. {sources.Count} data sources.",
+            Reason = signals.Count > 0
+                ? $"Top signals: {string.Join(", ", signals.Take(3))}."
+                  + (bearishSignals.Count > 0 ? $" Concerns: {string.Join(", ", bearishSignals.Take(2))}." : "")
+                : "On the radar but no strong edge yet",
             BullishCase = signals.Count > 0 ? string.Join("; ", signals) : "No strong bullish signals",
             BearishCase = bearishSignals.Count > 0 ? string.Join("; ", bearishSignals) : "No strong bearish signals identified",
             MissingWarnings = missingWarnings,

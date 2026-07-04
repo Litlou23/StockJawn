@@ -19,18 +19,18 @@ export default function AgentOptionsCard({ option }: { option: OptionsSignal }) 
         </span>
       </div>
       <div className="text-[11px] text-zinc-500">
-        exp {option.expiration} · {option.daysToExpiration}d
+        expires {option.expiration} · {option.daysToExpiration} days left
       </div>
 
       <div className="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-zinc-400">
         <div>
-          IV <span className="text-zinc-200">{Math.round(option.impliedVolatility * 100)}%</span>
+          Volatility <span className="text-zinc-200">{Math.round(option.impliedVolatility * 100)}%</span>
         </div>
         <div>
-          IV rank <span className="text-zinc-200">{option.ivRank}</span>
+          Vol. Rank <span className="text-zinc-200">{option.ivRank}</span>
         </div>
         <div>
-          OI <span className="text-zinc-200">{option.openInterest.toLocaleString()}</span>
+          Open Contracts <span className="text-zinc-200">{option.openInterest.toLocaleString()}</span>
         </div>
         <div>
           Spread <span className="text-zinc-200">{option.bidAskSpreadPercent.toFixed(1)}%</span>
@@ -39,7 +39,7 @@ export default function AgentOptionsCard({ option }: { option: OptionsSignal }) 
           Liquidity <span className="text-zinc-200">{option.liquidityScore}/100</span>
         </div>
         <div>
-          Delta <span className="text-zinc-200">{option.delta.toFixed(2)}</span>
+          Sensitivity <span className="text-zinc-200">{option.delta.toFixed(2)}</span>
         </div>
       </div>
 

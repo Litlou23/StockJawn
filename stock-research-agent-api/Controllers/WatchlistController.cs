@@ -205,43 +205,4 @@ public class WatchlistJobController : ControllerBase
             _jobStatus.MarkFailed("run-weekly-research", ex.Message);
             throw;
         }
-    }
-
-    /// <summary>
-    /// POST /api/jobs/run-watchlist-refresh
-    /// Same as weekly research but can be triggered manually for testing.
-    /// </summary>
-    [HttpPost("run-watchlist-refresh")]
-    public async Task<IActionResult> RunWatchlistRefresh([FromBody] JobTriggerRequest? trigger)
-    {
-        if (!ValidateJobSecret())
-            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
-
-        _logger.LogInformation("[jobs] Watchlist refresh triggered by {Trigger}", trigger?.Trigger ?? "unknown");
-        _jobStatus.MarkStarted("run-watchlist-refresh");
-
-        try
-        {
-            var discovery = await _universeDiscovery.DiscoverUniverseAsync();
-            var universe = discovery.Universe.Select(t => t.Ticker).ToArray();
-            _logger.LogInformation("[jobs] Refresh using {Count} discovered tickers", universe.Length);
-
-            var discoveryContext = discovery.Universe.Select(t =>
-                new DynamicWatchlistService.TickerDiscoveryContext(
-                    t.Ticker, t.DiscoveryScore, t.HasUpcomingEarnings, t.EarningsDate,
-                    t.RssMentions, t.FinnhubMentions, t.TopReason)).ToList();
-
-            var result = await _watchlistService.BuildDynamicWatchlistAsync(universe, discoveryContext: discoveryContext);
-
-            _jobStatus.MarkCompleted("run-watchlist-refresh",
-                $"{result.ActiveWatchlistCount} active, {result.Added.Count} added");
-
-            return Ok(result);
-        }
-        catch (Exception ex)
-        {
-            _jobStatus.MarkFailed("run-watchlist-refresh", ex.Message);
-            throw;
-        }
-    }
-}
+    }}

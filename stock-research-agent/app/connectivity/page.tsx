@@ -59,9 +59,9 @@ export default function ConnectivityPage() {
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-zinc-100">API Connectivity</h1>
+            <h1 className="text-xl font-semibold text-zinc-100">Connection Status</h1>
             <p className="mt-1 text-sm text-zinc-400">
-              Test connectivity to all external services
+              Check if all the services the system needs are working
             </p>
           </div>
           <button

@@ -335,8 +335,8 @@ function verdictBadge(verdict: boolean | null) {
 const CHAT_PROMPTS = [
   { label: 'Summarize my watchlist', prompt: 'Give me a summary of my current active watchlist' },
   { label: 'What needs review?', prompt: 'Which watchlist items need review and why?' },
-  { label: 'Best prediction accuracy?', prompt: 'Which signals have the best prediction accuracy?' },
-  { label: 'Data quality check', prompt: 'Are there any data quality issues I should know about?' },
+  { label: 'Which signals work best?', prompt: 'Which signals have the best prediction accuracy?' },
+  { label: 'Any data problems?', prompt: 'Are there any data quality issues I should know about?' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -353,7 +353,7 @@ export default async function DashboardPage() {
           <h1 className="text-lg font-bold text-zinc-100">Dashboard</h1>
           <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center">
             <p className="text-sm text-zinc-400">
-              Unable to connect to the research API. Make sure <code className="text-violet-400">AGENT_API_BASE_URL</code> is set and the .NET API is running.
+              Unable to connect to the research system. Please make sure the backend server is running.
             </p>
           </div>
         </div>
@@ -378,41 +378,41 @@ export default async function DashboardPage() {
       <div className="mx-auto max-w-4xl space-y-5 p-4">
         {/* ── 1. Header / Overview ──────────────────────────────────── */}
         <div>
-          <h1 className="text-lg font-bold text-zinc-100">Research Command Center</h1>
-          <p className="mt-0.5 text-xs text-zinc-500">Live data from the research engine and dynamic watchlist</p>
+          <h1 className="text-lg font-bold text-zinc-100">My Dashboard</h1>
+          <p className="mt-0.5 text-xs text-zinc-500">Your stocks at a glance</p>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <StatCard label="Active Watchlist" value={overview.activeCount} />
           <StatCard label="Review Needed" value={overview.reviewNeededCount} accent={overview.reviewNeededCount > 0 ? 'yellow' : undefined} />
-          <StatCard label="Swap Candidates" value={overview.swapCandidateCount} accent={overview.swapCandidateCount > 0 ? 'red' : undefined} />
-          <StatCard label="Directional Accuracy" value={directionalStats.accuracyPercent !== null ? `${directionalStats.accuracyPercent}%` : '—'} accent={directionalStats.accuracyPercent !== null && directionalStats.accuracyPercent >= 60 ? 'green' : undefined} />
+          <StatCard label="Might Replace" value={overview.swapCandidateCount} accent={overview.swapCandidateCount > 0 ? 'red' : undefined} />
+          <StatCard label="Prediction Accuracy" value={directionalStats.accuracyPercent !== null ? `${directionalStats.accuracyPercent}%` : '—'} accent={directionalStats.accuracyPercent !== null && directionalStats.accuracyPercent >= 60 ? 'green' : undefined} />
         </div>
 
         <InfoBanner items={[
-          { term: 'Active Watchlist', definition: 'Number of tickers the system is actively tracking for daily scans.' },
-          { term: 'Review Needed', definition: 'Watchlist items flagged for manual review due to score drops or data issues.' },
-          { term: 'Swap Candidates', definition: 'Tickers performing poorly that could be replaced with better opportunities.' },
-          { term: 'Directional Accuracy', definition: 'Percentage of bullish/bearish predictions where the stock moved in the predicted direction. Only evaluated picks count.' },
-          { term: 'Confidence Score', definition: 'How confident the system is in the prediction (0-100). Based on signal strength, data quality, and catalyst presence. Picks need 40+ to qualify for options.' },
-          { term: 'Risk Score', definition: 'How risky the trade is (0-100). Factors in volatility, sector risk, and conflicting signals. Lower is safer.' },
-          { term: 'Importance Score', definition: 'How significant this prediction is relative to others. High importance = strong catalyst or major technical signal.' },
-          { term: 'Directional Stock Picks', definition: 'Bullish or bearish predictions with short-term time windows (intraday to 1 week). These are measured for accuracy.' },
-          { term: 'Paper Option Picks', definition: 'Simulated call/put trades auto-generated from high-confidence directional picks. Uses real option chain data but no real money.' },
-          { term: 'Scan Results', definition: 'Tickers scanned where the system decided NOT to take a position. Neutral, watch-only, or rejected — not counted in accuracy.' },
-          { term: 'No Edge', definition: 'System scanned the ticker but found no clear bullish or bearish signal.' },
-          { term: 'Range Bound', definition: 'Conflicting signals — stock appears stuck in a range with no breakout catalyst.' },
-          { term: 'Watch Only', definition: 'Signals too weak to act on, but worth monitoring for changes.' },
+          { term: 'Active Watchlist', definition: 'How many stocks the system is watching every day.' },
+          { term: 'Review Needed', definition: 'Stocks that might need attention because something changed.' },
+          { term: 'Might Replace', definition: 'Stocks that aren\'t doing well and might be swapped for better ones.' },
+          { term: 'Prediction Accuracy', definition: 'How often the system correctly guessed whether a stock would go up or down.' },
+          { term: 'Signal Strength', definition: 'How many signals lined up in the same direction (0-100). Higher = more signals agree. This is NOT accuracy — it does not mean the prediction has that chance of being right.' },
+          { term: 'Risk', definition: 'How risky a trade would be, from 0 to 100. Lower = safer.' },
+          { term: 'Significance', definition: 'How important this prediction is compared to others. Big news or strong signals = high significance.' },
+          { term: 'Stock Predictions', definition: 'Predictions about whether a stock will go up or down in the short term (today to next week).' },
+          { term: 'Practice Option Trades', definition: 'Fake trades using real option prices — no real money involved. Used to test if the system\'s ideas actually work.' },
+          { term: 'Stocks Passed On', definition: 'Stocks the system looked at but decided not to predict. These don\'t count toward accuracy.' },
+          { term: 'No Clear Signal', definition: 'The system looked but couldn\'t tell if the stock would go up or down.' },
+          { term: 'Stuck in a Range', definition: 'The stock isn\'t going anywhere — mixed signals, no clear direction.' },
+          { term: 'Just Watching', definition: 'Signs are too weak to act on, but worth keeping an eye on.' },
         ]} />
 
         {/* Dynamic pick orchestrator summary — fetched client-side */}
-        <Section title="Dynamic picks today" subtitle="Auto-generated stock + linked option candidates">
+        <Section title="Today's Picks" subtitle="Stocks and options the system found today">
           <DynamicSummaryCards />
         </Section>
 
         {/* ── 2a. Directional Stock Picks ────────────────────────── */}
-        <Section title="Directional Stock Picks" subtitle="Bullish/bearish short-term picks only"
-          link={{ href: '/predictions', label: 'View all picks →' }}>
+        <Section title="Stock Predictions" subtitle="Short-term up or down predictions"
+          link={{ href: '/predictions', label: 'View all predictions →' }}>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <StatCard label="Total" value={directionalStats.total} />
             <StatCard label="Correct" value={directionalStats.correct} accent={directionalStats.correct > 0 ? 'green' : undefined} />
@@ -422,13 +422,13 @@ export default async function DashboardPage() {
             <StatCard label="Evaluated" value={directionalStats.evaluated} />
           </div>
           <p className="mt-2 text-[10px] text-zinc-600">
-            Only bullish/bearish picks with short-term time windows. Neutral and watch-only results are tracked separately.
+            Only up/down predictions for the short term. Stocks the system passed on are tracked below.
           </p>
         </Section>
 
         {/* ── 2b. Long-Term Stock Picks ──────────────────────────── */}
         {longTermStats.total > 0 && (
-          <Section title="Long-Term Stock Picks" subtitle="1 month+ thesis-driven picks">
+          <Section title="Long-Term Predictions" subtitle="Predictions for a month or more out">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
               <StatCard label="Total" value={longTermStats.total} />
               <StatCard label="Correct" value={longTermStats.correct} accent={longTermStats.correct > 0 ? 'green' : undefined} />
@@ -441,34 +441,34 @@ export default async function DashboardPage() {
         )}
 
         {/* ── 2c. Paper Option Picks ─────────────────────────────── */}
-        <Section title="Paper Option Picks" subtitle="Calls/puts from actionable stock picks">
+        <Section title="Practice Option Trades" subtitle="Simulated trades using real option prices (no real money)">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
             <StatCard label="Total" value={optionStats.total} />
             <StatCard label="Profitable" value={optionStats.profitable} accent={optionStats.profitable > 0 ? 'green' : undefined} />
             <StatCard label="Unprofitable" value={optionStats.unprofitable} accent={optionStats.unprofitable > 0 ? 'red' : undefined} />
             <StatCard label="Open" value={optionStats.open} accent={optionStats.open > 0 ? 'yellow' : undefined} />
-            <StatCard label="Win Rate" value={optionStats.winRatePercent !== null ? `${optionStats.winRatePercent}%` : '—'} accent={optionStats.winRatePercent !== null && optionStats.winRatePercent >= 60 ? 'green' : undefined} />
+            <StatCard label="Success Rate" value={optionStats.winRatePercent !== null ? `${optionStats.winRatePercent}%` : '—'} accent={optionStats.winRatePercent !== null && optionStats.winRatePercent >= 60 ? 'green' : undefined} />
             <StatCard label="Evaluated" value={optionStats.evaluated} />
           </div>
         </Section>
 
         {/* ── 2d. Scan Results / No-Trade Decisions ──────────────── */}
-        <Section title="Scan Results / No-Trade Decisions" subtitle={`${scanStats.total} non-directional results`}>
+        <Section title="Stocks the System Passed On" subtitle={`${scanStats.total} stocks scanned but no prediction made`}>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
             <StatCard label="Total" value={scanStats.total} />
-            <StatCard label="No Edge" value={scanStats.neutralNoEdge} />
-            <StatCard label="Range Bound" value={scanStats.neutralRangeBound} />
-            <StatCard label="High Volatility" value={scanStats.neutralHighVolatility} />
-            <StatCard label="Watch Only" value={scanStats.watchOnly} />
+            <StatCard label="No Clear Signal" value={scanStats.neutralNoEdge} />
+            <StatCard label="Stuck in Range" value={scanStats.neutralRangeBound} />
+            <StatCard label="Too Unpredictable" value={scanStats.neutralHighVolatility} />
+            <StatCard label="Just Watching" value={scanStats.watchOnly} />
             <StatCard label="Rejected" value={scanStats.rejected} />
             <StatCard label="Unavailable" value={scanStats.unavailable} />
           </div>
           <p className="mt-2 text-[10px] text-zinc-600">
-            These are not counted in directional accuracy. They track when the system correctly decided not to take a position.
+            These don't count toward prediction accuracy. They show when the system wisely decided to sit one out.
           </p>
           {recentScanResults.length > 0 && (
             <div className="mt-3 flex flex-col gap-1.5">
-              <h3 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Recent no-trade decisions</h3>
+              <h3 className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Recently passed on</h3>
               {recentScanResults.slice(0, 5).map((s) => (
                 <div key={s.id} className="flex items-center gap-2 text-xs">
                   <span className="w-12 shrink-0 text-[10px] text-zinc-600">{timeAgo(s.createdAt)}</span>
@@ -483,8 +483,8 @@ export default async function DashboardPage() {
 
         {/* ── 2e. Most Recent Directional Picks ──────────────────── */}
         <Section
-          title="Most Recent Directional Picks"
-          subtitle={`Showing latest ${recentPredictions.length}`}
+          title="Latest Predictions"
+          subtitle={`Showing the most recent ${recentPredictions.length}`}
           link={{ href: '/predictions', label: 'View all predictions →' }}
         >
           {recentPredictions.length === 0 ? (
@@ -503,7 +503,7 @@ export default async function DashboardPage() {
                           <div className="h-1.5 w-10 overflow-hidden rounded-full bg-zinc-800">
                             <div className={`h-full rounded-full ${p.confidenceScore >= 70 ? 'bg-green-500' : p.confidenceScore >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${p.confidenceScore}%` }} />
                           </div>
-                          <span className="text-[10px] text-zinc-500">{p.confidenceScore}</span>
+                          <span className="text-[10px] text-zinc-500">{p.confidenceScore}/100</span>
                         </div>
                         <span className="text-[10px] text-zinc-500">{p.timeWindow.replace(/_/g, ' ')}</span>
                         {p.dataSourcesUsed?.includes('openai-analysis') && (
@@ -513,21 +513,21 @@ export default async function DashboardPage() {
                       <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
                       <div className="mt-1.5 flex flex-wrap gap-3 text-[10px]">
                         <span className="text-zinc-500">Risk: <span className={`font-medium ${p.riskScore >= 70 ? 'text-red-400' : p.riskScore >= 40 ? 'text-yellow-400' : 'text-green-400'}`}>{p.riskScore}</span></span>
-                        <span className="text-zinc-500">Importance: <span className="text-zinc-400">{p.importanceScore}</span></span>
+                        <span className="text-zinc-500">Significance: <span className="text-zinc-400">{p.importanceScore}</span></span>
                         {p.entryReferencePrice != null && (
-                          <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
+                          <span className="text-zinc-500">Starting Price: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
                         )}
                         {p.projectedPriceLow != null && p.projectedPriceHigh != null && (
-                          <span className="text-zinc-500">Zone: <span className="font-bold text-violet-400">${p.projectedPriceLow.toFixed(2)}–${p.projectedPriceHigh.toFixed(2)}</span></span>
+                          <span className="text-zinc-500">Expected Range: <span className="font-bold text-violet-400">${p.projectedPriceLow.toFixed(2)}–${p.projectedPriceHigh.toFixed(2)}</span></span>
                         )}
                         {p.targetPrice != null && (
-                          <span className="text-zinc-500">Target: <span className="text-green-400">${p.targetPrice.toFixed(2)}</span></span>
+                          <span className="text-zinc-500">Goal: <span className="text-green-400">${p.targetPrice.toFixed(2)}</span></span>
                         )}
                         {p.stopPrice != null && (
-                          <span className="text-zinc-500">Stop: <span className="text-red-400">${p.stopPrice.toFixed(2)}</span></span>
+                          <span className="text-zinc-500">Exit At: <span className="text-red-400">${p.stopPrice.toFixed(2)}</span></span>
                         )}
                         {p.riskRewardRatio != null && (
-                          <span className="text-zinc-500">R:R: <span className={p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}>{p.riskRewardRatio.toFixed(1)}</span></span>
+                          <span className="text-zinc-500">Risk/Reward: <span className={p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}>{p.riskRewardRatio.toFixed(1)}</span></span>
                         )}
                         {p.priceAccuracyPercent != null && (
                           <span className={p.priceAccuracyPercent >= 98 ? 'font-bold text-green-400' : p.priceAccuracyPercent >= 95 ? 'text-yellow-400' : 'text-red-400'}>
@@ -538,10 +538,10 @@ export default async function DashboardPage() {
                           <span className="text-zinc-500">Move: <span className={`font-bold ${p.finalMovePercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>{p.finalMovePercent > 0 ? '+' : ''}{p.finalMovePercent.toFixed(2)}%</span></span>
                         )}
                         {p.targetHit != null && (
-                          <span className={p.targetHit ? 'font-bold text-green-400' : 'text-zinc-500'}>{p.targetHit ? 'Target HIT' : ''}</span>
+                          <span className={p.targetHit ? 'font-bold text-green-400' : 'text-zinc-500'}>{p.targetHit ? 'Reached Goal' : ''}</span>
                         )}
                         {p.stopHit != null && (
-                          <span className={p.stopHit ? 'font-bold text-red-400' : 'text-zinc-500'}>{p.stopHit ? 'Stop TRIGGERED' : ''}</span>
+                          <span className={p.stopHit ? 'font-bold text-red-400' : 'text-zinc-500'}>{p.stopHit ? 'Hit Safety Exit' : ''}</span>
                         )}
                         {p.evaluatedAt && (
                           <span className="text-zinc-500">Evaluated: <span className="text-zinc-400">{timeAgo(p.evaluatedAt)}</span></span>
@@ -557,13 +557,13 @@ export default async function DashboardPage() {
         </Section>
 
         {/* ── 2b. Catalyst Intelligence ────────────────────────────── */}
-        <Section title="Catalyst Intelligence" subtitle="Real news -> classified catalysts -> outcomes">
+        <Section title="News Analysis" subtitle="How real news events are affecting stock prices">
           <CatalystIntelligenceSection />
         </Section>
 
         {/* ── 3. Watchlist Summary ─────────────────────────────────── */}
         <Section
-          title="Dynamic Watchlist"
+          title="My Watchlist"
           subtitle={`${watchlist.active.length} active`}
           link={{ href: '/watchlist', label: 'Full watchlist →' }}
         >
@@ -578,14 +578,14 @@ export default async function DashboardPage() {
               {watchlist.reviewNeeded.map((r) => (
                 <div key={r.ticker} className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-2.5 py-1.5">
                   <span className="text-xs font-semibold text-yellow-400">{r.ticker}</span>
-                  <span className="ml-1.5 text-[10px] text-yellow-500/70">review needed</span>
+                  <span className="ml-1.5 text-[10px] text-yellow-500/70">needs review</span>
                   {r.swapReason && <p className="mt-0.5 text-[10px] text-zinc-500">{r.swapReason}</p>}
                 </div>
               ))}
               {watchlist.swapCandidates.map((s) => (
                 <div key={s.ticker} className="rounded-lg border border-red-500/20 bg-red-500/5 px-2.5 py-1.5">
                   <span className="text-xs font-semibold text-red-400">{s.ticker}</span>
-                  <span className="ml-1.5 text-[10px] text-red-500/70">swap candidate</span>
+                  <span className="ml-1.5 text-[10px] text-red-500/70">might replace</span>
                   {s.swapReason && <p className="mt-0.5 text-[10px] text-zinc-500">{s.swapReason}</p>}
                 </div>
               ))}
@@ -617,10 +617,10 @@ export default async function DashboardPage() {
         </Section>
 
         {/* ── 5. Job Status ────────────────────────────────────────── */}
-        <Section title="Scheduled Jobs">
+        <Section title="System Jobs">
           <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
             <JobCard name="Morning Scan" job={jobs.morningScan} />
-            <JobCard name="EOD Review" job={jobs.eodReview} />
+            <JobCard name="End of Day Check" job={jobs.eodReview} />
             <JobCard name="Learning Update" job={jobs.learningUpdate} />
           </div>
           <JobTriggerButtons />
@@ -651,9 +651,9 @@ export default async function DashboardPage() {
         )}
 
         {/* ── 7. Learning Snapshot ─────────────────────────────────── */}
-        <Section title="Learning Snapshot">
+        <Section title="What the System Has Learned">
           {learning.signalPerformance.length === 0 && learning.recentInsights.length === 0 ? (
-            <EmptyState text="No learning data yet. The learning engine runs after predictions are evaluated." />
+            <EmptyState text="No learning data yet. The system learns after it checks if its predictions were right." />
           ) : (
             <>
               {learning.signalPerformance.length > 0 && (
@@ -682,7 +682,7 @@ export default async function DashboardPage() {
         </Section>
 
         {/* ── 8. Chat CTA ──────────────────────────────────────────── */}
-        <Section title="Ask the Agent">
+        <Section title="Ask a Question">
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {CHAT_PROMPTS.map((cta) => (
               <Link

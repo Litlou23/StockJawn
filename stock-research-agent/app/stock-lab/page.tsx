@@ -150,34 +150,34 @@ export default function StockLabPage() {
 
       <div className="mx-auto max-w-7xl px-4 py-8">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-zinc-100">Stock Lab</h1>
+          <h1 className="text-2xl font-bold text-zinc-100">Practice Stocks</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Dynamically generated paper stock candidates. Click Generate Dynamic Picks — the system
-            scans the watchlist, builds candidates from real market data, and automatically generates
-            linked paper option candidates for the qualifying ones.
+            Practice stock predictions. Click Generate Picks — the system checks the watchlist,
+            creates predictions using real market data, and automatically finds matching options
+            for the best ones.
           </p>
         </div>
 
         <div className="mb-6 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
-          Paper research only. Stock prices come from Twelve Data, option prices from MarketData.app.
-          No real trades are placed. Not financial advice.
+          Practice only — no real money involved. Stock prices come from Twelve Data, option prices from MarketData.app.
+          No real trades are placed. This is not financial advice.
         </div>
 
         <div className="mb-6">
           <InfoBanner items={[
-            { term: 'Generate Dynamic Picks', definition: 'Runs the full morning scan: fetches watchlist tickers, generates predictions, creates paper stock candidates, and auto-generates option candidates for qualifying picks.' },
-            { term: 'Evaluate Results', definition: 'Runs the EOD review: checks each open stock candidate against current market prices to determine if predictions were correct.' },
-            { term: 'Run Learning Update', definition: 'Analyzes evaluated outcomes to update signal weights and generate insights about what\'s working.' },
-            { term: 'Total Score', definition: 'Deterministic score (0-100) combining catalyst, trend, volume, market context, and historical accuracy signals minus risk penalties.' },
-            { term: 'Catalyst Score', definition: 'Strength of news catalysts driving the prediction. High = strong news event (earnings, FDA approval, etc).' },
-            { term: 'Trend Score', definition: 'Technical trend alignment. High = price action confirms the predicted direction.' },
-            { term: 'Volume Score', definition: 'Volume confirmation. High = unusual volume supporting the thesis.' },
-            { term: 'Market Context', definition: 'Broader market conditions. High = sector and market are favorable for the trade direction.' },
-            { term: 'Risk Penalty', definition: 'Points subtracted for risk factors like high volatility, earnings proximity, or conflicting signals.' },
-            { term: 'Missing Data Penalty', definition: 'Points subtracted when data sources were unavailable (no news feed, API errors, etc).' },
-            { term: 'Qualifies for Options', definition: 'Pick meets the threshold for auto-generating paper option candidates: bullish/bearish, confidence >= 40, risk <= 85, and MarketData.app configured.' },
-            { term: 'Entry Price', definition: 'Real stock price at prediction time from Twelve Data. Used as the baseline for P&L calculations.' },
-            { term: 'Target / Stop', definition: 'System-calculated price targets. Target = expected move if correct. Stop = invalidation price where the thesis breaks.' },
+            { term: 'Generate Picks', definition: 'Runs the morning scan: looks at watchlist stocks, creates predictions, and finds matching option contracts for the best ones.' },
+            { term: 'Evaluate Results', definition: 'Checks each open prediction against current prices to see if the system got it right.' },
+            { term: 'Run Learning Update', definition: 'Reviews results to figure out which signals are working best and improve future predictions.' },
+            { term: 'Total Score', definition: 'Overall score (0-100) based on news, price trends, trading volume, and market conditions — minus points for risk.' },
+            { term: 'News Strength', definition: 'How strong the news behind a prediction is. Big events like earnings reports score higher.' },
+            { term: 'Trend Score', definition: 'Whether the stock\'s recent price movement matches the prediction direction.' },
+            { term: 'Volume Score', definition: 'Whether more people than usual are trading this stock — high volume often confirms a trend.' },
+            { term: 'Market Conditions', definition: 'Whether the broader market is helping or hurting this prediction.' },
+            { term: 'Risk Points Lost', definition: 'Points taken away for risky factors like wild price swings or upcoming earnings.' },
+            { term: 'Missing Info Penalty', definition: 'Points taken away when some data sources weren\'t available (news feeds down, API errors, etc).' },
+            { term: 'Ready for Options?', definition: 'Whether this prediction is good enough to automatically find matching options contracts.' },
+            { term: 'Starting Price', definition: 'Real stock price when the prediction was made. Used to calculate how much was gained or lost.' },
+            { term: 'Goal / Exit', definition: 'Goal = the price the system expects if it\'s right. Exit = the price where the prediction is wrong and you\'d want to stop.' },
           ]} />
         </div>
 
@@ -199,7 +199,7 @@ export default function StockLabPage() {
             disabled={loading}
             className="rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
           >
-            Generate Dynamic Picks
+            Generate Picks
           </button>
           <button
             onClick={handleEvaluate}
@@ -257,7 +257,7 @@ export default function StockLabPage() {
                     <span className={o.directionCorrect ? 'text-emerald-300' : o.directionCorrect === false ? 'text-red-300' : 'text-zinc-400'}>
                       {o.directionCorrect == null ? 'direction n/a' : o.directionCorrect ? 'direction ✓' : 'direction ✗'}
                     </span>
-                    <span className="text-zinc-400">target: {o.targetHit ? '✓' : '—'} · stop: {o.stopHit ? '✓' : '—'}</span>
+                    <span className="text-zinc-400">goal: {o.targetHit ? '✓' : '—'} · exit: {o.stopHit ? '✓' : '—'}</span>
                     <span className="text-zinc-500">score {o.outcomeScore.toFixed(0)}</span>
                   </div>
                   <span className="text-xs text-zinc-500">{fmtDate(o.evaluationTime)}</span>
@@ -271,9 +271,9 @@ export default function StockLabPage() {
         )}
 
         {/* Learning summary */}
-        <Section title="Learning summary">
+        <Section title="What the system learned">
           {stats.length === 0 ? (
-            <Empty>No stock learning stats yet. Evaluate some candidates first.</Empty>
+            <Empty>No learning data yet. Check some predictions first.</Empty>
           ) : (
             <div className="space-y-3">
               {Array.from(grouped.entries()).map(([type, rows]) => (
@@ -386,15 +386,15 @@ const CANDIDATE_COLS: { label: string; key: string }[] = [
   { label: 'Ticker', key: 'ticker' },
   { label: 'Type', key: 'predictionType' },
   { label: 'Timeframe', key: 'timeframe' },
-  { label: 'Entry', key: 'entryPrice' },
-  { label: 'Target', key: 'targetPrice' },
-  { label: 'Stop', key: 'stopPrice' },
+  { label: 'Start Price', key: 'entryPrice' },
+  { label: 'Goal', key: 'targetPrice' },
+  { label: 'Exit At', key: 'stopPrice' },
   { label: 'Total', key: 'totalScore' },
-  { label: 'Conf', key: 'confidenceScore' },
+  { label: 'Signal Strength', key: 'confidenceScore' },
   { label: 'Risk', key: 'riskScore' },
-  { label: 'Catalyst', key: 'catalystType' },
+  { label: 'News Event', key: 'catalystType' },
   { label: 'Data', key: 'dataAvailability' },
-  { label: 'Opts?', key: 'qualifiesForOptions' },
+  { label: 'Options?', key: 'qualifiesForOptions' },
   { label: 'Status', key: 'status' },
   { label: 'Created', key: 'createdAt' },
 ];
@@ -402,9 +402,9 @@ const CANDIDATE_COLS: { label: string; key: string }[] = [
 function SortableCandidatesTable({ candidates }: { candidates: PaperStockCandidate[] }) {
   const { sorted, sort, toggle } = useSort(candidates);
   return (
-    <Section title="Dynamic stock candidates">
+    <Section title="Stock predictions">
       {candidates.length === 0 ? (
-        <Empty>No candidates yet. Click Generate Dynamic Picks.</Empty>
+        <Empty>No predictions yet. Click Generate Picks above.</Empty>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-zinc-800">
           <table className="w-full text-left text-xs">
@@ -429,7 +429,7 @@ function SortableCandidatesTable({ candidates }: { candidates: PaperStockCandida
                       {c.totalScore.toFixed(0)}
                     </span>
                   </td>
-                  <td className="px-2 py-2 text-zinc-300">{c.confidenceScore}</td>
+                  <td className="px-2 py-2 text-zinc-300">{c.confidenceScore}/100</td>
                   <td className="px-2 py-2 text-zinc-300">{c.riskScore}</td>
                   <td className="px-2 py-2 text-zinc-400">{c.catalystType ?? '—'}</td>
                   <td className="px-2 py-2">

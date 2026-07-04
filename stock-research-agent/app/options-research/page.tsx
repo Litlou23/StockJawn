@@ -198,9 +198,9 @@ export default function OptionsResearchPage() {
 
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-zinc-100">Options Research</h1>
+        <h1 className="text-2xl font-bold text-zinc-100">Options Lookup</h1>
         <p className="mt-1 text-sm text-zinc-400">
-          Real options chain data from MarketData.app — no simulated or invented data.
+          Look up real options data — actual prices from the market, nothing made up.
         </p>
       </div>
 
@@ -216,7 +216,7 @@ export default function OptionsResearchPage() {
                 : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            {tab === 'chain' ? 'Options Chain Lookup' : 'Paper Tracking'}
+            {tab === 'chain' ? 'Look Up Options' : 'Practice Tracking'}
           </button>
         ))}
       </div>
@@ -257,7 +257,7 @@ export default function OptionsResearchPage() {
               </select>
             </div>
             <div>
-              <label className="mb-1 block text-xs text-zinc-400">Min DTE</label>
+              <label className="mb-1 block text-xs text-zinc-400">Min Days Left</label>
               <input
                 type="number"
                 value={minDte}
@@ -266,7 +266,7 @@ export default function OptionsResearchPage() {
               />
             </div>
             <div>
-              <label className="mb-1 block text-xs text-zinc-400">Max DTE</label>
+              <label className="mb-1 block text-xs text-zinc-400">Max Days Left</label>
               <input
                 type="number"
                 value={maxDte}
@@ -307,8 +307,8 @@ export default function OptionsResearchPage() {
 
               {topContracts.topContracts.length === 0 ? (
                 <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-6 py-12 text-center">
-                  <p className="text-zinc-400">No contracts matched the filter criteria.</p>
-                  <p className="mt-1 text-sm text-zinc-500">Try widening the DTE range or removing the side filter.</p>
+                  <p className="text-zinc-400">No contracts matched your search.</p>
+                  <p className="mt-1 text-sm text-zinc-500">Try a wider date range or removing the call/put filter.</p>
                 </div>
               ) : (
                 <SortableContractsTable contracts={topContracts.topContracts} />
@@ -319,9 +319,9 @@ export default function OptionsResearchPage() {
           {/* Empty state */}
           {!loading && !topContracts && !error && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-6 py-16 text-center">
-              <p className="text-lg text-zinc-300">Enter a ticker to search real options chain data</p>
+              <p className="text-lg text-zinc-300">Enter a stock symbol to look up real options data</p>
               <p className="mt-2 text-sm text-zinc-500">
-                Data comes directly from MarketData.app — real bid/ask, IV, Greeks, and volume.
+                Data comes directly from MarketData.app — real prices, volatility, and trading activity.
               </p>
             </div>
           )}
@@ -350,9 +350,9 @@ export default function OptionsResearchPage() {
 
               {paperTracking.candidates.length === 0 ? (
                 <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-6 py-12 text-center">
-                  <p className="text-zinc-400">No paper candidates yet.</p>
+                  <p className="text-zinc-400">No practice trades yet.</p>
                   <p className="mt-1 text-sm text-zinc-500">
-                    Paper candidates are created from predictions using real options chain data.
+                    Practice trades are created from predictions using real options data.
                   </p>
                 </div>
               ) : (
@@ -374,7 +374,7 @@ export default function OptionsResearchPage() {
                               {c.side.toUpperCase()}
                             </span>
                             <span className="text-sm text-zinc-400">${c.strike} strike</span>
-                            <span className="text-sm text-zinc-500">{c.dteAtEntry}d DTE at entry</span>
+                            <span className="text-sm text-zinc-500">{c.dteAtEntry} days left at start</span>
                           </div>
                           <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
                             c.status === 'open'
@@ -388,24 +388,24 @@ export default function OptionsResearchPage() {
                         </div>
 
                         <div className="mt-2 flex flex-wrap gap-4 text-xs text-zinc-400">
-                          <span>Entry Mid: ${c.entryMid.toFixed(2)}</span>
-                          <span>IV: {(c.entryIv * 100).toFixed(1)}%</span>
-                          <span>Delta: {c.entryDelta.toFixed(3)}</span>
-                          <span>Score: {c.contractScore.toFixed(1)}</span>
+                          <span>Entry Price: ${c.entryMid.toFixed(2)}</span>
+                          <span>Volatility: {(c.entryIv * 100).toFixed(1)}%</span>
+                          <span>Move Sensitivity: {c.entryDelta.toFixed(3)}</span>
+                          <span>Quality Score: {c.contractScore.toFixed(1)}</span>
                         </div>
 
                         {o && (
                           <div className="mt-3 rounded-md border border-zinc-700/50 bg-zinc-800/30 px-3 py-2">
                             <div className="flex items-center gap-4 text-sm">
                               <span className={`font-medium ${o.paperPnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                P&L: {o.paperPnlPercent >= 0 ? '+' : ''}{o.paperPnlPercent.toFixed(1)}%
+                                Profit/Loss: {o.paperPnlPercent >= 0 ? '+' : ''}{o.paperPnlPercent.toFixed(1)}%
                                 (${o.paperPnlPerContract.toFixed(2)}/contract)
                               </span>
                               <span className="text-zinc-400">
-                                Underlying: {o.underlyingMovePercent >= 0 ? '+' : ''}{o.underlyingMovePercent.toFixed(2)}%
+                                Stock Price Change: {o.underlyingMovePercent >= 0 ? '+' : ''}{o.underlyingMovePercent.toFixed(2)}%
                               </span>
                               <span className="text-zinc-400">
-                                IV change: {(o.ivChange * 100).toFixed(1)}pp
+                                Volatility Change: {(o.ivChange * 100).toFixed(1)}pp
                               </span>
                             </div>
                           </div>
@@ -453,11 +453,11 @@ const CONTRACT_COLS = [
   { label: 'Symbol', key: 'optionSymbol' },
   { label: 'Side', key: 'side' },
   { label: 'Strike', key: 'strike' },
-  { label: 'DTE', key: 'dte' },
+  { label: 'Days Left', key: 'dte' },
   { label: 'Bid', key: 'bid' },
   { label: 'Ask', key: 'ask' },
   { label: 'Mid', key: 'mid' },
-  { label: 'IV', key: 'iv' },
+  { label: 'Volatility', key: 'iv' },
   { label: 'Delta', key: 'delta' },
   { label: 'OI', key: 'openInterest' },
   { label: 'Vol', key: 'volume' },

@@ -7,7 +7,7 @@ export const maxDuration = 300;
  * POST /api/jobs/trigger
  * Body: { "job": "run-morning-scan" | ... }
  *
- * For long-running jobs (weekly-research, watchlist-refresh), this fires
+ * For long-running jobs (weekly-research, dynamic orchestrator), this fires
  * the request and returns immediately without waiting for completion.
  * The .NET API processes in the background.
  *
@@ -20,7 +20,6 @@ const ALLOWED_JOBS = new Set([
   'run-end-of-day-review',
   'run-learning-update',
   'run-weekly-research',
-  'run-watchlist-refresh',
   // Dynamic orchestrator entry points — auto-generate stock + option picks.
   'run-dynamic-morning-picks',
   'run-dynamic-eod-review',
@@ -30,7 +29,6 @@ const ALLOWED_JOBS = new Set([
 /** Jobs that take too long to wait for synchronously */
 const FIRE_AND_FORGET_JOBS = new Set([
   'run-weekly-research',
-  'run-watchlist-refresh',
   // Dynamic orchestrator — all three loop over the watchlist + external APIs.
   'run-dynamic-morning-picks',
   'run-dynamic-eod-review',

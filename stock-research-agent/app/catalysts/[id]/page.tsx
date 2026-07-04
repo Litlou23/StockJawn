@@ -56,11 +56,10 @@ export default async function CatalystDetailPage({ params }: PageProps) {
     return (
       <AppShell>
         <div className="mx-auto max-w-3xl p-4">
-          <h1 className="text-lg font-bold text-zinc-100">Catalyst not found</h1>
+          <h1 className="text-lg font-bold text-zinc-100">News Event Not Found</h1>
           <p className="mt-2 text-sm text-zinc-400">
-            No catalyst with id <code className="text-violet-400">{id}</code> was found in Supabase. It may not have been
-            persisted yet — run <code className="text-violet-400">POST /api/news-intelligence/reprocess</code> after the
-            intake layer has fresh news.
+            This news event couldn&apos;t be found. It may not have been saved yet —
+            try running a fresh analysis from the dashboard.
           </p>
           <Link href="/dashboard" className="mt-4 inline-block text-xs text-violet-400 hover:text-violet-300">
             ← Back to dashboard
@@ -105,7 +104,7 @@ export default async function CatalystDetailPage({ params }: PageProps) {
       <div className="mx-auto max-w-3xl space-y-5 p-4">
         <div>
           <Link href="/dashboard" className="text-xs text-violet-400 hover:text-violet-300">← Dashboard</Link>
-          <h1 className="mt-2 text-lg font-bold text-zinc-100">{catalyst.ticker} catalyst</h1>
+          <h1 className="mt-2 text-lg font-bold text-zinc-100">{catalyst.ticker} News Event</h1>
           <p className="mt-1 text-sm text-zinc-300">{catalyst.headline}</p>
           <p className="mt-1 text-[11px] text-zinc-500">
             {catalyst.sourceName} · {new Date(catalyst.publishedAt).toLocaleString()} ·{' '}
@@ -118,17 +117,17 @@ export default async function CatalystDetailPage({ params }: PageProps) {
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
           <h2 className="text-sm font-semibold text-zinc-100">Classification</h2>
           <div className="mt-2 grid grid-cols-2 gap-3 text-xs text-zinc-300 sm:grid-cols-4">
-            <Stat label="Strength" value={`${catalyst.catalystStrengthScore}`} />
-            <Stat label="Source reliability" value={`${catalyst.sourceReliabilityScore}`} />
-            <Stat label="Freshness" value={`${catalyst.freshnessScore}`} />
-            <Stat label="Ticker relevance" value={`${catalyst.tickerRelevanceScore}`} />
-            <Stat label="Sentiment" value={catalyst.sentiment} />
+            <Stat label="Importance" value={`${catalyst.catalystStrengthScore}`} />
+            <Stat label="Source trust" value={`${catalyst.sourceReliabilityScore}`} />
+            <Stat label="How recent" value={`${catalyst.freshnessScore}`} />
+            <Stat label="Stock relevance" value={`${catalyst.tickerRelevanceScore}`} />
+            <Stat label="Tone" value={catalyst.sentiment} />
             <Stat label="Confirmations" value={`${catalyst.confirmationCount}`} />
-            <Stat label="Price confirm" value={catalyst.priceConfirmationStatus} />
-            <Stat label="Volume confirm" value={catalyst.volumeConfirmationStatus} />
+            <Stat label="Price backed up" value={catalyst.priceConfirmationStatus.replace(/_/g, ' ')} />
+            <Stat label="Volume backed up" value={catalyst.volumeConfirmationStatus.replace(/_/g, ' ')} />
           </div>
           <div className="mt-3">
-            <span className="text-[10px] font-semibold uppercase text-zinc-500">Detected event types</span>
+            <span className="text-[10px] font-semibold uppercase text-zinc-500">Event types found</span>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {catalyst.detectedEventTypes.map((e) => (
                 <span key={e} className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[11px] font-medium text-violet-300">{e}</span>
@@ -136,7 +135,7 @@ export default async function CatalystDetailPage({ params }: PageProps) {
             </div>
           </div>
           <div className="mt-3">
-            <span className="text-[10px] font-semibold uppercase text-zinc-500">Extracted keywords</span>
+            <span className="text-[10px] font-semibold uppercase text-zinc-500">Keywords found</span>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {catalyst.extractedKeywords.map((k) => (
                 <span key={k} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300">{k}</span>
@@ -155,7 +154,7 @@ export default async function CatalystDetailPage({ params }: PageProps) {
         </div>
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-          <h2 className="text-sm font-semibold text-zinc-100">Why this catalyst mattered</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">Why This News Mattered</h2>
           {explanation ? (
             <p className="mt-2 text-sm leading-relaxed text-zinc-300 whitespace-pre-line">{explanation}</p>
           ) : (
@@ -167,7 +166,7 @@ export default async function CatalystDetailPage({ params }: PageProps) {
         </div>
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-          <h2 className="text-sm font-semibold text-zinc-100">Predictions that used this catalyst</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">Predictions That Used This News</h2>
           {linkedWithOutcomes.length === 0 ? (
             <p className="mt-2 text-xs text-zinc-500">No predictions linked yet.</p>
           ) : (
@@ -177,7 +176,7 @@ export default async function CatalystDetailPage({ params }: PageProps) {
                   <div className="flex items-center gap-2">
                     <span className="font-semibold text-zinc-200">{lo.link.ticker}</span>
                     <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{lo.link.influenceType}</span>
-                    <span className="text-[10px] text-zinc-500">influence {lo.link.influenceScore}</span>
+                    <span className="text-[10px] text-zinc-500">impact {lo.link.influenceScore}</span>
                     {lo.link.paperOptionCandidateId && (
                       <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">option linked</span>
                     )}
@@ -201,10 +200,10 @@ export default async function CatalystDetailPage({ params }: PageProps) {
           <h2 className="text-sm font-semibold text-zinc-100">Historical performance for {dominantEvent ?? 'this event type'}</h2>
           {historical ? (
             <div className="mt-2 grid grid-cols-2 gap-3 text-xs text-zinc-300 sm:grid-cols-4">
-              <Stat label="Stock win rate" value={`${(historical.stockWinRate * 100).toFixed(0)}%`} />
-              <Stat label="Option win rate" value={`${(historical.optionWinRate * 100).toFixed(0)}%`} />
-              <Stat label="Avg stock move" value={`${historical.averageStockMovePercent.toFixed(2)}%`} />
-              <Stat label="Linked predictions" value={`${historical.totalLinkedPredictions}`} />
+              <Stat label="Stock success rate" value={`${(historical.stockWinRate * 100).toFixed(0)}%`} />
+              <Stat label="Options success rate" value={`${(historical.optionWinRate * 100).toFixed(0)}%`} />
+              <Stat label="Avg price change" value={`${historical.averageStockMovePercent.toFixed(2)}%`} />
+              <Stat label="Predictions using this" value={`${historical.totalLinkedPredictions}`} />
             </div>
           ) : (
             <p className="mt-2 text-xs text-zinc-500">No historical stats yet for this event type.</p>

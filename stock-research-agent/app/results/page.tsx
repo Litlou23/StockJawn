@@ -69,7 +69,7 @@ function confidenceMeter(score: number) {
       <div className="h-1.5 w-12 overflow-hidden rounded-full bg-zinc-800">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${score}%` }} />
       </div>
-      <span className="text-[10px] text-zinc-400">{score}</span>
+      <span className="text-[10px] text-zinc-400">{score}/100</span>
     </div>
   );
 }
@@ -197,10 +197,10 @@ export default function ResultsPage() {
                 onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
                 className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 focus:border-violet-500 focus:outline-none"
               >
-                <option value="confidence_desc">Confidence (high → low)</option>
-                <option value="confidence_asc">Confidence (low → high)</option>
-                <option value="move_desc">Move % (high → low)</option>
-                <option value="move_asc">Move % (low → high)</option>
+                <option value="confidence_desc">Signal Strength (high → low)</option>
+                <option value="confidence_asc">Signal Strength (low → high)</option>
+                <option value="move_desc">Price Change % (high → low)</option>
+                <option value="move_asc">Price Change % (low → high)</option>
                 <option value="newest">Newest first</option>
                 <option value="oldest">Oldest first</option>
                 <option value="ticker">Ticker (A → Z)</option>
@@ -214,19 +214,19 @@ export default function ResultsPage() {
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
               <div className="text-xl font-bold text-zinc-100">{hitRate.toFixed(0)}%</div>
-              <div className="text-xs text-zinc-500">hit rate</div>
+              <div className="text-xs text-zinc-500">accuracy</div>
             </div>
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
               <div className={`text-xl font-bold ${returnColor(avgMove)}`}>{formatReturn(avgMove)}</div>
-              <div className="text-xs text-zinc-500">avg move</div>
+              <div className="text-xs text-zinc-500">avg price change</div>
             </div>
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
               <div className="text-xl font-bold text-zinc-100">{correct}/{totalEvaluated}</div>
-              <div className="text-xs text-zinc-500">correct / total</div>
+              <div className="text-xs text-zinc-500">right / total</div>
             </div>
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
               <div className="text-xl font-bold text-zinc-100">{avgScore.toFixed(0)}</div>
-              <div className="text-xs text-zinc-500">avg outcome score</div>
+              <div className="text-xs text-zinc-500">avg accuracy score</div>
             </div>
           </div>
         )}
@@ -234,7 +234,7 @@ export default function ResultsPage() {
         {/* Per-Ticker Summary */}
         {tickerStats.size > 0 && (
           <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-            <h2 className="mb-3 text-sm font-semibold text-zinc-100">By Ticker</h2>
+            <h2 className="mb-3 text-sm font-semibold text-zinc-100">By Stock</h2>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
               {[...tickerStats.entries()]
                 .sort((a, b) => b[1].correct / b[1].total - a[1].correct / a[1].total)
@@ -260,7 +260,7 @@ export default function ResultsPage() {
           <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center">
             <p className="text-sm text-zinc-500">No predictions to show.</p>
             <p className="mt-1 text-xs text-zinc-600">
-              Run Morning Scan to generate predictions, then EOD Review to evaluate them.
+              Run the Morning Scan to create predictions, then End of Day Check to see how they did.
             </p>
           </div>
         ) : (
@@ -296,16 +296,16 @@ export default function ResultsPage() {
                       {outcome && (
                         <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px]">
                           <span className="text-zinc-500">
-                            Entry: {outcome.startPrice ? `$${outcome.startPrice.toFixed(2)}` : '—'}
+                            Starting Price: {outcome.startPrice ? `$${outcome.startPrice.toFixed(2)}` : '—'}
                           </span>
                           <span className="text-zinc-500">
-                            Close: {outcome.closePrice ? `$${outcome.closePrice.toFixed(2)}` : '—'}
+                            Closing Price: {outcome.closePrice ? `$${outcome.closePrice.toFixed(2)}` : '—'}
                           </span>
                           <span className={`font-medium ${returnColor(outcome.percentMove)}`}>
                             {formatReturn(outcome.percentMove)}
                           </span>
                           {outcome.outcomeScore !== null && (
-                            <span className="text-zinc-400">Score: {outcome.outcomeScore.toFixed(0)}</span>
+                            <span className="text-zinc-400">Accuracy: {outcome.outcomeScore.toFixed(0)}</span>
                           )}
                         </div>
                       )}
@@ -327,12 +327,12 @@ export default function ResultsPage() {
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         {/* Bull case */}
                         <div>
-                          <div className="mb-1 font-medium text-green-400">Bull Case</div>
+                          <div className="mb-1 font-medium text-green-400">Why It Might Go Up</div>
                           <p className="leading-relaxed text-zinc-400">{p.bullishCase}</p>
                         </div>
                         {/* Bear case */}
                         <div>
-                          <div className="mb-1 font-medium text-red-400">Bear Case</div>
+                          <div className="mb-1 font-medium text-red-400">Why It Might Go Down</div>
                           <p className="leading-relaxed text-zinc-400">{p.bearishCase}</p>
                         </div>
                       </div>
@@ -340,17 +340,17 @@ export default function ResultsPage() {
                       {/* Invalidation + scores */}
                       <div className="mt-3 flex flex-wrap gap-4 text-[11px]">
                         <div>
-                          <span className="text-zinc-500">Invalidation: </span>
+                          <span className="text-zinc-500">Wrong If: </span>
                           <span className="text-zinc-300">{p.invalidationRule}</span>
                         </div>
                       </div>
 
                       <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
-                        <span className="text-zinc-500">Confidence: <span className="text-zinc-300">{p.confidenceScore}</span></span>
+                        <span className="text-zinc-500">Signal Strength: <span className="text-zinc-300">{p.confidenceScore}/100</span></span>
                         <span className="text-zinc-500">Risk: <span className="text-zinc-300">{p.riskScore}</span></span>
-                        <span className="text-zinc-500">Importance: <span className="text-zinc-300">{p.importanceScore}</span></span>
+                        <span className="text-zinc-500">Significance: <span className="text-zinc-300">{p.importanceScore}</span></span>
                         {p.entryReferencePrice && (
-                          <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
+                          <span className="text-zinc-500">Starting Price: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
                         )}
                       </div>
 
@@ -375,7 +375,7 @@ export default function ResultsPage() {
                       {/* Outcome detail */}
                       {outcome?.outcomeSummary && (
                         <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
-                          <div className="mb-1 text-[10px] font-medium text-zinc-400">Outcome Summary</div>
+                          <div className="mb-1 text-[10px] font-medium text-zinc-400">What Happened</div>
                           <p className="text-[11px] leading-relaxed text-zinc-300">{outcome.outcomeSummary}</p>
                         </div>
                       )}

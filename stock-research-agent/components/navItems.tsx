@@ -76,7 +76,7 @@ export const navEntries: NavEntry[] = [
     label: 'Research',
     icon: ResearchIcon,
     children: [
-      { href: '/stock-lab', label: 'Stock Lab' },
+      { href: '/stock-lab', label: 'Practice Stocks' },
       { href: '/watchlist', label: 'Watchlist' },
       { href: '/predictions', label: 'Predictions' },
       { href: '/results', label: 'Results' },
@@ -87,17 +87,17 @@ export const navEntries: NavEntry[] = [
     label: 'Options',
     icon: OptionsIcon,
     children: [
-      { href: '/options-research', label: 'Options Data' },
-      { href: '/options-lab', label: 'Options Lab' },
-      { href: '/paper-options', label: 'Manual Paper Options' },
+      { href: '/options-research', label: 'Options Lookup' },
+      { href: '/options-lab', label: 'Options Simulator' },
+      { href: '/paper-options', label: 'Practice Options' },
     ],
   },
   {
     label: 'System',
     icon: SystemIcon,
     children: [
-      { href: '/learning', label: 'Learning' },
-      { href: '/connectivity', label: 'Connectivity' },
+      { href: '/learning', label: 'System Learning' },
+      { href: '/connectivity', label: 'Connection Status' },
       { href: '/settings', label: 'Settings' },
     ],
   },

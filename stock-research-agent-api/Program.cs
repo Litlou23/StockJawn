@@ -173,7 +173,6 @@ builder.Services.AddSingleton<OptionsDataService>();
         new("GET", "/api/watchlist/changes", "Recent watchlist change history.", false, "Next.js app, browser", "This server"),
         new("GET", "/api/watchlist/candidates", "Recent scored candidates from watchlist generation.", false, "Next.js app, browser", "This server"),
         new("POST", "/api/jobs/run-weekly-research", "Weekly research: scans universe, scores candidates, builds dynamic watchlist.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
-        new("POST", "/api/jobs/run-watchlist-refresh", "Manual watchlist refresh (same as weekly research).", true, "Manual trigger, x-job-secret required", "This server"),
         new("GET", "/api/dashboard/summary", "Aggregated dashboard data: watchlist overview, job statuses, predictions, learning, data quality.", false, "Next.js app, browser", "This server"),
         new("GET", "/api/paper-options/predictions", "Eligible saved predictions for the Paper Options page.", false, "Next.js app, browser", "This server"),
         new("POST", "/api/paper-options/generate-candidates", "Score real option contracts for a saved prediction. Body: { predictionId, durationPreference, autoSave }.", false, "Next.js app, browser", "This server"),
@@ -188,11 +187,7 @@ builder.Services.AddSingleton<OptionsDataService>();
     var frontendAppEndpoints = new List<EndpointInfo>
     {
         new("POST", "/api/agent-chat", "Live chat agent — builds context, calls this API's /api/ai/complete, saves to Supabase.", false, "Browser (chat UI)", "Next.js app"),
-        new("POST", "/api/jobs/intake-catalysts", "Pulls latest RSS/news catalysts into Supabase.", false, "Manual trigger", "Next.js app"),
-        new("POST", "/api/jobs/score-watchlist", "Scores today's watchlist candidates.", false, "Manual trigger", "Next.js app"),
-        new("POST", "/api/jobs/generate-daily-report", "Generates the daily market/report summary.", false, "Manual trigger", "Next.js app"),
         new("POST", "/api/jobs/analyze-learning", "Summarizes signal performance and learning patterns.", false, "Manual trigger", "Next.js app"),
-        new("POST", "/api/jobs/run-weekly-research", "Weekly research run — scores the stock universe, saves candidates.", true, "Scheduled (pg_cron -> Supabase Edge Function), x-job-secret required", "Next.js app"),
     };
 
     DashboardData BuildDashboardData() => new(

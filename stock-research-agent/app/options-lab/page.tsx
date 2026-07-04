@@ -179,14 +179,14 @@ export default function OptionsLabPage() {
         {/* Warning banner */}
         <div className="rounded-xl border border-yellow-500/30 bg-yellow-500/5 px-4 py-3">
           <p className="text-xs font-medium text-yellow-400">
-            THEORETICAL SIMULATION ONLY — Not real option quotes. Premiums estimated with simplified model using realized volatility proxy.
+            PRACTICE ONLY — These are not real prices. Costs are estimated using a simplified formula based on recent price movement.
           </p>
         </div>
 
         <div>
-          <h1 className="text-lg font-bold text-zinc-100">Options Lab</h1>
+          <h1 className="text-lg font-bold text-zinc-100">Options Simulator</h1>
           <p className="text-sm text-zinc-500">
-            Select a prediction to auto-generate theoretical options strategy scenarios.
+            Pick a prediction and see what options strategies could look like — all simulated, no real money.
           </p>
         </div>
 
@@ -201,7 +201,7 @@ export default function OptionsLabPage() {
             <option value="">Choose a prediction...</option>
             {predictions.map((p) => (
               <option key={p.id} value={p.id}>
-                {p.ticker} — {p.predictionType} (conf {p.confidenceScore}, risk {p.riskScore}) — {p.status}
+                {p.ticker} — {p.predictionType} (strength {p.confidenceScore}/100, risk {p.riskScore}) — {p.status}
               </option>
             ))}
           </select>
@@ -268,7 +268,7 @@ export default function OptionsLabPage() {
                 <span className="text-sm font-bold text-zinc-100">{scenarioData.ticker}</span>
                 <DirectionBadge direction={scenarioData.predictionDirection} />
                 <span className="text-xs text-zinc-400">
-                  Conf {scenarioData.predictionConfidence} · Risk {scenarioData.predictionRisk}
+                  Signal Strength {scenarioData.predictionConfidence}/100 · Risk {scenarioData.predictionRisk}
                 </span>
                 <span className="text-xs text-zinc-500">
                   ${scenarioData.startingStockPrice.toFixed(2)}
@@ -278,12 +278,12 @@ export default function OptionsLabPage() {
 
               {/* Market context */}
               <div className="mt-2 flex flex-wrap gap-4 text-[11px] text-zinc-500">
-                <span>Vol: {(scenarioData.marketContext.realizedVolatility * 100).toFixed(1)}%</span>
+                <span>Price Swings: {(scenarioData.marketContext.realizedVolatility * 100).toFixed(1)}%</span>
                 <span>Expected Move: {scenarioData.marketContext.estimatedExpectedMovePercent.toFixed(1)}%</span>
                 {scenarioData.marketContext.averageTrueRange && (
-                  <span>ATR: ${scenarioData.marketContext.averageTrueRange.toFixed(2)}</span>
+                  <span>Avg Daily Range: ${scenarioData.marketContext.averageTrueRange.toFixed(2)}</span>
                 )}
-                <span>Bars: {scenarioData.marketContext.barsUsed}</span>
+                <span>Days Analyzed: {scenarioData.marketContext.barsUsed}</span>
               </div>
             </div>
 
@@ -330,7 +330,7 @@ export default function OptionsLabPage() {
         {/* Empty state */}
         {!selectedPredId && !loading && (
           <div className="flex h-48 items-center justify-center rounded-xl border border-zinc-800 bg-zinc-900">
-            <p className="text-sm text-zinc-600">Select a prediction above to generate scenarios</p>
+            <p className="text-sm text-zinc-600">Pick a prediction above to see what options strategies could look like</p>
           </div>
         )}
       </div>
@@ -391,7 +391,7 @@ function ScenarioCardComponent({
               <div className={`text-sm font-bold ${payoffPositive ? 'text-green-400' : 'text-red-400'}`}>
                 {payoffPositive ? '+' : ''}${scenario.estimatedPayoffIfPredictionHits.toFixed(2)}
               </div>
-              <div className="text-[10px] text-zinc-500">Est. Payoff</div>
+              <div className="text-[10px] text-zinc-500">Expected Gain/Loss</div>
             </div>
             <div>
               <div className={`text-sm font-bold ${scenario.estimatedReturnPercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>
@@ -401,15 +401,15 @@ function ScenarioCardComponent({
             </div>
             <div>
               <div className="text-sm font-bold text-zinc-200">${scenario.maxLoss.toFixed(2)}</div>
-              <div className="text-[10px] text-zinc-500">Max Loss</div>
+              <div className="text-[10px] text-zinc-500">Most You Could Lose</div>
             </div>
             <span className="text-zinc-500">{expanded ? '▲' : '▼'}</span>
           </div>
         </div>
 
-        {/* Confidence fit bar */}
+        {/* Signal-strength fit bar */}
         <div className="mt-2 flex items-center gap-2">
-          <span className="text-[10px] text-zinc-500">Fit</span>
+          <span className="text-[10px] text-zinc-500">Match</span>
           <div className="h-1.5 flex-1 rounded-full bg-zinc-800">
             <div
               className={`h-full rounded-full transition-all ${
@@ -431,15 +431,15 @@ function ScenarioCardComponent({
 
           {/* Key numbers grid */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <MiniStat label="Premium/Cost" value={`$${scenario.estimatedTheoreticalPremium.toFixed(2)}`} />
-            <MiniStat label="Max Profit" value={scenario.maxProfit === -1 ? 'Unlimited' : `$${scenario.maxProfit.toFixed(2)}`} />
-            <MiniStat label="Max Loss" value={`$${scenario.maxLoss.toFixed(2)}`} accent="red" />
-            <MiniStat label="DTE" value={`${scenario.daysToExpiration}`} />
+            <MiniStat label="Estimated Cost" value={`$${scenario.estimatedTheoreticalPremium.toFixed(2)}`} />
+            <MiniStat label="Most You Could Make" value={scenario.maxProfit === -1 ? 'Unlimited' : `$${scenario.maxProfit.toFixed(2)}`} />
+            <MiniStat label="Most You Could Lose" value={`$${scenario.maxLoss.toFixed(2)}`} accent="red" />
+            <MiniStat label="Days Until Expiration" value={`${scenario.daysToExpiration}`} />
           </div>
 
           {/* Breakevens */}
           <div className="text-xs">
-            <span className="text-zinc-500">Breakeven(s): </span>
+            <span className="text-zinc-500">Break-Even Price(s): </span>
             <span className="text-zinc-200">{scenario.breakevens.map(b => `$${b.toFixed(2)}`).join(', ')}</span>
           </div>
 
@@ -477,7 +477,7 @@ function ScenarioCardComponent({
           ) : (
             <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2">
               <p className="text-xs leading-relaxed text-zinc-300">{explanation}</p>
-              <p className="mt-1 text-[10px] text-yellow-400/60">THEORETICAL SIMULATION ONLY</p>
+              <p className="mt-1 text-[10px] text-yellow-400/60">PRACTICE ONLY — NOT REAL PRICES</p>
             </div>
           )}
         </div>
@@ -542,7 +542,7 @@ function StrikesDisplay({ strikes, strategy }: { strikes: ScenarioStrikes; strat
 
   return (
     <div className="flex flex-wrap gap-3 text-xs">
-      <span className="text-zinc-500">Strikes:</span>
+      <span className="text-zinc-500">Key Prices:</span>
       {items.map(([label, val]) => (
         <span key={label} className="text-zinc-300">
           <span className="text-zinc-500">{label}</span> ${val!.toFixed(2)}

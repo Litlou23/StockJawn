@@ -17,65 +17,53 @@ const JOBS: JobDef[] = [
   {
     id: 'run-dynamic-morning-picks',
     label: 'Morning Scan',
-    description: 'Generate predictions, stock candidates, and linked option candidates',
+    description: 'Create predictions and find matching option contracts',
     steps: [
-      'Loading active watchlist...',
-      'Fetching market quotes...',
-      'Computing technical indicators...',
-      'Generating predictions...',
-      'Wrapping predictions as stock candidates...',
-      'Scoring deterministic signals...',
-      'Scanning real option chains for qualifying picks...',
-      'Saving everything to Supabase...',
+      'Loading your watchlist...',
+      'Getting current prices...',
+      'Analyzing price patterns...',
+      'Making predictions...',
+      'Finding practice stock picks...',
+      'Scoring each pick...',
+      'Looking for matching options...',
+      'Saving results...',
     ],
   },
   {
     id: 'run-dynamic-eod-review',
-    label: 'EOD Review',
-    description: 'Evaluate open stock + option candidates against current prices',
+    label: 'End of Day Check',
+    description: 'Check how today\'s predictions did against actual prices',
     steps: [
-      'Loading open stock + option candidates...',
-      'Fetching current prices (Twelve Data + MarketData.app)...',
-      'Computing outcomes...',
-      'Updating learning stats...',
+      'Loading active predictions...',
+      'Getting current prices...',
+      'Checking results...',
+      'Updating what the system learned...',
     ],
   },
   {
     id: 'run-dynamic-learning-update',
     label: 'Learning Update',
-    description: 'Update signal accuracy + scoring weights + insights',
+    description: 'Review results and improve future predictions',
     steps: [
-      'Analyzing signal performance...',
-      'Adjusting scoring weights...',
+      'Reviewing which signals worked...',
+      'Adjusting scores...',
       'Generating insights...',
     ],
   },
   {
     id: 'run-weekly-research',
     label: 'Weekly Research',
-    description: 'Discover tickers from news, score candidates, build watchlist',
+    description: 'Find new stocks from news and build the watchlist',
     fireAndForget: true,
     steps: [
-      'Scanning RSS news feeds...',
-      'Checking Finnhub earnings calendar...',
-      'Extracting ticker mentions...',
-      'Ranking discovery candidates...',
-      'Fetching market data for candidates...',
-      'Scoring technical signals...',
-      'Building dynamic watchlist...',
-      'Persisting to Supabase...',
-    ],
-  },
-  {
-    id: 'run-watchlist-refresh',
-    label: 'Watchlist Refresh',
-    description: 'Re-discover and re-score the dynamic watchlist',
-    fireAndForget: true,
-    steps: [
-      'Scanning news sources...',
-      'Discovering tickers...',
-      'Re-scoring candidates...',
-      'Updating watchlist...',
+      'Scanning news feeds...',
+      'Checking earnings calendar...',
+      'Finding mentioned stocks...',
+      'Ranking discoveries...',
+      'Getting market data...',
+      'Scoring price patterns...',
+      'Building watchlist...',
+      'Saving results...',
     ],
   },
 ];
@@ -193,10 +181,18 @@ export default function JobTriggerButtons() {
       }
 
       setStates((s) => ({ ...s, [job.id]: 'done' }));
-      const summary = data.report ?? data.summary ?? data.runId
-        ? `Done — ${data.predictionsGenerated ?? data.activeWatchlistCount ?? 0} items processed`
-        : 'Completed successfully';
-      setResults((r) => ({ ...r, [job.id]: typeof summary === 'string' ? summary : 'Done' }));
+      const processedCount = data.predictionsGenerated ?? data.activeWatchlistCount;
+      const summary =
+        typeof data.report === 'string' && data.report.trim()
+          ? data.report
+          : typeof data.summary === 'string' && data.summary.trim()
+            ? data.summary
+            : typeof processedCount === 'number'
+              ? `Done — ${processedCount} items processed`
+              : data.runId
+                ? `Completed run ${String(data.runId).slice(0, 8)}`
+                : 'Completed successfully';
+      setResults((r) => ({ ...r, [job.id]: summary }));
     } catch (err) {
       setStates((s) => ({ ...s, [job.id]: 'error' }));
       setResults((r) => ({ ...r, [job.id]: err instanceof Error ? err.message : 'Unknown error' }));
@@ -223,7 +219,7 @@ export default function JobTriggerButtons() {
       />
 
       <p className="text-[10px] text-zinc-500">
-        Trigger jobs manually. In production these run on a schedule via pg_cron.
+        Run these manually, or they run automatically on a schedule.
       </p>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {JOBS.map((job) => {

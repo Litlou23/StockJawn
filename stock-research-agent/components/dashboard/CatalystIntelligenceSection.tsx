@@ -124,10 +124,10 @@ export default function CatalystIntelligenceSection() {
   }, []);
 
   if (loading) {
-    return <p className="text-sm text-zinc-500">Loading catalyst intelligence…</p>;
+    return <p className="text-sm text-zinc-500">Loading news analysis…</p>;
   }
   if (error) {
-    return <p className="text-sm text-red-400">Catalyst intelligence unavailable: {error}</p>;
+    return <p className="text-sm text-red-400">News analysis unavailable: {error}</p>;
   }
 
   const noCatalysts = !catalysts?.available || (catalysts.catalysts?.length ?? 0) === 0;
@@ -136,7 +136,7 @@ export default function CatalystIntelligenceSection() {
   if (noCatalysts && noStats) {
     return (
       <p className="text-sm text-zinc-500">
-        Catalyst intelligence unavailable: {catalysts?.reason ?? stats?.reason ?? 'No data yet.'}
+        News analysis unavailable: {catalysts?.reason ?? stats?.reason ?? 'No data yet.'}
       </p>
     );
   }
@@ -145,9 +145,9 @@ export default function CatalystIntelligenceSection() {
     <div className="flex flex-col gap-4">
       {/* Top catalysts today */}
       <div>
-        <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Top catalysts today</h3>
+        <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Top News Events Today</h3>
         {noCatalysts ? (
-          <p className="text-xs text-zinc-500">No catalysts detected. {catalysts?.reason}</p>
+          <p className="text-xs text-zinc-500">No news events found. {catalysts?.reason}</p>
         ) : (
           <div className="flex flex-col gap-2">
             {catalysts!.catalysts!.slice(0, 8).map((c) => (
@@ -159,7 +159,7 @@ export default function CatalystIntelligenceSection() {
                 <div className="flex items-start gap-2">
                   <span className="text-sm font-semibold text-zinc-100">{c.ticker}</span>
                   {sentimentBadge(c.sentiment)}
-                  <span className={`text-[10px] font-medium ${strengthColor(c.catalystStrengthScore)}`}>strength {c.catalystStrengthScore}</span>
+                  <span className={`text-[10px] font-medium ${strengthColor(c.catalystStrengthScore)}`}>importance {c.catalystStrengthScore}</span>
                   <span className="ml-auto text-[10px] text-zinc-500">{c.sourceName}</span>
                 </div>
                 <p className="mt-1 line-clamp-2 text-xs text-zinc-300">{c.headline}</p>
@@ -186,19 +186,19 @@ export default function CatalystIntelligenceSection() {
 
       {/* Catalyst event-type performance */}
       <div>
-        <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Catalyst event-type performance</h3>
+        <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">How News Events Have Performed</h3>
         {noStats ? (
-          <p className="text-xs text-zinc-500">Awaiting evaluated outcomes. {stats?.reason}</p>
+          <p className="text-xs text-zinc-500">Waiting for results to come in. {stats?.reason}</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead>
                 <tr className="border-b border-zinc-800 text-zinc-500">
-                  <th className="pb-2 pr-3 font-medium">Event type</th>
-                  <th className="pb-2 pr-3 font-medium">Stock win rate</th>
-                  <th className="pb-2 pr-3 font-medium">Option win rate</th>
-                  <th className="pb-2 pr-3 font-medium">Avg move</th>
-                  <th className="pb-2 pr-3 font-medium">n</th>
+                  <th className="pb-2 pr-3 font-medium">News Type</th>
+                  <th className="pb-2 pr-3 font-medium">Stock Success</th>
+                  <th className="pb-2 pr-3 font-medium">Options Success</th>
+                  <th className="pb-2 pr-3 font-medium">Avg Price Change</th>
+                  <th className="pb-2 pr-3 font-medium">Count</th>
                 </tr>
               </thead>
               <tbody>

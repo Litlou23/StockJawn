@@ -14,9 +14,9 @@ import FullScreenLoader from '@/components/FullScreenLoader';
 
 const INITIAL_PROMPTS = [
   'What should I check this morning?',
-  'What catalysts matter today?',
-  'Show options setups worth reviewing.',
-  'What has the strongest risk/reward?',
+  'What news events matter today?',
+  'Show options worth looking at.',
+  'What has the best chance of profit?',
   'What should I avoid today?',
   'Compare AMD and NVDA.',
 ];
@@ -179,7 +179,7 @@ export default function ChatWindow({ initialMessages = [] }: { initialMessages?:
           <div>
             <h2 className="text-lg font-semibold text-zinc-100">What are we researching today?</h2>
             <p className="mx-auto mt-1 max-w-sm text-sm text-zinc-500">
-              Ask about today&apos;s watchlist, options setups, a specific ticker, risk, or past results.
+              Ask about today&apos;s watchlist, options ideas, a specific stock, risk, or past results.
             </p>
           </div>
           <SuggestedPrompts prompts={INITIAL_PROMPTS} onSelect={handleSend} />
@@ -201,10 +201,10 @@ export default function ChatWindow({ initialMessages = [] }: { initialMessages?:
         message="Analyzing..."
         detail="The research agent is thinking"
         steps={[
-          'Building market context...',
-          'Reviewing watchlist data...',
-          'Checking recent predictions...',
-          'Generating response...',
+          'Checking the market...',
+          'Reviewing your watchlist...',
+          'Looking at recent predictions...',
+          'Writing response...',
         ]}
       />
 

@@ -1,40 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { AgentCard, AgentChatApiResponse, AgentChatRequestBody, AgentDiagnostics, DataConfidenceLevel } from '@/types/agentChat';
-import { AGENT_CHAT_SYSTEM_PROMPT } from '@/lib/ai/prompts';
-import { AiChatMessage, requestAiCompletion } from '@/lib/ai/aiClient';
-import { AgentChatContext, buildAgentChatContext } from '@/services/serverContextBuilder';
+import { AgentChatApiResponse, AgentChatRequestBody, AgentDiagnostics, DataConfidenceLevel } from '@/types/agentChat';
+import { AiChatMessage, AiToolCall, requestAiCompletion } from '@/lib/ai/aiClient';
+import { SLIM_SYSTEM_PROMPT, CHAT_TOOL_DEFINITIONS, buildToolCallUrl } from '@/lib/ai/chatToolDefinitions';
 import { saveChatMessage } from '@/services/persistence/chatRepository';
 import { saveThesis } from '@/services/persistence/learningRepository';
 import { NOT_CONFIGURED, PersistenceResult } from '@/services/persistence/persistenceTypes';
-import { ExpectedTimeframe, ConfidenceLevel } from '@/types/learning';
+import { ConfidenceLevel } from '@/types/learning';
 
 export const runtime = 'nodejs';
 
-function buildCardsFromContext(context: AgentChatContext): AgentCard[] {
-  const cards: AgentCard[] = [];
+const MAX_TOOL_ROUNDS = 3;
+const MAX_OUTPUT_TOKENS = 900;
 
-  for (const pick of context.savedPicksContext.picks.slice(0, 5)) {
-    cards.push({ type: 'pick', id: pick.id, pick });
-  }
-
-  for (const item of context.catalystContext.items.slice(0, 3)) {
-    cards.push({
-      type: 'catalyst',
-      id: item.id,
-      catalyst: {
-        title: item.title,
-        sourceName: item.sourceName,
-        url: item.url,
-        publishedAt: item.publishedAt,
-        sentiment: item.sentiment,
-        tickers: item.tickers,
-        importanceScore: item.importanceScore,
-      },
-    });
-  }
-
-  return cards;
-}
+// ---------------------------------------------------------------------------
+// Types for parsed AI response
+// ---------------------------------------------------------------------------
 
 interface ParsedAgentThesis {
   ticker: string;
@@ -43,7 +23,7 @@ interface ParsedAgentThesis {
   bullishCase?: string;
   bearishCase?: string;
   invalidationPoint?: string;
-  expectedTimeframe?: ExpectedTimeframe;
+  expectedTimeframe?: '1d' | '5d' | '20d' | '60d';
 }
 
 interface ParsedAgentJson {
@@ -67,17 +47,63 @@ function parseAgentJson(raw: string): ParsedAgentJson {
       return parsed as ParsedAgentJson;
     }
   } catch {
-    // fall through to plain-text fallback below
+    // fall through to plain-text fallback
   }
   return { message: raw, dataConfidence: 'medium', suggestedPrompts: [], riskWarnings: [] };
 }
 
-/** Only surface a warning for a real failure, not the expected "not configured yet" state. */
 function persistenceWarning(label: string, result: PersistenceResult): string | null {
   if (result.persisted) return null;
   if (result.reason === NOT_CONFIGURED.reason) return null;
   return `${label}: Supabase save failed (${result.reason ?? 'unknown reason'}).`;
 }
+
+// ---------------------------------------------------------------------------
+// Execute a single tool call against the .NET chat-tools endpoints
+// ---------------------------------------------------------------------------
+
+async function executeToolCall(toolCall: AiToolCall): Promise<string> {
+  const baseUrl = process.env.AGENT_API_BASE_URL;
+  if (!baseUrl) return JSON.stringify({ error: 'AGENT_API_BASE_URL not set' });
+
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(toolCall.arguments);
+  } catch {
+    return JSON.stringify({ error: 'Invalid tool arguments' });
+  }
+
+  const url = buildToolCallUrl(baseUrl, toolCall.name, args);
+
+  const isLocalhostHttps = baseUrl.startsWith('https://localhost');
+  if (isLocalhostHttps) {
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      return JSON.stringify({ error: `Tool ${toolCall.name} failed: ${response.status}`, details: errorText.slice(0, 200) });
+    }
+
+    return await response.text();
+  } catch (err) {
+    return JSON.stringify({ error: `Tool ${toolCall.name} fetch error: ${err instanceof Error ? err.message : 'unknown'}` });
+  } finally {
+    if (isLocalhostHttps) {
+      delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/agent-chat
+// ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest) {
   let body: AgentChatRequestBody;
@@ -92,51 +118,86 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'message is required' }, { status: 400 });
   }
 
-  const [context, userSaveResult] = await Promise.all([
-    buildAgentChatContext(message, body.ticker),
-    saveChatMessage({ role: 'user', text: message }),
-  ]);
+  // Save user message (best-effort, non-blocking)
+  const userSavePromise = saveChatMessage({ role: 'user', text: message });
 
-  const cards = buildCardsFromContext(context);
+  const agentApiConfigured = Boolean(process.env.AGENT_API_BASE_URL);
 
+  // Build conversation history from client
   const historyMessages: AiChatMessage[] = (body.history ?? []).slice(-8).map((h) => ({
-    role: h.role === 'agent' ? 'assistant' : 'user',
+    role: h.role === 'agent' ? 'assistant' as const : 'user' as const,
     content: h.text,
   }));
 
+  // Start with slim system prompt + history + user message
   const chatMessages: AiChatMessage[] = [
-    { role: 'system', content: AGENT_CHAT_SYSTEM_PROMPT },
-    {
-      role: 'system',
-      content:
-        'Structured app context (JSON) — this is the only data you may treat as fact. ' +
-        'Each context bundle reports its own "source" (e.g. "supabase", "mock", "rss-live", "none") — ' +
-        'treat "mock" and "missing" data as exactly that, never as confirmed real data. ' +
-        `If something the user asks about is not in here, say so.\n${JSON.stringify(context)}`,
-    },
+    { role: 'system', content: SLIM_SYSTEM_PROMPT },
     ...historyMessages,
     { role: 'user', content: message },
   ];
 
-  const agentApiConfigured = Boolean(process.env.AGENT_API_BASE_URL);
-  console.log('[agent-chat] diagnostics: AGENT_API_BASE_URL configured =', agentApiConfigured);
-
   try {
-    console.log('[agent-chat] calling .NET API at', process.env.AGENT_API_BASE_URL ? '<set>' : '<NOT SET>');
-    const completion = await requestAiCompletion({
-      messages: chatMessages,
-      responseFormatJson: true,
-      maxOutputTokens: 900,
-    });
-    console.log('[agent-chat] .NET API call succeeded, model =', completion.model ?? 'not reported');
+    let finalText = '';
+    let toolRounds = 0;
 
-    const parsed = parseAgentJson(completion.text);
+    // Tool-calling loop: up to MAX_TOOL_ROUNDS
+    while (toolRounds <= MAX_TOOL_ROUNDS) {
+      const isLastRound = toolRounds === MAX_TOOL_ROUNDS;
 
+      console.log(`[agent-chat] round ${toolRounds}, messages: ${chatMessages.length}`);
+
+      const completion = await requestAiCompletion({
+        messages: chatMessages,
+        responseFormatJson: true,
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
+        // Don't send tools on last round — force text response
+        tools: isLastRound ? undefined : CHAT_TOOL_DEFINITIONS,
+      });
+
+      // If model returned text (no tool calls), we're done
+      if (completion.finishReason !== 'tool_calls' || !completion.toolCalls?.length) {
+        finalText = completion.text;
+        break;
+      }
+
+      // Model wants to call tools
+      console.log(`[agent-chat] tool calls: ${completion.toolCalls.map(tc => tc.name).join(', ')}`);
+
+      // Add the assistant's tool-call message to the conversation
+      chatMessages.push({
+        role: 'assistant',
+        content: '',
+        toolCalls: completion.toolCalls,
+      });
+
+      // Execute all tool calls in parallel
+      const toolResults = await Promise.all(
+        completion.toolCalls.map(async (tc) => {
+          const result = await executeToolCall(tc);
+          return { toolCallId: tc.id, result };
+        }),
+      );
+
+      // Add tool results to conversation
+      for (const { toolCallId, result } of toolResults) {
+        chatMessages.push({
+          role: 'tool',
+          content: result,
+          toolCallId,
+        });
+      }
+
+      toolRounds++;
+    }
+
+    // Parse the final text response
+    const parsed = parseAgentJson(finalText);
+
+    // Save assistant message
+    const userSaveResult = await userSavePromise;
     const assistantSaveResult = await saveChatMessage({
       role: 'agent',
       text: parsed.message,
-      pickIds: cards.filter((c) => c.type === 'pick').map((c) => c.id),
-      catalystRefs: cards.filter((c) => c.type === 'catalyst').map((c) => c.catalyst),
       suggestedPrompts: parsed.suggestedPrompts ?? [],
     });
 
@@ -145,18 +206,10 @@ export async function POST(req: NextRequest) {
       persistenceWarning('Assistant message', assistantSaveResult),
     ].filter((w): w is string => Boolean(w));
 
-    if (persistenceWarnings.length > 0) {
-      console.warn('agent-chat: Supabase persistence issue', persistenceWarnings);
-    }
-
     // Best-effort thesis capture
     if (parsed.thesis?.ticker && parsed.thesis.thesisSummary) {
-      const matchingPick = context.savedPicksContext.picks.find(
-        (p) => p.ticker.toUpperCase() === parsed.thesis!.ticker.toUpperCase(),
-      );
       void saveThesis({
         ticker: parsed.thesis.ticker,
-        pickId: matchingPick?.id,
         setupType: parsed.thesis.setupType,
         thesisSummary: parsed.thesis.thesisSummary,
         bullishCase: parsed.thesis.bullishCase,
@@ -165,19 +218,15 @@ export async function POST(req: NextRequest) {
         expectedTimeframe: parsed.thesis.expectedTimeframe,
         confidenceAtCreation: normalizeConfidence(parsed.dataConfidence) as ConfidenceLevel,
         dataConfidenceAtCreation: normalizeConfidence(parsed.dataConfidence) as ConfidenceLevel,
-        sourcesUsed: [
-          context.savedPicksContext.source,
-          context.catalystContext.source,
-          context.optionsContext.status,
-        ],
-        missingDataWarnings: context.dataQualityContext.warnings,
+        sourcesUsed: ['chat-tools'],
+        missingDataWarnings: [],
         chatMessageId: assistantSaveResult.id,
       }).catch((err) => console.warn('agent-chat: thesis save failed', err));
     }
 
     const diagnostics: AgentDiagnostics = {
       provider: 'dotnet-api',
-      model: completion.model,
+      model: undefined, // model info not needed in diagnostics
       usedFallback: false,
       dotnetApiAttempted: true,
       dotnetApiSucceeded: true,
@@ -187,16 +236,21 @@ export async function POST(req: NextRequest) {
     const responseBody: AgentChatApiResponse = {
       message: parsed.message,
       dataConfidence: normalizeConfidence(parsed.dataConfidence),
-      cards,
+      cards: [], // cards no longer needed — data comes from tools
       suggestedPrompts: parsed.suggestedPrompts ?? [],
       riskWarnings: parsed.riskWarnings ?? [],
       persistenceWarnings,
       chatMessageId: assistantSaveResult.id,
       diagnostics,
     };
+
     return NextResponse.json(responseBody);
   } catch (err) {
-    console.error('[agent-chat] .NET API call FAILED:', err instanceof Error ? err.message : err);
+    console.error('[agent-chat] failed:', err instanceof Error ? err.message : err);
+
+    // Await user save so we don't leak
+    await userSavePromise.catch(() => {});
+
     const failDiagnostics: AgentDiagnostics = {
       provider: 'unknown',
       usedFallback: false,

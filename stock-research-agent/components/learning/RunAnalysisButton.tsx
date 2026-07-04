@@ -80,7 +80,7 @@ export default function RunAnalysisButton({ compact }: Props) {
   return (
     <div className="mt-3">
       <p className="mb-2 text-[11px] text-zinc-500">
-        Pulls live RSS news, auto-generates pick candidates, and runs AI analysis if available. No manual input needed.
+        Scans the latest news, finds interesting stocks, and uses AI to summarize what&apos;s happening in the market. No manual input needed.
       </p>
       <button
         type="button"
@@ -100,7 +100,7 @@ export default function RunAnalysisButton({ compact }: Props) {
           {/* AI Briefing */}
           {result.aiBriefing && (
             <div className="rounded-lg border border-violet-800/50 bg-violet-900/20 p-3">
-              <h4 className="text-xs font-semibold text-violet-300">AI Market Briefing</h4>
+              <h4 className="text-xs font-semibold text-violet-300">AI Market Summary</h4>
               <p className="mt-1 text-xs leading-relaxed text-zinc-300">{result.aiBriefing}</p>
             </div>
           )}
@@ -109,12 +109,12 @@ export default function RunAnalysisButton({ compact }: Props) {
           {result.intakeAnalysis && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
               <h4 className="text-xs font-semibold text-zinc-200">
-                Market Pulse
+                Market Mood
                 <span className={`ml-2 text-[10px] font-normal ${
                   result.intakeAnalysis.overallSentiment.label === 'Bullish' ? 'text-green-400' :
                   result.intakeAnalysis.overallSentiment.label === 'Bearish' ? 'text-red-400' : 'text-yellow-400'
                 }`}>
-                  {result.intakeAnalysis.overallSentiment.label} ({result.intakeAnalysis.overallSentiment.bullishPct}% bull / {result.intakeAnalysis.overallSentiment.bearishPct}% bear)
+                  {result.intakeAnalysis.overallSentiment.label === 'Bullish' ? 'Positive' : result.intakeAnalysis.overallSentiment.label === 'Bearish' ? 'Negative' : 'Mixed'} ({result.intakeAnalysis.overallSentiment.bullishPct}% positive / {result.intakeAnalysis.overallSentiment.bearishPct}% negative)
                 </span>
               </h4>
               <p className="mt-1 text-[11px] text-zinc-500">
@@ -123,7 +123,7 @@ export default function RunAnalysisButton({ compact }: Props) {
 
               {result.intakeAnalysis.trendingTickers.length > 0 && (
                 <div className="mt-2">
-                  <span className="text-[10px] font-semibold text-zinc-400">Trending:</span>
+                  <span className="text-[10px] font-semibold text-zinc-400">Most Talked About:</span>
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {result.intakeAnalysis.trendingTickers.slice(0, 6).map((t) => (
                       <span
@@ -143,7 +143,7 @@ export default function RunAnalysisButton({ compact }: Props) {
 
               {result.intakeAnalysis.dominantCatalysts.length > 0 && (
                 <div className="mt-2">
-                  <span className="text-[10px] font-semibold text-zinc-400">Dominant catalysts:</span>
+                  <span className="text-[10px] font-semibold text-zinc-400">Main News Drivers:</span>
                   <p className="mt-0.5 text-[10px] text-zinc-500">
                     {result.intakeAnalysis.dominantCatalysts.map((c) => `${c.type} (${c.pctOfTotal}%)`).join(', ')}
                   </p>
@@ -156,8 +156,8 @@ export default function RunAnalysisButton({ compact }: Props) {
           {result.autoPicks.length > 0 && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
               <h4 className="text-xs font-semibold text-zinc-200">
-                Auto-Generated Picks
-                <span className="ml-2 text-[10px] font-normal text-zinc-500">from RSS analysis</span>
+                Stocks Found in the News
+                <span className="ml-2 text-[10px] font-normal text-zinc-500">based on today&apos;s headlines</span>
               </h4>
               <div className="mt-2 space-y-2">
                 {result.autoPicks.map((pick) => (
@@ -173,7 +173,7 @@ export default function RunAnalysisButton({ compact }: Props) {
                           {pick.riskLevel} risk
                         </span>
                         {pick.convictionLevel === 'higher_conviction' && (
-                          <span className="text-[10px] text-violet-300">higher conviction</span>
+                          <span className="text-[10px] text-violet-300">strong signal</span>
                         )}
                       </div>
                       <p className="mt-0.5 text-[10px] leading-relaxed text-zinc-500">{pick.mainReason}</p>
@@ -182,7 +182,7 @@ export default function RunAnalysisButton({ compact }: Props) {
                 ))}
               </div>
               <p className="mt-2 text-[9px] text-zinc-600">
-                Auto-generated from RSS news volume, sentiment, and catalyst analysis. Not manually researched.
+                Found automatically from news headlines. These are not researched predictions — just stocks getting attention.
               </p>
             </div>
           )}
@@ -190,7 +190,7 @@ export default function RunAnalysisButton({ compact }: Props) {
           {/* Top Headlines */}
           {result.intakeAnalysis?.topItems && result.intakeAnalysis.topItems.length > 0 && (
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-              <h4 className="text-xs font-semibold text-zinc-200">Top Headlines by Importance</h4>
+              <h4 className="text-xs font-semibold text-zinc-200">Top Headlines</h4>
               <div className="mt-2 space-y-1">
                 {result.intakeAnalysis.topItems.slice(0, 5).map((item, i) => (
                   <div key={i} className="flex items-start gap-2 text-[10px]">

@@ -57,12 +57,12 @@ export default function DynamicSummaryCards() {
           <div className="space-y-2">
             <div className="flex flex-wrap gap-2">
               <StatusBadge tone={runStatus.tone}>{runStatus.label}</StatusBadge>
-              <StatusBadge tone="amber">Learning Mode</StatusBadge>
-              <StatusBadge tone="slate">Paper Only</StatusBadge>
-              <StatusBadge tone="red">Not Actionable</StatusBadge>
+              <StatusBadge tone="amber">Practice Mode</StatusBadge>
+              <StatusBadge tone="slate">No Real Money</StatusBadge>
+              <StatusBadge tone="red">Not Real Trades</StatusBadge>
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-zinc-100">Command Center</h3>
+              <h3 className="text-sm font-semibold text-zinc-100">System Status</h3>
               <p className="text-xs text-zinc-400">{statusSummary}</p>
             </div>
           </div>
@@ -77,25 +77,27 @@ export default function DynamicSummaryCards() {
       <div className="flex flex-wrap gap-2">
         <TabButton active={activeTab === 'overview'} onClick={() => setActiveTab('overview')}>Overview</TabButton>
         <TabButton active={activeTab === 'pipeline'} onClick={() => setActiveTab('pipeline')}>Pipeline</TabButton>
-        <TabButton active={activeTab === 'options-debug'} onClick={() => setActiveTab('options-debug')}>Options Debug</TabButton>
-        <TabButton active={activeTab === 'learning-stats'} onClick={() => setActiveTab('learning-stats')}>Learning Stats</TabButton>
+        <TabButton active={activeTab === 'options-debug'} onClick={() => setActiveTab('options-debug')}>Options Details</TabButton>
+        <TabButton active={activeTab === 'learning-stats'} onClick={() => setActiveTab('learning-stats')}>Growth</TabButton>
         <TabButton active={activeTab === 'calibration'} onClick={() => setActiveTab('calibration')}>Calibration</TabButton>
       </div>
 
       {activeTab === 'overview' && (
         <section className="space-y-4">
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <Card
               label="Latest Run"
               value={summary.latestRunStartedAt ? new Date(summary.latestRunStartedAt).toLocaleTimeString() : '—'}
               hint={summary.latestRunStartedAt ? new Date(summary.latestRunStartedAt).toLocaleString() : 'No recent run'}
             />
-            <Card label="Predictions Scanned" value={summary.latestRunPredictionCandidatesGenerated} />
+            <Card label="Predictions" value={summary.latestRunPredictionCandidatesGenerated} />
             <Card label="Stock Candidates" value={summary.latestRunPaperStockCandidatesCreated} />
             <Card label="Option Candidates" value={summary.latestRunPaperOptionCandidatesCreated} />
-            <Card label="Blocked Options" value={summary.latestRunBlockedOptionCandidates} />
-            <Card label="Top Block Reason" value={summary.latestRunTopOptionBlockReason ?? '—'} />
-            <Card label="Learning Outcomes" value={outcomesToday} hint={`${outcomes7d} added in last 7 days`} />
+          </div>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+            <Card label="Options Skipped" value={summary.latestRunBlockedOptionCandidates} hint={summary.latestRunTopOptionBlockReason ? `Reason: ${formatSnakeCase(summary.latestRunTopOptionBlockReason)}` : undefined} />
+            <Card label="Results Today" value={outcomesToday} hint={`${outcomes7d} in last 7 days`} />
+            <Card label="Waiting for Review" value={summary.candidatesAwaitingEodEvaluation} />
           </div>
 
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-300">
@@ -116,14 +118,14 @@ export default function DynamicSummaryCards() {
 
       {activeTab === 'pipeline' && (
         <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
-          <h3 className="mb-3 text-sm font-semibold text-zinc-100">Pipeline Funnel</h3>
+          <h3 className="mb-3 text-sm font-semibold text-zinc-100">Processing Steps</h3>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-            <Card label="Prediction Candidates" value={summary.funnel.predictionCandidates} compact />
-            <Card label="Stock Candidates" value={summary.funnel.stockCandidates} compact />
-            <Card label="Option Eligible" value={summary.funnel.optionEligible} compact />
-            <Card label="Option Created" value={summary.funnel.optionCreated} compact />
-            <Card label="Evaluated" value={summary.funnel.evaluated} compact />
-            <Card label="Learning Stats Updated" value={summary.funnel.learningStatsUpdated} compact />
+            <Card label="Predictions Made" value={summary.funnel.predictionCandidates} compact />
+            <Card label="Stock Picks" value={summary.funnel.stockCandidates} compact />
+            <Card label="Ready for Options" value={summary.funnel.optionEligible} compact />
+            <Card label="Options Found" value={summary.funnel.optionCreated} compact />
+            <Card label="Results Checked" value={summary.funnel.evaluated} compact />
+            <Card label="Learning Updated" value={summary.funnel.learningStatsUpdated} compact />
           </div>
         </section>
       )}
@@ -131,28 +133,28 @@ export default function DynamicSummaryCards() {
       {activeTab === 'options-debug' && (
         <section className="space-y-4">
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
-            <h3 className="mb-3 text-sm font-semibold text-zinc-100">Option Block Reasons</h3>
+            <h3 className="mb-3 text-sm font-semibold text-zinc-100">Why Some Options Were Skipped</h3>
             <div className="space-y-2">
               {summary.blockReasonBreakdown.length === 0 && (
-                <div className="text-xs text-zinc-500">No block reasons recorded for the latest run.</div>
+                <div className="text-xs text-zinc-500">All options were generated successfully in the latest run.</div>
               )}
               {summary.blockReasonBreakdown.map((item) => (
                 <div key={item.reason} className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-xs">
-                  <span className="text-zinc-300">{item.reason}</span>
+                  <span className="text-zinc-300">{formatSnakeCase(item.reason)}</span>
                   <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-200">{item.count}</span>
                 </div>
               ))}
             </div>
           </div>
           <div className="rounded-lg border border-amber-800/40 bg-amber-950/20 p-4 text-xs text-amber-200">
-            Learning-mode candidates are experimental paper-option candidates. They are not trade recommendations.
+            Practice trades are experimental — the system is learning. These are not real trade recommendations.
           </div>
         </section>
       )}
 
       {activeTab === 'learning-stats' && (
         <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
-          <h3 className="mb-3 text-sm font-semibold text-zinc-100">Dataset Growth</h3>
+          <h3 className="mb-3 text-sm font-semibold text-zinc-100">How Much Data the System Has</h3>
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <Card label="Total Stock Outcomes" value={summary.totalStockOutcomes} compact />
             <Card label="Total Option Outcomes" value={summary.totalOptionOutcomes} compact />
@@ -160,8 +162,8 @@ export default function DynamicSummaryCards() {
             <Card label="Outcomes Added 7d" value={outcomes7d} compact />
             <Card label="Stock Outcomes Today" value={summary.stockOutcomesAddedToday} compact />
             <Card label="Option Outcomes Today" value={summary.optionOutcomesAddedToday} compact />
-            <Card label="Awaiting EOD" value={summary.candidatesAwaitingEodEvaluation} compact />
-            <Card label="Outcome Coverage" value={`${summary.outcomeCoverageRate.toFixed(0)}%`} compact />
+            <Card label="Waiting for Review" value={summary.candidatesAwaitingEodEvaluation} compact />
+            <Card label="Results Coverage" value={`${summary.outcomeCoverageRate.toFixed(0)}%`} compact />
           </div>
         </section>
       )}
@@ -169,7 +171,7 @@ export default function DynamicSummaryCards() {
       {activeTab === 'calibration' && (
         <section className="grid gap-4 lg:grid-cols-2">
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4">
-            <h3 className="mb-3 text-sm font-semibold text-zinc-100">Quality Tier Performance</h3>
+            <h3 className="mb-3 text-sm font-semibold text-zinc-100">Signal Strength Performance</h3>
             <div className="space-y-2">
               {summary.qualityTierPerformance.map((tier) => (
                 <div key={tier.qualityTier} className="grid grid-cols-[1.2fr_repeat(4,minmax(0,1fr))] gap-2 text-xs">
@@ -215,18 +217,18 @@ function getStatusSummary(
   runStatus: { label: string },
 ): string {
   if (!summary.latestRunStartedAt) {
-    return 'Learning Mode Active. Paper Only. No recent morning scan was found.';
+    return 'Practice mode. No morning scan has run yet.';
   }
 
   if (runStatus.label === 'Healthy') {
-    return 'Learning Mode Active. Paper Only. Latest run generated stock learning data.';
+    return 'Practice mode. The latest run created predictions and is learning from results.';
   }
 
   if (summary.latestRunBlockedOptionCandidates > 0) {
-    return `Learning Mode Active. Paper Only. Options blocked mostly because of ${summary.latestRunTopOptionBlockReason ?? 'policy limits'}.`;
+    return `Practice mode. Some options were skipped because of ${summary.latestRunTopOptionBlockReason ? formatSnakeCase(summary.latestRunTopOptionBlockReason) : 'system limits'}.`;
   }
 
-  return 'Learning Mode Active. Paper Only. Latest run completed, but learning throughput was limited.';
+  return 'Practice mode. The latest run finished, but had limited data to learn from.';
 }
 
 function TabButton({
@@ -274,6 +276,10 @@ function StatusBadge({
   );
 }
 
+function formatSnakeCase(s: string): string {
+  return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function Card({
   label, value, hint, compact,
 }: {
@@ -282,10 +288,24 @@ function Card({
   hint?: string;
   compact?: boolean;
 }) {
+  const displayValue = typeof value === 'string' && value.includes('_')
+    ? formatSnakeCase(value)
+    : value;
+  const isLongText = typeof displayValue === 'string' && displayValue.length > 12;
+
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2.5">
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2.5 min-w-0">
       <div className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</div>
-      <div className={`${compact ? 'text-lg' : 'text-xl'} font-semibold text-zinc-100`} title={hint}>{value}</div>
+      <div
+        className={`font-semibold text-zinc-100 ${
+          isLongText
+            ? 'text-xs leading-snug mt-1'
+            : compact ? 'text-lg' : 'text-xl'
+        } break-words`}
+        title={typeof value === 'string' ? value : hint}
+      >
+        {displayValue}
+      </div>
       {hint && <div className="mt-0.5 truncate text-[10px] text-zinc-500" title={hint}>{hint}</div>}
     </div>
   );

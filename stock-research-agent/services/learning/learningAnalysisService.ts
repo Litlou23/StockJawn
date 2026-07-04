@@ -1,19 +1,20 @@
 /**
  * Core logic for /api/jobs/analyze-learning. Reads whatever has actually
- * been saved to Supabase (picks, theses, outcomes, feedback) AND live
- * RSS/intake data, and summarizes patterns. It auto-generates pick
- * candidates from RSS data so the system works without manual input.
+ * been saved to Supabase (prediction_candidates, prediction_outcomes,
+ * theses, feedback) AND live RSS/intake data, and summarizes patterns.
+ * It auto-generates pick candidates from RSS data so the system works
+ * without manual input.
  *
  * Every output is either a plain summary or a SuggestedWeightChange string
  * for a human to review; shouldAutoApply is hard-coded false at the call site.
  */
 
-import { getPicksFromDb } from '@/services/persistence/picksRepository';
-import { getThesesFromDb, getOutcomesFromDb, getFeedbackFromDb } from '@/services/persistence/learningRepository';
+import { getThesesFromDb, getFeedbackFromDb } from '@/services/persistence/learningRepository';
+import { getRecentPredictions, getRecentOutcomes } from '@/services/persistence/researchRepository';
 import { getLatestIntakeItems, getInformationProviderHealth } from '@/services/informationIntake/informationIntakeService';
 import type { NormalizedIntakeItem, IntakeProviderHealth } from '@/services/informationIntake/intake.types';
-import { Pick } from '@/types/stockAgent';
-import { AgentFeedback, OutcomeRecord, SignalPerformanceSummary, SuggestedWeightChange, Thesis } from '@/types/learning';
+import type { PredictionCandidate, PredictionOutcome } from '@/services/researchEngine/researchEngine.types';
+import { AgentFeedback, SignalPerformanceSummary, SuggestedWeightChange, Thesis } from '@/types/learning';
 import { generateAutoPicksFromIntake, AutoPick } from './rssPickGenerator';
 
 const MIN_SAMPLE_FOR_CONFIDENCE = 10;
@@ -34,34 +35,44 @@ function confidenceFor(timesUsed: number): SignalPerformanceSummary['confidenceI
   return 'high';
 }
 
-function computeSignalPerformance(picks: Pick[], outcomes: OutcomeRecord[]): SignalPerformanceSummary[] {
-  const outcomesByPickId = new Map<string, OutcomeRecord[]>();
-  for (const o of outcomes) {
-    const list = outcomesByPickId.get(o.pickId) ?? [];
-    list.push(o);
-    outcomesByPickId.set(o.pickId, list);
+/**
+ * Compute signal performance from the automated prediction pipeline.
+ * Uses prediction_candidates.data_sources_used and prediction_type as
+ * trackable "signals", and prediction_outcomes for results.
+ */
+function computeSignalPerformance(
+  predictions: PredictionCandidate[],
+  predictionOutcomes: PredictionOutcome[],
+): SignalPerformanceSummary[] {
+  // Index outcomes by prediction ID
+  const outcomeByPredId = new Map<string, PredictionOutcome>();
+  for (const o of predictionOutcomes) {
+    outcomeByPredId.set(o.predictionId, o);
   }
 
   const acc = new Map<string, SignalAccumulator>();
 
-  for (const pick of picks) {
-    const pickOutcomes = outcomesByPickId.get(pick.id) ?? [];
-    if (pickOutcomes.length === 0) continue;
+  for (const pred of predictions) {
+    const outcome = outcomeByPredId.get(pred.id);
+    if (!outcome) continue;
 
-    for (const signal of pick.supportingSignals) {
-      const entry = acc.get(signal.name) ?? { timesUsed: 0, outcomeSum: 0, outcomeCount: 0, correctCount: 0, incorrectCount: 0 };
+    // Track each data source as a signal (e.g. "twelve-data", "openai-analysis")
+    const signalNames = [...pred.dataSourcesUsed];
+    // Also track prediction_type as a signal (e.g. "bullish", "bearish")
+    signalNames.push(`prediction_type:${pred.predictionType}`);
+
+    for (const signalName of signalNames) {
+      const entry = acc.get(signalName) ?? { timesUsed: 0, outcomeSum: 0, outcomeCount: 0, correctCount: 0, incorrectCount: 0 };
       entry.timesUsed += 1;
 
-      for (const outcome of pickOutcomes) {
-        if (outcome.returnPercent !== undefined) {
-          entry.outcomeSum += outcome.returnPercent;
-          entry.outcomeCount += 1;
-        }
-        if (outcome.thesisCorrect === true) entry.correctCount += 1;
-        if (outcome.thesisCorrect === false) entry.incorrectCount += 1;
+      if (outcome.percentMove != null) {
+        entry.outcomeSum += outcome.percentMove;
+        entry.outcomeCount += 1;
       }
+      if (outcome.directionCorrect === true) entry.correctCount += 1;
+      if (outcome.directionCorrect === false) entry.incorrectCount += 1;
 
-      acc.set(signal.name, entry);
+      acc.set(signalName, entry);
     }
   }
 
@@ -81,47 +92,51 @@ function computeSignalPerformance(picks: Pick[], outcomes: OutcomeRecord[]): Sig
         entry.timesUsed < MIN_SAMPLE_FOR_ANY_READ
           ? `Only ${entry.timesUsed} tracked outcome(s) -- not enough to judge.`
           : winRate !== null
-            ? `${entry.correctCount} of ${decided} tracked ideas using this signal had a correct thesis.`
-            : `${entry.timesUsed} tracked use(s), but no thesis_correct verdict recorded yet.`,
+            ? `${entry.correctCount} of ${decided} predictions using this signal were correct.`
+            : `${entry.timesUsed} tracked use(s), but no direction verdict recorded yet.`,
     };
   });
 }
 
-const UNTRACKED_REQUESTED_SIGNALS = [
-  'catalyst freshness',
-  'options readiness',
-  'liquidity warning',
-  'IV warning',
-  'market bias',
-  'missing data warning',
-];
-
-function buildMissingDataPatterns(theses: Thesis[], picks: Pick[], outcomes: OutcomeRecord[]): string[] {
+function buildMissingDataPatterns(
+  theses: Thesis[],
+  predictions: PredictionCandidate[],
+  predictionOutcomes: PredictionOutcome[],
+): string[] {
   const patterns: string[] = [];
 
+  // Check thesis missing data warnings
   const warningCounts = new Map<string, number>();
   for (const t of theses) {
     for (const w of t.missingDataWarnings ?? []) {
       warningCounts.set(w, (warningCounts.get(w) ?? 0) + 1);
     }
   }
+  // Also check prediction missing data warnings
+  for (const p of predictions) {
+    for (const w of p.missingDataWarnings ?? []) {
+      warningCounts.set(w, (warningCounts.get(w) ?? 0) + 1);
+    }
+  }
   const sortedWarnings = Array.from(warningCounts.entries()).sort((a, b) => b[1] - a[1]);
   for (const [warning, count] of sortedWarnings.slice(0, 5)) {
-    patterns.push(`"${warning}" was flagged as missing on ${count} tracked thesis/thesis(es).`);
+    patterns.push(`"${warning}" was flagged as missing data on ${count} prediction(s).`);
   }
 
-  if (picks.length > 0 && outcomes.length === 0) {
-    patterns.push(`${picks.length} pick(s) saved but zero outcomes recorded yet -- nothing can be learned about accuracy until outcomes are entered manually.`);
+  const evaluatedCount = predictions.filter((p) => p.status === 'evaluated').length;
+  if (predictions.length > 0 && predictionOutcomes.length === 0) {
+    patterns.push(`${predictions.length} prediction(s) generated but zero outcomes recorded yet.`);
+  } else if (predictions.length > 0 && predictionOutcomes.length < evaluatedCount) {
+    patterns.push(`${evaluatedCount} prediction(s) evaluated but only ${predictionOutcomes.length} have recorded outcomes.`);
   }
-
-  patterns.push(
-    `These categories are not yet logged per-pick in a structured way, so they cannot be scored: ${UNTRACKED_REQUESTED_SIGNALS.join(', ')}. Their performance can only be discussed qualitatively until that logging exists.`,
-  );
 
   return patterns;
 }
 
-function buildOverconfidenceWarnings(feedback: AgentFeedback[], outcomes: OutcomeRecord[]): string[] {
+function buildOverconfidenceWarnings(
+  feedback: AgentFeedback[],
+  predictionOutcomes: PredictionOutcome[],
+): string[] {
   const warnings: string[] = [];
 
   const tooConfidentCount = feedback.filter((f) => f.rating === 'too_confident').length;
@@ -140,15 +155,23 @@ function buildOverconfidenceWarnings(feedback: AgentFeedback[], outcomes: Outcom
     warnings.push(`User marked ${wrongCount} response(s) as outright wrong.`);
   }
 
-  const incorrectHighConfidence = outcomes.filter((o) => o.thesisCorrect === false);
-  if (incorrectHighConfidence.length > 0) {
+  const incorrectPredictions = predictionOutcomes.filter((o) => o.directionCorrect === false);
+  if (incorrectPredictions.length > 0) {
     warnings.push(
-      `${incorrectHighConfidence.length} tracked thesis/theses were marked incorrect after evaluation.`,
+      `${incorrectPredictions.length} prediction(s) were wrong about price direction after evaluation.`,
     );
   }
 
+  if (warnings.length === 0 && predictionOutcomes.length > 0) {
+    const decided = predictionOutcomes.filter((o) => o.directionCorrect !== null).length;
+    const correct = predictionOutcomes.filter((o) => o.directionCorrect === true).length;
+    if (decided > 0) {
+      warnings.push(`${correct} of ${decided} predictions got the direction right (${Math.round((correct / decided) * 100)}% accuracy).`);
+    }
+  }
+
   if (warnings.length === 0 && feedback.length > 0) {
-    warnings.push(`No overconfidence flags in ${feedback.length} rated response(s) so far -- sample too small to conclude calibration is good.`);
+    warnings.push(`No overconfidence flags in ${feedback.length} rated response(s) so far.`);
   }
 
   return warnings;
@@ -320,9 +343,9 @@ async function tryAiSummary(intakeAnalysis: IntakeAnalysis, autoPicks: AutoPick[
 RSS Analysis:
 - ${intakeAnalysis.itemsFetched} articles from ${Object.keys(intakeAnalysis.sourceBreakdown).length} sources
 - Overall sentiment: ${intakeAnalysis.overallSentiment.label} (${intakeAnalysis.overallSentiment.bullishPct}% bullish, ${intakeAnalysis.overallSentiment.bearishPct}% bearish)
-- Trending tickers: ${intakeAnalysis.trendingTickers.map((t) => `${t.ticker} (${t.mentions} mentions, ${t.netSentiment})`).join(', ')}
-- Dominant catalysts: ${intakeAnalysis.dominantCatalysts.map((c) => `${c.type} (${c.count})`).join(', ')}
-- Top headlines: ${intakeAnalysis.topItems.slice(0, 5).map((i) => `"${i.title}" [${i.sentiment}]`).join('; ')}
+- Trending tickers: ${intakeAnalysis.trendingTickers.map((t: { ticker: string; mentions: number; netSentiment: string }) => `${t.ticker} (${t.mentions} mentions, ${t.netSentiment})`).join(', ')}
+- Dominant catalysts: ${intakeAnalysis.dominantCatalysts.map((c: { type: string; count: number }) => `${c.type} (${c.count})`).join(', ')}
+- Top headlines: ${intakeAnalysis.topItems.slice(0, 5).map((i: { title: string; sentiment: string }) => `"${i.title}" [${i.sentiment}]`).join('; ')}
 
 Auto-Generated Picks (top ${Math.min(autoPicks.length, 5)}):
 ${autoPicks.slice(0, 5).map((p) => `- ${p.ticker} (score ${p.score}, ${p.riskLevel} risk): ${p.mainReason}`).join('\n')}
@@ -363,17 +386,17 @@ export interface LearningAnalysis {
 }
 
 export async function runLearningAnalysis(): Promise<LearningAnalysis> {
-  const [picks, theses, outcomes, feedback, intakeItems, feedHealth] = await Promise.all([
-    getPicksFromDb(500),
+  const [predictions, predictionOutcomes, theses, feedback, intakeItems, feedHealth] = await Promise.all([
+    getRecentPredictions(500),
+    getRecentOutcomes(500),
     getThesesFromDb(500),
-    getOutcomesFromDb(500),
     getFeedbackFromDb(500),
     getLatestIntakeItems(50),
     getInformationProviderHealth(),
   ]);
 
-  const sampleSize = outcomes.length;
-  const signalPerformance = computeSignalPerformance(picks, outcomes);
+  const sampleSize = predictionOutcomes.length;
+  const signalPerformance = computeSignalPerformance(predictions, predictionOutcomes);
 
   const ranked = signalPerformance
     .filter((s) => s.confidenceInSignal !== 'insufficient_data')
@@ -385,10 +408,9 @@ export async function runLearningAnalysis(): Promise<LearningAnalysis> {
     .sort((a, b) => (a.winRate ?? 0) - (b.winRate ?? 0))
     .slice(0, 5);
 
-  const overconfidenceWarnings = buildOverconfidenceWarnings(feedback, outcomes);
-  const missingDataPatterns = buildMissingDataPatterns(theses, picks, outcomes);
-  const optionsTrackedOutcomes = outcomes.filter((o) => o.optionsSetupWorked !== undefined).length;
-  const suggestedWeightChanges = buildSuggestedWeightChanges(signalPerformance, optionsTrackedOutcomes);
+  const overconfidenceWarnings = buildOverconfidenceWarnings(feedback, predictionOutcomes);
+  const missingDataPatterns = buildMissingDataPatterns(theses, predictions, predictionOutcomes);
+  const suggestedWeightChanges = buildSuggestedWeightChanges(signalPerformance, 0);
 
   // RSS/intake analysis (enhanced)
   const intakeStats = analyzeIntakeItems(intakeItems);
@@ -431,16 +453,20 @@ export async function runLearningAnalysis(): Promise<LearningAnalysis> {
     parts.push(`Auto-picks: ${autoPicks.length} candidate(s) generated. Top: ${topAuto}.`);
   }
 
-  // Manual picks/outcomes portion
+  // Prediction outcomes portion
   if (sampleSize > 0) {
+    const decided = predictionOutcomes.filter((o) => o.directionCorrect !== null).length;
+    const correct = predictionOutcomes.filter((o) => o.directionCorrect === true).length;
+    const accuracy = decided > 0 ? Math.round((correct / decided) * 100) : 0;
     parts.push(
       sampleSize < MIN_SAMPLE_FOR_ANY_READ
         ? `Outcomes: ${sampleSize} recorded -- too small to draw conclusions.`
-        : `Outcomes: ${sampleSize} recorded across ${picks.length} pick(s). ` +
+        : `Outcomes: ${sampleSize} evaluated across ${predictions.length} prediction(s). ` +
+          `Direction accuracy: ${accuracy}% (${correct}/${decided}). ` +
           `${bestPerformingSignals.length} signal(s) above 50% win rate, ${worstPerformingSignals.length} below.`
     );
-  } else if (picks.length > 0) {
-    parts.push(`${picks.length} manual pick(s) saved but no outcomes recorded yet.`);
+  } else if (predictions.length > 0) {
+    parts.push(`${predictions.length} prediction(s) generated but no outcomes recorded yet.`);
   }
 
   if (aiBriefing) {
@@ -461,9 +487,9 @@ export async function runLearningAnalysis(): Promise<LearningAnalysis> {
     autoPicks,
     aiBriefing,
     rawMetadata: {
-      pickCount: picks.length,
+      predictionCount: predictions.length,
       thesisCount: theses.length,
-      outcomeCount: outcomes.length,
+      outcomeCount: predictionOutcomes.length,
       feedbackCount: feedback.length,
       allSignalPerformance: signalPerformance,
     },

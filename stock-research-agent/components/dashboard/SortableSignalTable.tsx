@@ -22,8 +22,8 @@ function scoreColor(score: number | null): string {
 const COLS = [
   { label: 'Signal', key: 'signalName' },
   { label: 'Accuracy', key: 'accuracy' },
-  { label: 'Correct / Total', key: 'correctPredictions' },
-  { label: 'Avg Score', key: 'averageOutcomeScore', hiddenOnMobile: true },
+  { label: 'Right / Total', key: 'correctPredictions' },
+  { label: 'Avg Result', key: 'averageOutcomeScore', hiddenOnMobile: true },
 ];
 
 export default function SortableSignalTable({ signals }: { signals: SignalPerf[] }) {

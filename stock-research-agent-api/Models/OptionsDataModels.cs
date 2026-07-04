@@ -35,56 +35,57 @@ public class MarketDataApiResponse
     [JsonPropertyName("updated")]
     public long[] Updated { get; set; } = [];
 
+    // Nullable arrays — MarketData.app returns null for missing values (e.g. no last trade)
     [JsonPropertyName("bid")]
-    public double[] Bid { get; set; } = [];
+    public double?[] Bid { get; set; } = [];
 
     [JsonPropertyName("bidSize")]
-    public int[] BidSize { get; set; } = [];
+    public int?[] BidSize { get; set; } = [];
 
     [JsonPropertyName("mid")]
-    public double[] Mid { get; set; } = [];
+    public double?[] Mid { get; set; } = [];
 
     [JsonPropertyName("ask")]
-    public double[] Ask { get; set; } = [];
+    public double?[] Ask { get; set; } = [];
 
     [JsonPropertyName("askSize")]
-    public int[] AskSize { get; set; } = [];
+    public int?[] AskSize { get; set; } = [];
 
     [JsonPropertyName("last")]
-    public double[] Last { get; set; } = [];
+    public double?[] Last { get; set; } = [];
 
     [JsonPropertyName("openInterest")]
-    public int[] OpenInterest { get; set; } = [];
+    public int?[] OpenInterest { get; set; } = [];
 
     [JsonPropertyName("volume")]
-    public int[] Volume { get; set; } = [];
+    public int?[] Volume { get; set; } = [];
 
     [JsonPropertyName("inTheMoney")]
-    public bool[] InTheMoney { get; set; } = [];
+    public bool?[] InTheMoney { get; set; } = [];
 
     [JsonPropertyName("intrinsicValue")]
-    public double[] IntrinsicValue { get; set; } = [];
+    public double?[] IntrinsicValue { get; set; } = [];
 
     [JsonPropertyName("extrinsicValue")]
-    public double[] ExtrinsicValue { get; set; } = [];
+    public double?[] ExtrinsicValue { get; set; } = [];
 
     [JsonPropertyName("underlyingPrice")]
-    public double[] UnderlyingPrice { get; set; } = [];
+    public double?[] UnderlyingPrice { get; set; } = [];
 
     [JsonPropertyName("iv")]
-    public double[] Iv { get; set; } = [];
+    public double?[] Iv { get; set; } = [];
 
     [JsonPropertyName("delta")]
-    public double[] Delta { get; set; } = [];
+    public double?[] Delta { get; set; } = [];
 
     [JsonPropertyName("gamma")]
-    public double[] Gamma { get; set; } = [];
+    public double?[] Gamma { get; set; } = [];
 
     [JsonPropertyName("theta")]
-    public double[] Theta { get; set; } = [];
+    public double?[] Theta { get; set; } = [];
 
     [JsonPropertyName("vega")]
-    public double[] Vega { get; set; } = [];
+    public double?[] Vega { get; set; } = [];
 }
 
 // ---------------------------------------------------------------------------

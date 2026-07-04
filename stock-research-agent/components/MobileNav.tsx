@@ -4,10 +4,12 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState } from 'react';
 import { navEntries, entryMatchesPath, entryPrimaryHref, type NavEntry } from './navItems';
+import { useNavProgress } from './NavigationProgress';
 
 export default function MobileNav() {
   const pathname = usePathname();
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const { start } = useNavProgress();
 
   const closeSheet = () => setOpenGroup(null);
 
@@ -36,7 +38,7 @@ export default function MobileNav() {
                   <Link
                     key={child.href}
                     href={child.href}
-                    onClick={closeSheet}
+                    onClick={() => { closeSheet(); if (!active) start(); }}
                     className={`rounded-lg px-3 py-2 text-sm ${
                       active ? 'bg-violet-600/20 text-violet-300' : 'text-zinc-200'
                     }`}
@@ -82,23 +84,24 @@ function MobileEntry({
   onTap: () => void;
 }) {
   const active = entryMatchesPath(entry, pathname);
+  const { start } = useNavProgress();
   const cls = `flex flex-1 flex-col items-center gap-0.5 py-2.5 text-[10px] font-medium ${
     active || isOpen ? 'text-violet-400' : 'text-zinc-500'
   }`;
 
-  // Leaf → straight link
+  // Leaf -> straight link
   if (!entry.children) {
     const href = entryPrimaryHref(entry);
     if (!href) return null;
     return (
-      <Link href={href} className={cls} onClick={onTap}>
+      <Link href={href} className={cls} onClick={() => { onTap(); if (!active) start(); }}>
         {entry.icon}
         {entry.label}
       </Link>
     );
   }
 
-  // Group → opens the sub-sheet
+  // Group -> opens the sub-sheet
   return (
     <button type="button" onClick={onTap} className={cls}>
       {entry.icon}

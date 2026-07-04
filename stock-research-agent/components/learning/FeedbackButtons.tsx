@@ -24,7 +24,7 @@ export default function FeedbackButtons({ chatMessageId }: { chatMessageId?: str
   const [pending, setPending] = useState(false);
 
   if (!chatMessageId) {
-    return <p className="text-[10px] text-zinc-600">Feedback unavailable — this reply wasn&apos;t saved (Supabase not connected).</p>;
+    return <p className="text-[10px] text-zinc-600">Feedback unavailable — this reply wasn&apos;t saved to the database.</p>;
   }
 
   if (submitted) {

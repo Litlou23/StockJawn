@@ -9,13 +9,13 @@ export default async function SettingsPage() {
       <div className="mx-auto max-w-3xl space-y-4 p-4">
         <h1 className="text-lg font-bold text-zinc-100">Settings</h1>
         <p className="text-sm text-zinc-500">
-          Signal weight tuning will live here once the scoring engine is connected. Read-only preview below — not
-          editable yet in this prototype.
+          This shows how much importance the system gives each signal when scoring stocks.
+          These will be adjustable in a future update — for now, this is a preview.
         </p>
 
         <div className="rounded-xl border border-zinc-800 bg-zinc-900">
           {signalWeights.length === 0 && (
-            <p className="px-4 py-3 text-sm text-zinc-500">No signal weights saved yet.</p>
+            <p className="px-4 py-3 text-sm text-zinc-500">No signal settings saved yet.</p>
           )}
           {signalWeights.map((sw, i) => (
             <div

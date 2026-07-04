@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState } from 'react';
 import { navEntries, entryMatchesPath, type NavEntry } from './navItems';
+import { useNavProgress } from './NavigationProgress';
 
 export default function Sidebar() {
   const pathname = usePathname();
@@ -58,10 +59,12 @@ export default function Sidebar() {
 
 function Leaf({ entry, pathname }: { entry: NavEntry; pathname: string | null }) {
   const active = entry.href && pathname?.startsWith(entry.href);
+  const { start } = useNavProgress();
   if (!entry.href) return null;
   return (
     <Link
       href={entry.href}
+      onClick={() => { if (!active) start(); }}
       className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition ${
         active ? 'bg-violet-600/15 text-violet-300' : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
       }`}
@@ -81,6 +84,7 @@ function Group({
   onToggle: () => void;
 }) {
   const active = entryMatchesPath(entry, pathname);
+  const { start } = useNavProgress();
   return (
     <div>
       <button
@@ -111,6 +115,7 @@ function Group({
               <Link
                 key={child.href}
                 href={child.href}
+                onClick={() => { if (!childActive) start(); }}
                 className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
                   childActive
                     ? 'bg-violet-600/15 text-violet-300'

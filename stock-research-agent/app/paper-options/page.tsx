@@ -352,34 +352,34 @@ export default function PaperOptionsPage() {
       <div className="mx-auto max-w-7xl px-4 py-8">
         {/* Header */}
         <div className="mb-6">
-          <h1 className="text-2xl font-bold text-zinc-100">Manual Paper Options</h1>
+          <h1 className="text-2xl font-bold text-zinc-100">Practice Options</h1>
           <p className="mt-1 text-sm text-zinc-400">
-            Manually generate, compare, and track real option contracts against system predictions.
+            Create practice option trades, compare them, and see how they would have performed — no real money.
           </p>
         </div>
 
         {/* Warning banner */}
         <div className="mb-6 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-3 text-sm text-amber-200">
-          <span className="font-medium">Paper trading only.</span>{' '}
-          Uses real option-chain data when available, but no real trades are placed.
-          Delayed options data may not reflect current live market prices.
+          <span className="font-medium">Practice only — no real money involved.</span>{' '}
+          Uses real option prices when available, but no actual trades are placed.
+          Prices may be slightly delayed from live market values.
         </div>
 
         <div className="mb-6">
           <InfoBanner items={[
-            { term: 'Step 1: Select Prediction', definition: 'Choose an open bullish/bearish prediction to generate option candidates for. Only directional picks can have options.' },
-            { term: 'Step 2: Duration', definition: 'How long you expect the trade to play out. System Recommended auto-selects based on confidence and risk.' },
-            { term: 'Auto-save', definition: 'Automatically saves the top-ranked candidate. Otherwise you review and save manually.' },
-            { term: 'Contract Score', definition: 'Composite score (0-100) ranking how well the contract fits the prediction. Factors: delta alignment, spread tightness, volume/OI, DTE fit.' },
-            { term: 'Strike', definition: 'The price at which the option can be exercised. Closer to current price = more expensive but higher delta.' },
-            { term: 'DTE', definition: 'Days to expiration. Shorter DTE = cheaper but faster time decay (theta).' },
-            { term: 'Bid / Ask / Mid', definition: 'Bid = what buyers pay. Ask = what sellers want. Mid = average, used for paper P&L calculations.' },
-            { term: 'IV (Implied Volatility)', definition: 'Market\'s expected future volatility priced into the option. Higher IV = more expensive premiums.' },
-            { term: 'Delta', definition: 'How much the option price moves per $1 move in the stock. 0.50 delta ≈ 50% chance of expiring in the money.' },
-            { term: 'Theta', definition: 'Daily time decay — how much value the option loses per day just from time passing.' },
-            { term: 'Spread %', definition: 'Bid-ask spread as a percentage. Lower = more liquid, easier to trade. Above 15% is a warning sign.' },
-            { term: 'Open Interest', definition: 'Total open contracts. Higher OI = more liquid. Low OI can mean wide spreads and difficulty exiting.' },
-            { term: 'Evaluate', definition: 'Fetches current option prices and calculates paper P&L, direction accuracy, and updates learning stats.' },
+            { term: 'Step 1: Pick a Prediction', definition: 'Choose a prediction that says "up" or "down" to find matching option contracts.' },
+            { term: 'Step 2: Time Frame', definition: 'How long you think the trade will take. "System Recommended" picks automatically based on how confident the prediction is.' },
+            { term: 'Auto-save', definition: 'Automatically saves the best option it finds. Otherwise you pick and save one yourself.' },
+            { term: 'Contract Score', definition: 'A 0-100 rating of how well this option fits the prediction — higher is better.' },
+            { term: 'Strike Price', definition: 'The price the stock must pass for the option to pay off. Closer to the current stock price = costs more but more likely to work.' },
+            { term: 'Days Left (DTE)', definition: 'Days until the option expires. Fewer days = cheaper, but the clock is ticking faster.' },
+            { term: 'Bid / Ask / Mid', definition: 'Bid = what someone will pay you. Ask = what it costs to buy. Mid = the average, used to track practice results.' },
+            { term: 'Volatility (IV)', definition: 'How much the market expects the stock price to bounce around. Higher = option costs more.' },
+            { term: 'Delta', definition: 'How much the option price moves when the stock moves $1. A delta of 0.50 means ~50% chance of paying off.' },
+            { term: 'Theta (Time Decay)', definition: 'How much value the option loses each day just from time passing — options always lose value over time.' },
+            { term: 'Spread %', definition: 'The gap between buy and sell prices. Smaller gap = easier to trade. Over 15% is a warning.' },
+            { term: 'Open Interest', definition: 'How many contracts are currently active. More = easier to buy and sell.' },
+            { term: 'Evaluate', definition: 'Checks current prices and calculates whether this practice trade would have made or lost money.' },
           ]} />
         </div>
 
@@ -399,9 +399,9 @@ export default function PaperOptionsPage() {
         )}
 
         {/* 3. Prediction selector */}
-        <Section title="1. Select a saved prediction">
+        <Section title="1. Pick a prediction">
           {predictions.length === 0 ? (
-            <EmptyState>No open predictions available. Run the research engine first.</EmptyState>
+            <EmptyState>No predictions available. Run the Morning Scan first to create some.</EmptyState>
           ) : (
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {predictions.map(p => (
@@ -422,9 +422,9 @@ export default function PaperOptionsPage() {
                     <span className="text-xs text-zinc-500">{fmtDate(p.createdAt)}</span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-3 text-xs text-zinc-400">
-                    <span>Conf: {p.confidenceScore}</span>
+                    <span>Signal Strength: {p.confidenceScore}/100</span>
                     <span>Risk: {p.riskScore}</span>
-                    <span>Ref: {fmtMoney(p.entryReferencePrice)}</span>
+                    <span>Price: {fmtMoney(p.entryReferencePrice)}</span>
                     <span>{p.timeWindow}</span>
                   </div>
                   <p className="mt-2 line-clamp-2 text-xs text-zinc-300">{p.predictionReason}</p>
@@ -435,7 +435,7 @@ export default function PaperOptionsPage() {
         </Section>
 
         {/* 4. Duration selector */}
-        <Section title="2. Choose duration">
+        <Section title="2. Choose time frame">
           <div className="flex flex-wrap items-center gap-3">
             {([
               ['system_recommended', 'System Recommended'],
@@ -465,29 +465,29 @@ export default function PaperOptionsPage() {
             </label>
           </div>
           <p className="mt-2 text-xs text-zinc-500">
-            System Recommended uses prediction confidence + risk: high-confidence short-term picks lean 1-week,
-            moderate-confidence or higher-risk picks lean 2-week.
+            System Recommended picks the best time frame automatically — confident predictions get shorter windows,
+            riskier ones get more time.
           </p>
         </Section>
 
         {/* 5. Candidate generation */}
-        <Section title="3. Generate paper option candidates">
+        <Section title="3. Find practice options">
           <button
             onClick={handleGenerate}
             disabled={!selectedPredictionId || loading}
             className="rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
           >
-            Generate Paper Option Candidates
+            Find Practice Options
           </button>
         </Section>
 
         {/* 6. Ranked candidates table */}
         {generated && (
-          <Section title={`4. Ranked candidates — ${generated.ticker} (${generated.predictionType})`}>
+          <Section title={`4. Best options found — ${generated.ticker} (${generated.predictionType})`}>
             <div className="mb-3 flex flex-wrap gap-4 text-xs text-zinc-400">
-              <span>Underlying: {fmtMoney(generated.underlyingPrice)}</span>
-              <span>Duration bucket: <span className="text-zinc-200">{generated.durationBucket}</span></span>
-              <span>Target DTE: <span className="text-zinc-200">{generated.targetDte}</span></span>
+              <span>Stock Price: {fmtMoney(generated.underlyingPrice)}</span>
+              <span>Time Frame: <span className="text-zinc-200">{generated.durationBucket}</span></span>
+              <span>Target Days: <span className="text-zinc-200">{generated.targetDte}</span></span>
             </div>
 
             {generated.warnings.length > 0 && (
@@ -510,7 +510,7 @@ export default function PaperOptionsPage() {
 
         {/* 7. Candidate detail card */}
         {selectedCandidate && (
-          <Section title="5. Candidate detail">
+          <Section title="5. Option details">
             <CandidateDetail
               candidate={selectedCandidate}
               prediction={selectedPrediction}
@@ -522,7 +522,7 @@ export default function PaperOptionsPage() {
 
         {/* 9. Open paper candidates */}
         <Section
-          title="6. Open paper candidates"
+          title="6. Active practice trades"
           right={
             <div className="flex items-center gap-3">
               <label className="flex items-center gap-2 text-[11px] text-zinc-500">
@@ -552,7 +552,7 @@ export default function PaperOptionsPage() {
           }
         >
           {openCandidates.length === 0 ? (
-            <EmptyState>No open paper candidates. Save one above to get started.</EmptyState>
+            <EmptyState>No active practice trades. Save one above to get started.</EmptyState>
           ) : (
             <div className="space-y-2">
               {[...openCandidates].sort((a, b) => {
@@ -578,7 +578,7 @@ export default function PaperOptionsPage() {
 
         {/* 11. Results section */}
         {lastOutcome && (
-          <Section title="7. Latest evaluation result">
+          <Section title="7. Latest result">
             <OutcomeCard outcome={lastOutcome} />
           </Section>
         )}
@@ -593,13 +593,13 @@ export default function PaperOptionsPage() {
           </Section>
         )}
 
-        {/* 12. Learning summary */}
-        <Section title="9. Learning summary">
+        {/* 12. What the system learned */}
+        <Section title="9. What the system learned">
           <LearningSummary stats={learningStats} outcomes={recentOutcomes} />
         </Section>
 
         <p className="mt-10 text-xs text-zinc-500">
-          Real contract data + paper tracking. No real trade placed.
+          Real prices, practice tracking. No real money involved.
         </p>
       </div>
     </AppShell>
@@ -689,7 +689,7 @@ function CandidateDetail({
           disabled={disabled}
           className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white hover:bg-violet-500 disabled:opacity-50"
         >
-          Save Paper Candidate
+          Save Practice Trade
         </button>
       </div>
 
@@ -698,27 +698,27 @@ function CandidateDetail({
         <Field label="Ask" value={fmtMoney(candidate.entryAsk)} />
         <Field label="Mid" value={fmtMoney(candidate.entryMid)} />
         <Field label="Last" value={fmtMoney(candidate.entryLast)} />
-        <Field label="Underlying" value={fmtMoney(candidate.entryUnderlyingPrice)} />
-        <Field label="IV" value={`${(candidate.entryIv * 100).toFixed(1)}%`} />
-        <Field label="Delta" value={candidate.entryDelta.toFixed(3)} />
-        <Field label="Theta" value={candidate.entryTheta.toFixed(3)} />
+        <Field label="Stock Price" value={fmtMoney(candidate.entryUnderlyingPrice)} />
+        <Field label="Volatility" value={`${(candidate.entryIv * 100).toFixed(1)}%`} />
+        <Field label="Move Sensitivity" value={candidate.entryDelta.toFixed(3)} hint="How much option moves per $1 stock move" />
+        <Field label="Daily Decay" value={candidate.entryTheta.toFixed(3)} hint="Value lost per day from time passing" />
         <Field label="Volume" value={candidate.entryVolume.toLocaleString()} />
-        <Field label="Open interest" value={candidate.entryOpenInterest.toLocaleString()} />
+        <Field label="Open contracts" value={candidate.entryOpenInterest.toLocaleString()} />
         <Field label="Spread" value={`${candidate.spreadPercent.toFixed(1)}%`} />
-        <Field label="Est. cost" value={fmtMoney(candidate.estimatedContractCost, 0)} />
-        <Field label="Max risk" value={fmtMoney(maxRisk, 0)} hint="Premium paid per contract (100x mid)" />
+        <Field label="Estimated cost" value={fmtMoney(candidate.estimatedContractCost, 0)} />
+        <Field label="Most you could lose" value={fmtMoney(maxRisk, 0)} hint="The price you'd pay per contract" />
         <Field label="Price bucket" value={candidate.priceBucket ?? '—'} />
         <Field label="Duration" value={candidate.durationBucket} />
         <Field label="Score" value={candidate.contractScore.toFixed(1)} />
       </div>
 
       <div className="mt-4 rounded-md border border-zinc-700/50 bg-zinc-800/30 p-3 text-xs text-zinc-300">
-        <div className="font-medium text-zinc-200">Why this contract matched the prediction</div>
+        <div className="font-medium text-zinc-200">Why this option was chosen</div>
         <p className="mt-1 text-zinc-400">{candidate.selectionReason}</p>
         {prediction && (
           <p className="mt-2 text-zinc-500">
             Linked to {prediction.ticker} {prediction.predictionType} prediction
-            (conf {prediction.confidenceScore}, risk {prediction.riskScore}).
+            (strength {prediction.confidenceScore}/100, risk {prediction.riskScore}).
           </p>
         )}
       </div>
@@ -831,7 +831,7 @@ function LearningSummary({
   stats, outcomes,
 }: { stats: OptionLearningStat[]; outcomes: PaperOutcome[] }) {
   if (stats.length === 0 && outcomes.length === 0) {
-    return <EmptyState>No learning data yet. Evaluate a few paper candidates to start.</EmptyState>;
+    return <EmptyState>No learning data yet. Check a few practice trades to start building knowledge.</EmptyState>;
   }
 
   const totalEvaluated = outcomes.length;
@@ -850,10 +850,10 @@ function LearningSummary({
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <StatCard label="Outcomes evaluated" value={totalEvaluated.toString()} />
-        <StatCard label="Direction accuracy" value={`${dirRate.toFixed(0)}%`} />
-        <StatCard label="Profitable rate" value={`${winRate.toFixed(0)}%`} />
-        <StatCard label="Tracked dimensions" value={grouped.size.toString()} />
+        <StatCard label="Trades checked" value={totalEvaluated.toString()} />
+        <StatCard label="Prediction accuracy" value={`${dirRate.toFixed(0)}%`} />
+        <StatCard label="Would have profited" value={`${winRate.toFixed(0)}%`} />
+        <StatCard label="Categories tracked" value={grouped.size.toString()} />
       </div>
 
       {Array.from(grouped.entries()).map(([type, rows]) => (
@@ -861,11 +861,10 @@ function LearningSummary({
       ))}
 
       <div className="rounded-lg border border-violet-800/40 bg-violet-950/20 p-3 text-xs text-violet-200">
-        <span className="font-medium">How learning updates:</span>{' '}
-        every outcome upserts running averages into <code>option_learning_stats</code> across ticker,
-        side, duration bucket, price bucket, DTE bucket, confidence bucket, liquidity bucket and
-        spread bucket. Future similar setups inherit the win-rate signal — high win-rate buckets get
-        scored higher, low win-rate buckets lower.
+        <span className="font-medium">How learning works:</span>{' '}
+        Every time the system checks a practice trade, it remembers the results grouped by stock,
+        option type, time frame, and price range. When it sees a similar setup in the future, it
+        uses past results to make smarter picks — setups that worked well get scored higher.
       </div>
     </div>
   );

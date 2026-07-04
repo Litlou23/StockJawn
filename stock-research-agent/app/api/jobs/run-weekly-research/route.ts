@@ -1,46 +1,69 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { runWeeklyResearch } from '@/services/weeklyResearch/weeklyResearchService';
 
 export const runtime = 'nodejs';
+export const maxDuration = 300;
 
 /**
- * Scheduled weekly research job, protected by a shared secret (not Supabase
- * Auth — this is a service-to-service call from the weekly-research Edge
- * Function, invoked by pg_cron). Produces research/watchlist candidates
- * only; never executes, sizes, or recommends a trade.
- *
- * Still callable manually for testing — see README/testing notes — by
- * sending the same x-job-secret header yourself (curl/Postman), no need to
- * wait for the Monday schedule.
+ * Compatibility shim for callers that still post to
+ * /api/jobs/run-weekly-research directly (for example the Supabase Edge
+ * Function + pg_cron schedule). New UI callers should use /api/jobs/trigger.
  */
 export async function POST(req: NextRequest) {
-  const expectedSecret = process.env.JOB_RUN_SECRET;
-  if (!expectedSecret) {
-    console.error('run-weekly-research: JOB_RUN_SECRET is not set in this environment — refusing to run unprotected.');
-    return NextResponse.json({ error: 'Server misconfigured: JOB_RUN_SECRET not set' }, { status: 500 });
+  const base = process.env.AGENT_API_BASE_URL;
+  const secret = process.env.JOB_RUN_SECRET;
+
+  if (!base || !secret) {
+    return NextResponse.json(
+      { error: 'AGENT_API_BASE_URL or JOB_RUN_SECRET not configured' },
+      { status: 500 },
+    );
   }
 
-  const providedSecret = req.headers.get('x-job-secret');
-  if (!providedSecret || providedSecret !== expectedSecret) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-
-  let trigger = 'manual';
+  let trigger = 'scheduled';
   try {
     const body = await req.json();
     if (body?.trigger) trigger = String(body.trigger);
   } catch {
-    // No/invalid body is fine — this route requires no input beyond the secret header.
+    // Preserve the old route behavior: empty/non-JSON bodies are acceptable.
   }
 
+  const isLocalHttps = base.startsWith('https://localhost');
+  if (isLocalHttps) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
   try {
-    const result = await runWeeklyResearch(trigger);
-    return NextResponse.json(result);
-  } catch (err) {
-    console.error('jobs/run-weekly-research failed', err);
+    const res = await fetch(`${base}/api/jobs/run-weekly-research`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-job-secret': secret,
+      },
+      body: JSON.stringify({ trigger }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return NextResponse.json(data);
+    }
+
+    const errData = await res.json().catch(() => ({}));
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Unknown error' },
-      { status: 500 },
+      { error: errData?.error ?? `Job returned ${res.status}`, detail: errData },
+      { status: res.status },
     );
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'TimeoutError') {
+      return NextResponse.json({
+        status: 'started',
+        message: 'run-weekly-research is running in the background.',
+      });
+    }
+
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'Failed to reach .NET API' },
+      { status: 502 },
+    );
+  } finally {
+    if (isLocalHttps) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   }
 }

@@ -14,7 +14,7 @@ export default function AgentRiskCard({ pick }: { pick: Pick }) {
       </div>
 
       <div className="mt-2 text-[11px] text-zinc-400">
-        <span className="font-medium text-zinc-300">Invalidation:</span> {pick.invalidationPoint}
+        <span className="font-medium text-zinc-300">Wrong if:</span> {pick.invalidationPoint}
       </div>
     </div>
   );

@@ -229,6 +229,11 @@ export async function pollJobUntilDone(
   return null;
 }
 
+/** Route all job triggers through the universal /api/jobs/trigger endpoint. */
+async function triggerJob(jobName: string): Promise<JobAcceptedResponse> {
+  return postJson<JobAcceptedResponse>('/api/jobs/trigger', { job: jobName });
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: 'no-store' });
   const data = await res.json();
@@ -244,17 +249,17 @@ export const dynamicPickOrchestrator = {
    * pollJobUntilDone('run-dynamic-morning-picks') to wait for the result.
    */
   runDynamicMorningPicks(): Promise<JobAcceptedResponse> {
-    return postJson<JobAcceptedResponse>('/api/jobs/run-dynamic-morning-picks');
+    return triggerJob('run-dynamic-morning-picks');
   },
 
   /** Fire EOD evaluation (stock + options). Poll for result. */
   runDynamicEodReview(): Promise<JobAcceptedResponse> {
-    return postJson<JobAcceptedResponse>('/api/jobs/run-dynamic-eod-review');
+    return triggerJob('run-dynamic-eod-review');
   },
 
   /** Fire learning update (signal accuracy + weights + insights). Poll for result. */
   runDynamicLearningUpdate(): Promise<JobAcceptedResponse> {
-    return postJson<JobAcceptedResponse>('/api/jobs/run-dynamic-learning-update');
+    return triggerJob('run-dynamic-learning-update');
   },
 
   // Read helpers used by /stock-lab and /dashboard.

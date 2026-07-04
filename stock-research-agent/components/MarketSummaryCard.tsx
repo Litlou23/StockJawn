@@ -24,17 +24,17 @@ export default function MarketSummaryCard({
       {marketContext && (
         <div className="mt-3 grid grid-cols-3 gap-2">
           <div className="rounded-lg border border-zinc-800 p-2 text-center">
-            <div className="text-[10px] text-zinc-500">Bias</div>
+            <div className="text-[10px] text-zinc-500">Direction</div>
             <div className={`mt-0.5 inline-block rounded-full px-1.5 py-0.5 text-xs font-semibold ${biasStyles[marketContext.marketBias]}`}>
-              {marketContext.marketBias}
+              {marketContext.marketBias === 'bullish' ? 'Up' : marketContext.marketBias === 'bearish' ? 'Down' : 'Flat'}
             </div>
           </div>
           <div className="rounded-lg border border-zinc-800 p-2 text-center">
-            <div className="text-[10px] text-zinc-500">Volatility</div>
+            <div className="text-[10px] text-zinc-500">Price Swings</div>
             <div className="mt-0.5 text-xs font-semibold text-zinc-200">{marketContext.volatilityRegime}</div>
           </div>
           <div className="rounded-lg border border-zinc-800 p-2 text-center">
-            <div className="text-[10px] text-zinc-500">VIX</div>
+            <div className="text-[10px] text-zinc-500">Fear Index</div>
             <div className="mt-0.5 text-xs font-semibold text-zinc-200">{marketContext.vixLevel.toFixed(1)}</div>
           </div>
         </div>

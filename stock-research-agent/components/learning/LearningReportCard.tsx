@@ -4,9 +4,10 @@ export default function LearningReportCard({ report }: { report: LearningReport 
   if (!report) {
     return (
       <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-        <h2 className="text-sm font-semibold text-zinc-100">Latest learning report</h2>
+        <h2 className="text-sm font-semibold text-zinc-100">Learning Report</h2>
         <p className="mt-2 text-xs text-zinc-500">
-          No report yet. POST /api/jobs/analyze-learning to generate one from saved picks, theses, outcomes, and feedback.
+          No report yet. Run a Morning Scan from the dashboard, then an End of Day Check —
+          once the system has some results to review, it will generate a report here.
         </p>
       </div>
     );
@@ -15,14 +16,14 @@ export default function LearningReportCard({ report }: { report: LearningReport 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-100">Latest learning report</h2>
-        <span className="text-[11px] text-zinc-500">{report.reportDate} · sample size {report.sampleSize}</span>
+        <h2 className="text-sm font-semibold text-zinc-100">Learning Report</h2>
+        <span className="text-[11px] text-zinc-500">{report.reportDate} · based on {report.sampleSize} predictions</span>
       </div>
       <p className="mt-2 text-sm text-zinc-300">{report.summary}</p>
 
       {report.bestSignals.length > 0 && (
         <div className="mt-3">
-          <h3 className="text-xs font-semibold text-green-400">Best performing</h3>
+          <h3 className="text-xs font-semibold text-green-400">Best Performing Signals</h3>
           <ul className="mt-1 list-inside list-disc text-xs text-zinc-400">
             {report.bestSignals.map((s) => (
               <li key={s.signalName}>
@@ -35,7 +36,7 @@ export default function LearningReportCard({ report }: { report: LearningReport 
 
       {report.worstSignals.length > 0 && (
         <div className="mt-3">
-          <h3 className="text-xs font-semibold text-red-400">Worst performing</h3>
+          <h3 className="text-xs font-semibold text-red-400">Worst Performing Signals</h3>
           <ul className="mt-1 list-inside list-disc text-xs text-zinc-400">
             {report.worstSignals.map((s) => (
               <li key={s.signalName}>
@@ -48,7 +49,7 @@ export default function LearningReportCard({ report }: { report: LearningReport 
 
       {report.overconfidenceWarnings.length > 0 && (
         <div className="mt-3">
-          <h3 className="text-xs font-semibold text-yellow-400">Overconfidence warnings</h3>
+          <h3 className="text-xs font-semibold text-yellow-400">Times the System Was Too Confident</h3>
           <ul className="mt-1 list-inside list-disc text-xs text-zinc-400">
             {report.overconfidenceWarnings.map((w, i) => (
               <li key={i}>{w}</li>
@@ -59,7 +60,7 @@ export default function LearningReportCard({ report }: { report: LearningReport 
 
       {report.missingDataPatterns.length > 0 && (
         <div className="mt-3">
-          <h3 className="text-xs font-semibold text-zinc-300">Missing data patterns</h3>
+          <h3 className="text-xs font-semibold text-zinc-300">Data Gaps</h3>
           <ul className="mt-1 list-inside list-disc text-xs text-zinc-500">
             {report.missingDataPatterns.map((w, i) => (
               <li key={i}>{w}</li>
@@ -70,7 +71,7 @@ export default function LearningReportCard({ report }: { report: LearningReport 
 
       {report.suggestedWeightChanges.length > 0 && (
         <div className="mt-3">
-          <h3 className="text-xs font-semibold text-violet-400">Suggested weight changes (not applied)</h3>
+          <h3 className="text-xs font-semibold text-violet-400">Suggested Improvements (not applied yet)</h3>
           <ul className="mt-1 space-y-1 text-xs text-zinc-400">
             {report.suggestedWeightChanges.map((c, i) => (
               <li key={i}>
@@ -80,7 +81,7 @@ export default function LearningReportCard({ report }: { report: LearningReport 
             ))}
           </ul>
           <p className="mt-2 text-[10px] text-zinc-600">
-            These are suggestions only. Nothing here changes signal_weights automatically — review and apply manually if you agree.
+            These are suggestions only — the system never changes its own settings automatically.
           </p>
         </div>
       )}

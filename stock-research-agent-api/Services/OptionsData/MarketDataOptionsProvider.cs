@@ -151,23 +151,23 @@ public class MarketDataOptionsProvider
                 Strike = SafeGet(api.Strike, i, 0.0),
                 Dte = SafeGet(api.Dte, i, 0),
                 Updated = DateTimeOffset.FromUnixTimeSeconds(SafeGet(api.Updated, i, 0L)),
-                Bid = SafeGet(api.Bid, i, 0.0),
-                BidSize = SafeGet(api.BidSize, i, 0),
-                Mid = SafeGet(api.Mid, i, 0.0),
-                Ask = SafeGet(api.Ask, i, 0.0),
-                AskSize = SafeGet(api.AskSize, i, 0),
-                Last = SafeGet(api.Last, i, 0.0),
-                OpenInterest = SafeGet(api.OpenInterest, i, 0),
-                Volume = SafeGet(api.Volume, i, 0),
-                InTheMoney = SafeGet(api.InTheMoney, i, false),
-                IntrinsicValue = SafeGet(api.IntrinsicValue, i, 0.0),
-                ExtrinsicValue = SafeGet(api.ExtrinsicValue, i, 0.0),
-                UnderlyingPrice = SafeGet(api.UnderlyingPrice, i, 0.0),
-                Iv = SafeGet(api.Iv, i, 0.0),
-                Delta = SafeGet(api.Delta, i, 0.0),
-                Gamma = SafeGet(api.Gamma, i, 0.0),
-                Theta = SafeGet(api.Theta, i, 0.0),
-                Vega = SafeGet(api.Vega, i, 0.0),
+                Bid = NullSafeGet(api.Bid, i, 0.0),
+                BidSize = NullSafeGet(api.BidSize, i, 0),
+                Mid = NullSafeGet(api.Mid, i, 0.0),
+                Ask = NullSafeGet(api.Ask, i, 0.0),
+                AskSize = NullSafeGet(api.AskSize, i, 0),
+                Last = NullSafeGet(api.Last, i, 0.0),
+                OpenInterest = NullSafeGet(api.OpenInterest, i, 0),
+                Volume = NullSafeGet(api.Volume, i, 0),
+                InTheMoney = NullSafeGet(api.InTheMoney, i, false),
+                IntrinsicValue = NullSafeGet(api.IntrinsicValue, i, 0.0),
+                ExtrinsicValue = NullSafeGet(api.ExtrinsicValue, i, 0.0),
+                UnderlyingPrice = NullSafeGet(api.UnderlyingPrice, i, 0.0),
+                Iv = NullSafeGet(api.Iv, i, 0.0),
+                Delta = NullSafeGet(api.Delta, i, 0.0),
+                Gamma = NullSafeGet(api.Gamma, i, 0.0),
+                Theta = NullSafeGet(api.Theta, i, 0.0),
+                Vega = NullSafeGet(api.Vega, i, 0.0),
             });
         }
 
@@ -176,6 +176,10 @@ public class MarketDataOptionsProvider
 
     private static T SafeGet<T>(T[]? arr, int idx, T fallback) =>
         arr is not null && idx < arr.Length ? arr[idx] : fallback;
+
+    /// <summary>Unwrap nullable arrays — MarketData.app returns null for missing values.</summary>
+    private static T NullSafeGet<T>(T?[]? arr, int idx, T fallback) where T : struct =>
+        arr is not null && idx < arr.Length ? arr[idx] ?? fallback : fallback;
 
     // -----------------------------------------------------------------------
     // Stock Quote — GET /v1/stocks/quotes/{symbol}/

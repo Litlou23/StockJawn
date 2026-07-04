@@ -139,25 +139,26 @@ function verdictBadge(correct: boolean | null) {
 
 function confidenceBar(score: number) {
   const color = score >= 70 ? 'bg-green-500' : score >= 40 ? 'bg-yellow-500' : 'bg-red-500';
+  const label = score >= 70 ? 'Strong signals' : score >= 40 ? 'Mixed signals' : 'Weak signals';
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-2" title={`Signal strength: ${score}/100 — ${label}. This is NOT accuracy or probability.`}>
       <div className="h-2 w-20 overflow-hidden rounded-full bg-zinc-800">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${score}%` }} />
       </div>
-      <span className="text-xs text-zinc-400">{score}%</span>
+      <span className="text-xs text-zinc-400">{score}/100</span>
     </div>
   );
 }
 
 function scanReasonLabel(type: string): string {
   switch (type) {
-    case 'neutral_no_edge': return 'No clear edge — signals too weak to act on';
-    case 'neutral_range_bound': return 'Conflicting signals — range-bound, no directional bias';
-    case 'neutral_high_volatility': return 'Elevated volatility — too risky for a directional bet';
-    case 'watch_only': return 'Score too low — watching only, no position warranted';
-    case 'rejected': return 'Rejected — did not pass minimum criteria';
-    case 'unavailable': return 'Data unavailable — could not evaluate';
-    default: return 'No trade taken';
+    case 'neutral_no_edge': return 'No clear signal — couldn\'t tell which way the stock would go';
+    case 'neutral_range_bound': return 'Mixed signals — stock seems stuck, no clear direction';
+    case 'neutral_high_volatility': return 'Too much price movement — too unpredictable to call';
+    case 'watch_only': return 'Signs too weak — just watching for now';
+    case 'rejected': return 'Didn\'t meet the minimum requirements';
+    case 'unavailable': return 'Data not available — couldn\'t check this one';
+    default: return 'Passed on this one';
   }
 }
 
@@ -199,18 +200,18 @@ type FilterTab = 'all' | 'correct' | 'wrong' | 'pending';
 
 type SortKey = 'confidence_desc' | 'confidence_asc' | 'newest' | 'oldest' | 'ticker';
 const SORT_LABELS: Record<SortKey, string> = {
-  confidence_desc: 'Confidence (high → low)',
-  confidence_asc: 'Confidence (low → high)',
+  confidence_desc: 'Signal Strength (high → low)',
+  confidence_asc: 'Signal Strength (low → high)',
   newest: 'Newest first',
   oldest: 'Oldest first',
   ticker: 'Ticker (A → Z)',
 };
 
 const CATEGORY_LABELS: Record<CategoryTab, string> = {
-  stock_picks: 'Stock Picks',
+  stock_picks: 'Predictions',
   long_term: 'Long-Term',
   options: 'Options',
-  scan_results: 'Scan Results',
+  scan_results: 'Passed On',
 };
 
 const CATEGORY_API_MAP: Record<CategoryTab, string> = {
@@ -403,33 +404,33 @@ export default function PredictionsPage() {
         </div>
 
         <InfoBanner items={[
-          { term: 'Stock Picks', definition: 'Short-term bullish/bearish predictions (intraday to 1 week). Measured for directional accuracy.' },
-          { term: 'Long-Term', definition: 'Bullish/bearish predictions with 1 month+ time windows. Evaluated on a longer timeline.' },
-          { term: 'Options', definition: 'Paper call/put trades auto-generated from qualifying directional stock picks (confidence >= 40). Uses real option chain data.' },
-          { term: 'Scan Results', definition: 'Tickers where the system decided NOT to trade. Not counted in accuracy stats.' },
-          { term: 'Confidence', definition: 'System confidence in the prediction (0-100). Based on signal strength, catalyst presence, and data quality.' },
-          { term: 'Risk', definition: 'Trade risk level (0-100). Factors in volatility, conflicting signals, and sector risk. Lower = safer.' },
-          { term: 'Entry Price', definition: 'Real market price at the time the prediction was made. Used as the baseline for evaluating outcomes.' },
-          { term: 'Projected Zone', definition: 'ATR-based projected price range. The stock is expected to move within this zone during the time window. Computed from ATR14 × timeframe multiplier × signal modifier. NOT a guarantee.' },
-          { term: 'ATR', definition: 'Average True Range (14-period). Measures how much the stock typically moves per day. Higher ATR = more volatile.' },
-          { term: 'Predicted Price', definition: 'The midpoint estimate within the projected zone (60% of expected move from entry). A point estimate within the range.' },
-          { term: 'Risk/Reward (R:R)', definition: 'Ratio of potential reward (entry to target) vs. risk (entry to stop). Minimum 1.5 required — below this, the pick is downgraded to watch_only.' },
-          { term: 'Price Accuracy', definition: 'How close the predicted price was to the actual close. 100% = perfect prediction. Calculated as 100 minus the % error relative to entry price.' },
-          { term: 'Target Price', definition: 'Profit-taking level. Set to min(ATR-based target, nearest resistance) for bullish, max(ATR-based target, nearest support) for bearish.' },
-          { term: 'Stop Price', definition: 'Risk management level. Set using ATR-based placement with support/resistance as guardrails.' },
-          { term: 'Invalidation Price', definition: 'The price level at which the entire thesis breaks down (1.5× ATR from entry). More severe than the stop.' },
-          { term: 'Target HIT', definition: 'The stock reached the target price during the evaluation window (based on high/low of day).' },
-          { term: 'Stop TRIGGERED', definition: 'The stock hit the stop price during the evaluation window, meaning the trade thesis broke down.' },
-          { term: 'Max Favorable', definition: 'The best the stock moved in the predicted direction during the evaluation window. Shows how much profit was possible.' },
-          { term: 'Max Adverse', definition: 'The worst the stock moved against the prediction during the evaluation window. Shows drawdown risk.' },
-          { term: 'Invalidation', definition: 'The condition that would prove the prediction wrong. If triggered, the pick is marked incorrect.' },
-          { term: 'Evaluated', definition: 'Predictions that have been checked against real market outcomes (EOD review ran).' },
-          { term: 'Pending', definition: 'Predictions still open — not enough time has passed or EOD review hasn\'t run yet.' },
-          { term: 'Move %', definition: 'How much the stock actually moved from the entry price. Positive = up, negative = down.' },
-          { term: 'Win Rate (Options)', definition: 'Percentage of evaluated paper option trades that would have been profitable.' },
-          { term: 'P&L %', definition: 'Simulated profit/loss on the option contract based on entry vs current mid price.' },
-          { term: 'IV Change', definition: 'Change in implied volatility since the option was paper-traded. Affects option price independent of stock direction.' },
-          { term: 'DTE', definition: 'Days to expiration — how many days until the option contract expires.' },
+          { term: 'Predictions', definition: 'Short-term predictions about whether a stock will go up or down (today to 1 week). Checked for accuracy.' },
+          { term: 'Long-Term', definition: 'Predictions for a month or more out. Checked on a longer timeline.' },
+          { term: 'Options', definition: 'Practice option trades created from strong predictions. Uses real option prices but no real money.' },
+          { term: 'Passed On', definition: 'Stocks the system looked at but decided not to predict. Not counted in accuracy.' },
+          { term: 'Signal Strength', definition: 'How many signals lined up in the same direction (0-100). Higher = more signals agree. This is NOT accuracy — it does not mean the prediction is that likely to be right.' },
+          { term: 'Risk', definition: 'How risky it would be to act on this (0-100). Lower = safer.' },
+          { term: 'Starting Price', definition: 'The real stock price when the prediction was made. Used to check if the prediction was right.' },
+          { term: 'Expected Range', definition: 'The price range the system expects the stock to stay within. Not a guarantee, just an estimate.' },
+          { term: 'Daily Movement', definition: 'How much the stock typically moves per day. Bigger number = more volatile (bigger price swings).' },
+          { term: 'Predicted Price', definition: 'The system\'s best guess for where the price will end up.' },
+          { term: 'Risk/Reward', definition: 'How much you could gain vs. how much you could lose. Higher is better — 2.0 means you could gain $2 for every $1 risked.' },
+          { term: 'Price Accuracy', definition: 'How close the predicted price was to reality. 100% = perfect prediction.' },
+          { term: 'Goal Price', definition: 'The price where you would take profits. If the stock reaches this, the prediction is a success.' },
+          { term: 'Exit Price', definition: 'The price where you would exit to limit losses. A safety net.' },
+          { term: 'Breakdown Price', definition: 'The price where the entire prediction falls apart. Worse than the exit price.' },
+          { term: 'Reached Goal', definition: 'The stock hit the goal price — the prediction worked!' },
+          { term: 'Hit Safety Exit', definition: 'The stock fell to the exit price, meaning the prediction was wrong.' },
+          { term: 'Best Move', definition: 'The most the stock moved in the right direction. Shows how much profit was possible.' },
+          { term: 'Worst Move', definition: 'The most the stock moved against the prediction. Shows how bad it got.' },
+          { term: 'Invalidation', definition: 'The condition that would prove the prediction wrong.' },
+          { term: 'Evaluated', definition: 'Predictions that have been checked against what actually happened.' },
+          { term: 'Pending', definition: 'Predictions still waiting — not enough time has passed to check yet.' },
+          { term: 'Move %', definition: 'How much the stock actually moved. Positive = went up, negative = went down.' },
+          { term: 'Win Rate (Options)', definition: 'How often the practice option trades would have made money.' },
+          { term: 'P&L %', definition: 'Simulated profit or loss on the option trade.' },
+          { term: 'Price Swing Change', definition: 'How the expected price swings changed since the trade was placed. Affects option prices.' },
+          { term: 'Days Left', definition: 'How many days until the option contract expires.' },
         ]} />
 
         {/* Category tabs */}
@@ -515,7 +516,7 @@ export default function PredictionsPage() {
               </div>
               <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-center">
                 <div className="text-xl font-bold text-yellow-400">{items.filter(i => i.prediction.predictionType === 'watch_only').length}</div>
-                <div className="text-[10px] text-zinc-500">Watch Only</div>
+                <div className="text-[10px] text-zinc-500">Just Watching</div>
               </div>
             </div>
           ) : (
@@ -566,7 +567,7 @@ export default function PredictionsPage() {
               ))}
             </div>
 
-            {/* Sort — orders by that confidence bar. */}
+            {/* Sort — orders by signal strength bar. */}
             <label className="flex items-center gap-2 text-[11px] text-zinc-500">
               Sort:
               <select
@@ -801,15 +802,15 @@ export default function PredictionsPage() {
                     <div className="border-t border-zinc-800 px-4 py-4 text-xs">
                       <div className="mb-4 flex flex-wrap gap-4 text-[11px]">
                         <div>
-                          <span className="text-zinc-600">Confidence: </span>
-                          <span className="font-medium text-zinc-300">{p.confidenceScore}</span>
+                          <span className="text-zinc-600">Signal Strength: </span>
+                          <span className="font-medium text-zinc-300">{p.confidenceScore}/100</span>
                         </div>
                         <div>
                           <span className="text-zinc-600">Risk: </span>
                           <span className="font-medium text-zinc-300">{p.riskScore}</span>
                         </div>
                         <div>
-                          <span className="text-zinc-600">Importance: </span>
+                          <span className="text-zinc-600">Significance: </span>
                           <span className="font-medium text-zinc-300">{p.importanceScore}</span>
                         </div>
                         {p.entryReferencePrice != null && (
@@ -820,13 +821,13 @@ export default function PredictionsPage() {
                         )}
                         {p.targetPrice != null && (
                           <div>
-                            <span className="text-zinc-600">Target: </span>
+                            <span className="text-zinc-600">Goal: </span>
                             <span className="font-medium text-green-400">${p.targetPrice.toFixed(2)}</span>
                           </div>
                         )}
                         {p.stopPrice != null && (
                           <div>
-                            <span className="text-zinc-600">Stop: </span>
+                            <span className="text-zinc-600">Exit At: </span>
                             <span className="font-medium text-red-400">${p.stopPrice.toFixed(2)}</span>
                           </div>
                         )}
@@ -834,13 +835,13 @@ export default function PredictionsPage() {
 
                       {p.bullishCase && (
                         <div className="mb-3 rounded-lg border border-green-500/10 bg-green-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-green-400">Bull Case</div>
+                          <div className="mb-1 text-[10px] font-semibold text-green-400">Why It Might Go Up</div>
                           <p className="leading-relaxed text-zinc-300">{p.bullishCase}</p>
                         </div>
                       )}
                       {p.bearishCase && (
                         <div className="mb-3 rounded-lg border border-red-500/10 bg-red-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-red-400">Bear Case</div>
+                          <div className="mb-1 text-[10px] font-semibold text-red-400">Why It Might Go Down</div>
                           <p className="leading-relaxed text-zinc-300">{p.bearishCase}</p>
                         </div>
                       )}
@@ -939,11 +940,11 @@ export default function PredictionsPage() {
                       <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Prediction Details</h3>
                       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                         <div className="rounded-lg border border-green-500/10 bg-green-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-green-400">Bull Case</div>
+                          <div className="mb-1 text-[10px] font-semibold text-green-400">Why It Might Go Up</div>
                           <p className="leading-relaxed text-zinc-300">{p.bullishCase || '—'}</p>
                         </div>
                         <div className="rounded-lg border border-red-500/10 bg-red-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-red-400">Bear Case</div>
+                          <div className="mb-1 text-[10px] font-semibold text-red-400">Why It Might Go Down</div>
                           <p className="leading-relaxed text-zinc-300">{p.bearishCase || '—'}</p>
                         </div>
                       </div>
@@ -951,20 +952,20 @@ export default function PredictionsPage() {
 
                     <div className="mb-4 flex flex-wrap gap-4 text-[11px]">
                       <div>
-                        <span className="text-zinc-600">Confidence: </span>
-                        <span className="font-medium text-zinc-300">{p.confidenceScore}</span>
+                        <span className="text-zinc-600">Signal Strength: </span>
+                        <span className="font-medium text-zinc-300">{p.confidenceScore}/100</span>
                       </div>
                       <div>
                         <span className="text-zinc-600">Risk: </span>
-                        <span className="font-medium text-zinc-300">{p.riskScore}</span>
+                        <span className="font-medium text-zinc-300">{p.riskScore}/100</span>
                       </div>
                       <div>
-                        <span className="text-zinc-600">Importance: </span>
-                        <span className="font-medium text-zinc-300">{p.importanceScore}</span>
+                        <span className="text-zinc-600">Significance: </span>
+                        <span className="font-medium text-zinc-300">{p.importanceScore}/100</span>
                       </div>
                       {p.entryReferencePrice != null && (
                         <div>
-                          <span className="text-zinc-600">Entry: </span>
+                          <span className="text-zinc-600">Starting Price: </span>
                           <span className="font-medium text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span>
                         </div>
                       )}
@@ -996,7 +997,7 @@ export default function PredictionsPage() {
                             <div className="absolute bottom-0.5 text-[9px] text-zinc-600" style={{ left: `${zoneLowPct + zoneWidthPct}%`, transform: 'translateX(-100%)' }}>${high.toFixed(0)}</div>
                           </div>
                           <div className="mt-1 flex items-center justify-between text-[10px]">
-                            <span className="text-zinc-600">Entry</span>
+                            <span className="text-zinc-600">Start</span>
                             <span className="font-medium text-violet-400">
                               Predicted {p.predictedMovePercent != null
                                 ? `${p.predictedMovePercent > 0 ? '+' : ''}${p.predictedMovePercent.toFixed(1)}%`
@@ -1006,16 +1007,16 @@ export default function PredictionsPage() {
                           </div>
                           <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
                             {p.targetPrice != null && (
-                              <span className="text-zinc-500">Target: <span className="font-medium text-green-400">${p.targetPrice.toFixed(2)}</span></span>
+                              <span className="text-zinc-500">Goal: <span className="font-medium text-green-400">${p.targetPrice.toFixed(2)}</span></span>
                             )}
                             {p.stopPrice != null && (
-                              <span className="text-zinc-500">Stop: <span className="font-medium text-red-400">${p.stopPrice.toFixed(2)}</span></span>
+                              <span className="text-zinc-500">Exit At: <span className="font-medium text-red-400">${p.stopPrice.toFixed(2)}</span></span>
                             )}
                             {p.riskRewardRatio != null && (
-                              <span className="text-zinc-500">R:R: <span className={`font-medium ${p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}`}>{p.riskRewardRatio.toFixed(1)}</span></span>
+                              <span className="text-zinc-500">Risk/Reward: <span className={`font-medium ${p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}`}>{p.riskRewardRatio.toFixed(1)}</span></span>
                             )}
                             {p.invalidationPrice != null && (
-                              <span className="text-zinc-500">Invalidation: <span className="font-medium text-orange-400">${p.invalidationPrice.toFixed(2)}</span></span>
+                              <span className="text-zinc-500">Breakdown: <span className="font-medium text-orange-400">${p.invalidationPrice.toFixed(2)}</span></span>
                             )}
                           </div>
                         </div>
@@ -1094,17 +1095,17 @@ export default function PredictionsPage() {
                         <div className="mt-2 flex flex-wrap gap-3 text-[10px]">
                           {o.targetHit != null && (
                             <span className="text-zinc-500">
-                              Target: <span className={o.targetHit ? 'font-bold text-green-400' : 'text-zinc-400'}>{o.targetHit ? 'HIT' : 'Not reached'}</span>
+                              Goal: <span className={o.targetHit ? 'font-bold text-green-400' : 'text-zinc-400'}>{o.targetHit ? 'Reached!' : 'Not reached'}</span>
                             </span>
                           )}
                           {o.stopHit != null && (
                             <span className="text-zinc-500">
-                              Stop: <span className={o.stopHit ? 'font-bold text-red-400' : 'text-zinc-400'}>{o.stopHit ? 'TRIGGERED' : 'Held'}</span>
+                              Safety Exit: <span className={o.stopHit ? 'font-bold text-red-400' : 'text-zinc-400'}>{o.stopHit ? 'Hit' : 'Held'}</span>
                             </span>
                           )}
                           {o.invalidationHit != null && (
                             <span className="text-zinc-500">
-                              Invalidation: <span className={o.invalidationHit ? 'text-red-400' : 'text-green-400'}>{o.invalidationHit ? 'Yes' : 'No'}</span>
+                              Broke Down: <span className={o.invalidationHit ? 'text-red-400' : 'text-green-400'}>{o.invalidationHit ? 'Yes' : 'No'}</span>
                             </span>
                           )}
                           {o.maxFavorablePercent != null && (

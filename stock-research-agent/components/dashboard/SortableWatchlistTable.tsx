@@ -38,7 +38,7 @@ const COLS = [
   { label: 'Score', key: 'totalScore' },
   { label: 'Category', key: 'category' },
   { label: 'Confidence', key: 'dataConfidence' },
-  { label: 'Thesis', key: 'thesisSummary', hiddenOnMobile: true },
+  { label: 'Reasoning', key: 'thesisSummary', hiddenOnMobile: true },
 ];
 
 export default function SortableWatchlistTable({ items }: { items: WatchlistItem[] }) {

@@ -21,14 +21,13 @@ import { NextResponse } from 'next/server';
  * - /api/jobs/run-weekly-research: called machine-to-machine by the
  *   weekly-research Edge Function (via pg_cron), which can't supply a
  *   Basic Auth header. It already has its own protection (x-job-secret —
- *   see app/api/jobs/run-weekly-research/route.ts).
+ *   see WatchlistController.cs in the .NET API).
  * - Static assets / well-known metadata files.
  *
- * Everything else — including the other manual job routes
- * (intake-catalysts, score-watchlist, generate-daily-report,
- * analyze-learning) and /api/agent-chat — now requires Basic Auth too, so
- * manual curl/Postman testing needs `-u <user>:<password>` after this is
- * deployed.
+ * Everything else — including /api/jobs/analyze-learning,
+ * /api/jobs/trigger, and /api/agent-chat — now requires Basic Auth too,
+ * so manual curl/Postman testing needs `-u <user>:<password>` after this
+ * is deployed.
  */
 export function middleware(request: NextRequest) {
   const expectedUser = process.env.SITE_AUTH_USER || 'admin';

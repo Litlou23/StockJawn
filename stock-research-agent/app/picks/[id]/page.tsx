@@ -40,7 +40,7 @@ export default async function PickDetailPage({ params }: { params: Promise<{ id:
         <div className="flex flex-wrap items-center gap-2">
           <RiskBadge level={pick.riskLevel} />
           <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300">
-            {pick.convictionLevel === 'higher_conviction' ? 'Higher conviction' : 'Watchlist-only'}
+            {pick.convictionLevel === 'higher_conviction' ? 'Strong signal' : 'Watch only'}
           </span>
           <span className="text-xs text-zinc-500">
             Picked {pick.datePicked} at ${pick.priceAtPick.toFixed(2)}
@@ -60,7 +60,7 @@ export default async function PickDetailPage({ params }: { params: Promise<{ id:
               <div className="text-sm font-semibold text-zinc-100">{pick.scoreBreakdown.optionsScore ?? '—'}</div>
             </div>
             <div className="rounded-lg border border-zinc-800 p-2 text-center">
-              <div className="text-xs text-zinc-500">Risk penalty</div>
+              <div className="text-xs text-zinc-500">Risk points lost</div>
               <div className="text-sm font-semibold text-zinc-100">{pick.scoreBreakdown.riskScore}</div>
             </div>
           </div>
@@ -92,22 +92,22 @@ export default async function PickDetailPage({ params }: { params: Promise<{ id:
         )}
 
         <section>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Bearish Counterpoint</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">What Could Go Wrong</h2>
           <p className="mt-1 text-sm text-zinc-300">{pick.bearishCounterpoint}</p>
         </section>
 
         <section>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Invalidation Point</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Wrong If</h2>
           <p className="mt-1 text-sm text-zinc-300">{pick.invalidationPoint}</p>
         </section>
 
         <section>
-          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">Suggested Research Action</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-500">What To Look Into</h2>
           <p className="mt-1 text-sm text-zinc-300">{pick.suggestedResearchAction}</p>
         </section>
 
         <section>
-          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">Tracking</h2>
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500">How It's Doing</h2>
           <ResultSnapshot result={result} />
         </section>
       </div>
