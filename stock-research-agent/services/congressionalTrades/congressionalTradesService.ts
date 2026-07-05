@@ -21,12 +21,14 @@ import { fetchSenatePtrFilings, fetchSenatePtrTrades } from './senateDisclosureP
 import { parsePtrText } from './ptrParser';
 import type { CongressionalTrade, CongressionalTradesResult } from './congressionalTrades.types';
 
-const MAX_FILINGS = 15;
+const MAX_FILINGS = 8;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
-let cache: { result: CongressionalTradesResult; expiresAt: number } | null = null;
+export type ChamberSelector = 'house' | 'senate' | 'all';
 
-async function generateInsight(trades: CongressionalTrade[]): Promise<string | null> {
+const cache = new Map<ChamberSelector, { result: CongressionalTradesResult; expiresAt: number }>();
+
+export async function generateInsight(trades: CongressionalTrade[]): Promise<string | null> {
   if (!process.env.AGENT_API_BASE_URL || trades.length === 0) return null;
 
   const compact = trades.map((t) => ({
@@ -166,9 +168,20 @@ async function collectSenateTrades(): Promise<ChamberResult> {
   return { trades, skippedFilings, filingsChecked: filings.length };
 }
 
-export async function getCongressionalTrades(forceRefresh = false): Promise<CongressionalTradesResult> {
-  if (!forceRefresh && cache && Date.now() < cache.expiresAt) {
-    return { ...cache.result, fromCache: true };
+/**
+ * Fetches trades for one chamber (or both). Prefer single-chamber calls in
+ * serverless environments — each one stays comfortably inside a 10s
+ * function window, where a combined run with the AI insight may not.
+ * The AI insight is only generated for 'all'; single-chamber callers get
+ * it separately via generateInsight().
+ */
+export async function getCongressionalTrades(
+  forceRefresh = false,
+  chamber: ChamberSelector = 'all',
+): Promise<CongressionalTradesResult> {
+  const cached = cache.get(chamber);
+  if (!forceRefresh && cached && Date.now() < cached.expiresAt) {
+    return { ...cached.result, fromCache: true };
   }
 
   const warnings: string[] = [];
@@ -178,12 +191,14 @@ export async function getCongressionalTrades(forceRefresh = false): Promise<Cong
 
   // Each chamber is fetched independently — one being down never hides
   // the other's data.
-  const [house, senate] = await Promise.allSettled([collectHouseTrades(warnings), collectSenateTrades()]);
+  const collectors: [string, Promise<ChamberResult>][] = [];
+  if (chamber !== 'senate') collectors.push(['House', collectHouseTrades(warnings)]);
+  if (chamber !== 'house') collectors.push(['Senate', collectSenateTrades()]);
 
-  for (const [label, outcome] of [
-    ['House', house],
-    ['Senate', senate],
-  ] as const) {
+  const outcomes = await Promise.allSettled(collectors.map(([, p]) => p));
+
+  outcomes.forEach((outcome, i) => {
+    const label = collectors[i][0];
     if (outcome.status === 'fulfilled') {
       trades.push(...outcome.value.trades);
       skippedFilings.push(...outcome.value.skippedFilings);
@@ -193,7 +208,7 @@ export async function getCongressionalTrades(forceRefresh = false): Promise<Cong
         `${label} filings unavailable: ${outcome.reason instanceof Error ? outcome.reason.message : 'fetch failed'}`,
       );
     }
-  }
+  });
 
   trades.sort((a, b) => b.transactionDate.localeCompare(a.transactionDate));
 
@@ -201,9 +216,12 @@ export async function getCongressionalTrades(forceRefresh = false): Promise<Cong
     warnings.push('No trades could be parsed from the most recent filings.');
   }
 
-  const aiInsight = await generateInsight(trades);
-  if (aiInsight === null && trades.length > 0) {
-    warnings.push('AI insight unavailable (AGENT_API_BASE_URL not configured or AI backend unreachable).');
+  let aiInsight: string | null = null;
+  if (chamber === 'all') {
+    aiInsight = await generateInsight(trades);
+    if (aiInsight === null && trades.length > 0) {
+      warnings.push('AI insight unavailable (AGENT_API_BASE_URL not configured or AI backend unreachable).');
+    }
   }
 
   const result: CongressionalTradesResult = {
@@ -216,6 +234,6 @@ export async function getCongressionalTrades(forceRefresh = false): Promise<Cong
     fromCache: false,
   };
 
-  cache = { result, expiresAt: Date.now() + CACHE_TTL_MS };
+  cache.set(chamber, { result, expiresAt: Date.now() + CACHE_TTL_MS });
   return result;
 }

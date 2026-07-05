@@ -33,17 +33,83 @@ export default function CongressTradesPage() {
   const [error, setError] = useState<string | null>(null);
   const [tickerFilter, setTickerFilter] = useState('');
 
+  // Parses a response defensively: serverless platforms return HTML error
+  // pages on timeouts, which would otherwise crash res.json().
+  const readJson = async (res: Response) => {
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`HTTP ${res.status} — server returned a non-JSON response (likely a function timeout)`);
+    }
+  };
+
   const load = async (refresh = false) => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/congressional-trades${refresh ? '?refresh=1' : ''}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setResult(data);
+      // Each chamber is a separate request so both fit inside serverless
+      // time limits; either can fail without hiding the other.
+      const qs = refresh ? '&refresh=1' : '';
+      const [houseRes, senateRes] = await Promise.allSettled(
+        (['house', 'senate'] as const).map(async (chamber) => {
+          const res = await fetch(`/api/congressional-trades?chamber=${chamber}${qs}`);
+          const data = await readJson(res);
+          if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+          return data as CongressionalTradesResult;
+        }),
+      );
+
+      const merged: CongressionalTradesResult = {
+        trades: [],
+        skippedFilings: [],
+        aiInsight: null,
+        warnings: [],
+        filingsChecked: 0,
+        generatedAt: new Date().toISOString(),
+        fromCache: false,
+      };
+
+      ([['House', houseRes], ['Senate', senateRes]] as const).forEach(([label, r]) => {
+        if (r.status === 'fulfilled') {
+          merged.trades.push(...r.value.trades);
+          merged.skippedFilings.push(...r.value.skippedFilings);
+          merged.warnings.push(...r.value.warnings);
+          merged.filingsChecked += r.value.filingsChecked;
+          merged.fromCache = merged.fromCache || r.value.fromCache;
+        } else {
+          merged.warnings.push(
+            `${label} filings unavailable: ${r.reason instanceof Error ? r.reason.message : 'fetch failed'}`,
+          );
+        }
+      });
+
+      if (houseRes.status === 'rejected' && senateRes.status === 'rejected') {
+        throw new Error(merged.warnings.join(' · '));
+      }
+
+      merged.trades.sort((a, b) => b.transactionDate.localeCompare(a.transactionDate));
+      setResult(merged);
+      setLoading(false);
+
+      // AI insight arrives as a follow-up so the trades render immediately.
+      if (merged.trades.length > 0) {
+        try {
+          const res = await fetch('/api/congressional-trades/insight', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trades: merged.trades }),
+          });
+          const data = await readJson(res);
+          if (res.ok && data.aiInsight) {
+            setResult((prev) => (prev ? { ...prev, aiInsight: data.aiInsight } : prev));
+          }
+        } catch {
+          // Insight is optional — the trades are already on screen.
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load trades');
-    } finally {
       setLoading(false);
     }
   };

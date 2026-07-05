@@ -1,25 +1,30 @@
 /**
  * GET /api/congressional-trades
  *
- * Returns recently disclosed House stock trades parsed from public
- * Periodic Transaction Reports, plus an AI-generated insight when the AI
- * backend is configured.
+ * Returns recently disclosed congressional stock trades parsed from
+ * public Periodic Transaction Reports.
  *
  * Query params:
- *   ?refresh=1   (bypass the 6-hour server cache)
- *
- * A cold run downloads and parses ~15 PDFs from disclosures-clerk.house.gov
- * and can take 15-30 seconds; cached responses are instant.
+ *   ?chamber=house|senate|all  (default all; the UI requests each chamber
+ *                               separately so every call fits inside a
+ *                               serverless function's 10s time window)
+ *   ?refresh=1                 (bypass the 6-hour server cache)
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getCongressionalTrades } from '@/services/congressionalTrades/congressionalTradesService';
+import {
+  getCongressionalTrades,
+  type ChamberSelector,
+} from '@/services/congressionalTrades/congressionalTradesService';
 
 export async function GET(req: NextRequest) {
   const forceRefresh = req.nextUrl.searchParams.get('refresh') === '1';
+  const chamberParam = req.nextUrl.searchParams.get('chamber');
+  const chamber: ChamberSelector =
+    chamberParam === 'house' || chamberParam === 'senate' ? chamberParam : 'all';
 
   try {
-    const result = await getCongressionalTrades(forceRefresh);
+    const result = await getCongressionalTrades(forceRefresh, chamber);
     return NextResponse.json(result);
   } catch (err) {
     return NextResponse.json(
