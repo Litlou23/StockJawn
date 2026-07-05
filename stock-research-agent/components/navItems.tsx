@@ -79,6 +79,7 @@ export const navEntries: NavEntry[] = [
       { href: '/stock-lab', label: 'Practice Stocks' },
       { href: '/watchlist', label: 'Watchlist' },
       { href: '/predictions', label: 'Predictions' },
+      { href: '/congress-trades', label: 'Congress Trades' },
       { href: '/results', label: 'Results' },
       { href: '/history', label: 'History' },
     ],
