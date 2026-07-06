@@ -1,0 +1,429 @@
+STOCKJAWN — Current Architecture Documentation
+
+Purpose of this document: describe how the STOCKJAWN system works today, as built. This is a descriptive record for a technical reviewer, not a design proposal. No critique, redesign, or feature suggestions are included.
+
+Scope note on repos: the codebase is two applications in one workspace.
+- `stock-research-agent` — a Next.js 15 (App Router) frontend/BFF, deployed as the web app. Holds all pages and most `/api/*` proxy routes.
+- `stock-research-agent-api` — a .NET 9 Web API (`StockResearchAgent.Api`), deployed separately to Azure App Service. Holds the research engine, Supabase access, and the only OpenAI API key in the system.
+The Next.js app never talks to Supabase or OpenAI directly for the "dynamic" pipeline — it proxies to the .NET API over HTTP using `AGENT_API_BASE_URL`. A smaller set of legacy features in the Next.js app talk to Supabase directly with their own service-role client (`lib/supabase/serverClient.ts`).
+
+---
+
+## 1. High-Level Product Purpose
+
+STOCKJAWN is a personal, single-user stock and options research assistant. The root layout's own metadata describes it plainly: "Private personal stock research dashboard — not financial advice." There is no login system, no multi-tenant data model, and no brokerage connection anywhere in the code. It is built for one user (referred to in code comments as "Lou").
+
+The problem it solves: rather than the user manually tracking a watchlist, reading news, and guessing whether a setup is worth acting on, the system automatically (1) discovers candidate tickers from live financial news and earnings calendars, (2) maintains a small active watchlist by scoring and swapping candidates over time, (3) generates directional (bullish/bearish/neutral) predictions for each watchlist ticker using deterministic technical/catalyst scoring plus an AI-written explanation, (4) turns qualifying predictions into simulated ("paper") stock and options trades using real market prices, (5) checks those predictions and paper trades against what actually happened, and (6) feeds the results back into its own scoring weights so the system recalibrates itself over time. A separate, unrelated module surfaces recently disclosed U.S. congressional stock trades as a reference feed.
+
+The primary user is a single individual doing personal research and paper-trading experimentation — the system explicitly never executes real trades, never gives buy/sell instructions, and repeatedly labels itself as "Learning Mode / Paper Only / Not Actionable" in both UI copy and the AI system prompt.
+
+Typical user workflow:
+1. The user opens the app, which redirects `/` to `/chat` — a conversational assistant is the default landing experience.
+2. On the Dashboard, the user can manually trigger (or wait for the scheduled) "Morning Scan," "End of Day Check," "Learning Update," and "Weekly Research" jobs.
+3. Weekly Research discovers new candidate tickers from news/earnings and updates the active watchlist (add/keep/flag/swap/archive).
+4. Morning Scan generates predictions for every active watchlist ticker, wraps eligible ones as paper stock candidates, and where a real option chain and a qualifying score exist, creates a matching paper option candidate.
+5. Throughout the day (or next run), End of Day Check fetches live prices and scores outcomes for every open prediction and paper candidate.
+6. Learning Update aggregates those outcomes into per-signal accuracy stats and nudges the scoring weights used by the next Morning Scan.
+7. The user reviews outcomes on Predictions, Watchlist, Stock Lab, Results, and History pages, asks the AI chat assistant follow-up questions (which it answers only from live tool-call data), and separately can browse Congress Trades as an unrelated reference feed.
+
+---
+
+## 2. Application Architecture
+
+All pages are Next.js App Router routes under `stock-research-agent/app/`. All pages that show "system data" are wrapped in the shared `AppShell` component, which renders a left/side navigation (`Sidebar`/`MobileNav`, built from `components/navItems.tsx`) and the page content.
+
+Navigation is organized into 5 top-level groups (from `navItems.tsx`): Chat, Dashboard, Research (Stock Lab / Watchlist / Predictions / Congress Trades / Results / History), Options (Options Lookup / Options Simulator / Practice Options), and System (Learning / Connection Status / Settings). Two more pages (`/picks/[id]` and `/catalysts/[id]`) exist as detail views reached by links rather than nav entries, and `/demo` exists with no nav entry at all.
+
+### `/` (root)
+- Purpose: entry redirect only.
+- Route: `app/page.tsx`.
+- Behavior: immediately calls `redirect('/chat')`. No content of its own.
+
+### `/chat` — Chat (default landing page)
+- Purpose: conversational interface to the AI research assistant.
+- Route: `app/chat/page.tsx`.
+- Inputs: user's typed message; short client-side conversation history (last 8 turns) sent with each request.
+- Outputs: AI-generated JSON response rendered as a chat bubble (message text, data-confidence badge, suggested follow-up prompts, risk warnings, optional captured "thesis"); a right-hand panel shows `TopPicksPanel` and `MarketSummaryCard`, built server-side by `services/contextBuilder.ts` (`buildTodayMarketContext`).
+- User actions: send a message, click a suggested prompt.
+- Connections: posts to `POST /api/agent-chat`, which runs a tool-calling loop against the .NET `/api/chat-tools/*` endpoints (see §6). Every user and assistant message is saved to the `chat_messages` table for audit/learning purposes, but is never reloaded — each page load starts a fresh conversation by design (see comment in `app/chat/page.tsx`). Client-side, `services/agentChatService.ts`'s `sendAgentMessage()` calls that route and, only if the request throws or returns a non-OK status, falls back to a fully local, deterministic mock responder (`sendAgentMessageMock`) so the chat UI never hard-fails — the response in that fallback case is tagged `diagnostics.provider = 'client-fallback'` / `usedFallback: true` rather than being a live AI answer.
+
+### `/dashboard` — Dashboard
+- Purpose: single-screen overview of the whole system's current state.
+- Route: `app/dashboard/page.tsx` (server component, `dynamic = 'force-dynamic'`).
+- Inputs: none from the user; fetches `GET {AGENT_API_BASE_URL}/api/dashboard/summary` server-side at request time.
+- Outputs: watchlist counts (active / needs review / might replace), directional and long-term prediction accuracy stats, paper-option stats, "stocks passed on" (scan) stats, a live "Today's Picks" panel (`DynamicSummaryCards`, client-fetched from `/api/dashboard/dynamic-summary`), a news/catalyst intelligence section, a sortable watchlist table, recent watchlist change log, job status cards for Morning Scan / EOD / Learning, data-quality warnings, and a "what the system has learned" signal-performance table with recent insights.
+- User actions: click through to Predictions/Watchlist, trigger any of the four background jobs via `JobTriggerButtons`, click a canned chat prompt (routes to `/chat?q=...`).
+- Connections: reads from the .NET `/api/dashboard/summary` endpoint (legacy/combined stats) and `/api/dashboard/dynamic-summary` (the newer dynamic-orchestrator funnel stats from `DynamicPickOrchestrator.GetDashboardSummaryAsync`). Job triggers call `POST /api/jobs/trigger`, which proxies to the .NET job endpoints.
+
+### `/stock-lab` — Practice Stocks
+- Purpose: the primary working surface for the "dynamic" (current-generation) paper-stock pipeline — lets the user directly fire the three dynamic orchestrator jobs and see their output.
+- Route: `app/stock-lab/page.tsx` (client component).
+- Inputs: button clicks only (Generate / Evaluate / Learning Update).
+- Outputs: a table of `paper_stock_candidates`, a table of `paper_stock_outcomes`, and grouped `stock_learning_stats` (accuracy by ticker/timeframe/prediction type/etc.).
+- User actions: "Run Dynamic Morning Picks," "Run Dynamic EOD Review," "Run Dynamic Learning Update" — each fires a job then polls `GET /api/jobs/status` until it completes (long-running jobs return 202 immediately; the UI polls rather than waiting on the HTTP request).
+- Connections: talks to the .NET API through `services/researchOrchestrator/dynamicPickOrchestrator.ts` (`dynamicPickOrchestrator.*` client + `pollJobUntilDone`), which hits `DynamicPicksController` endpoints.
+
+### `/watchlist` — Watchlist
+- Purpose: shows every ticker the system is currently tracking, why, and what it thinks about each one; provides a full drill-down per ticker.
+- Route: `app/watchlist/page.tsx` (client component).
+- Inputs: sort selector; click a card to open a full-screen ticker detail modal.
+- Outputs: four sections — Active, Needs a Second Look (`review_needed`), Might Replace (`swap_candidate`), Removed (`archived`) — each card showing a derived plain-English verdict, score, risk, and info-availability labels. The detail modal shows the watchlist thesis/score breakdown, the latest prediction, the paper stock candidate status, any matched option contract, and the outcome, all translated into plain English by client-side helper functions (`friendlySignalName`, `friendlyTechnicalCase`, etc.).
+- User actions: sort by score/risk/ticker; open/close ticker detail.
+- Connections: `GET /api/watchlist` and `GET /api/watchlist/changes` (both proxy to the .NET `WatchlistController`); ticker detail modal calls `GET /api/ticker-detail?ticker=...`, which proxies to `ChatToolsController`'s `get_ticker_detail` tool endpoint — the same endpoint the AI chat assistant uses.
+
+### `/predictions` — Predictions
+- Purpose: compare every prediction the system has made against what actually happened, across four categories.
+- Route: `app/predictions/page.tsx` (client component, `dynamic = 'force-dynamic'`).
+- Inputs: category tabs (Predictions / Long-Term / Options / Passed On), date-range preset or custom range, correct/wrong/pending filter, sort order.
+- Outputs: stat cards (total/evaluated/correct/incorrect/accuracy), and a card per prediction showing signal strength, risk, significance, entry/target/stop/invalidation prices, bull/bear case, data sources used, missing-data warnings, and (once evaluated) the actual outcome, price-accuracy percentage, and a plain-English "lesson."
+- User actions: switch category/tab/date range/sort; expand a card for full detail.
+- Connections: `GET /api/research/predictions-with-outcomes` (proxies to .NET `ResearchController`) for stock categories; `GET /api/paper-options/all-with-outcomes` for the Options tab.
+
+### `/congress-trades` — Congress Trades
+- Purpose: shows recently disclosed U.S. House and Senate stock trades. See §8 for full detail — it is architecturally independent of everything else in the app.
+- Route: `app/congress-trades/page.tsx` (client component).
+- Inputs: refresh button; ticker/politician text filter.
+- Outputs: an AI-generated insight paragraph, a "most-traded tickers" chip list, a list of individual disclosed trades (ticker, buy/sell, amount range, politician, dates, link to the source filing), and a disclosure of any filings that could not be parsed.
+- User actions: refresh (bypasses the 6-hour cache), filter by ticker/politician, click through to a source PDF/filing.
+- Connections: `GET /api/congressional-trades?chamber=house|senate` and `POST /api/congressional-trades/insight`, both self-contained Next.js routes with no Supabase or .NET involvement other than the shared AI gateway for the insight text.
+
+### `/results` — Results
+- Purpose: an older/simpler results view than `/predictions` — raw predictions joined to outcomes with per-ticker summary stats.
+- Route: `app/results/page.tsx` (client component).
+- Inputs: All/Open/Evaluated tab; sort order.
+- Outputs: hit-rate/average-move/accuracy-score stat cards, a per-ticker win/loss breakdown table, and an expandable list of predictions with bull/bear case and outcome summary.
+- User actions: switch tab, change sort, expand a card.
+- Connections: `GET /api/research/predictions?limit=500` and `GET /api/research/outcomes`, both proxying to the .NET `ResearchController`.
+
+### `/history` — History
+- Purpose: shows the legacy "picks" model's history (an older, pre-dynamic-pipeline concept of a stock pick) alongside its result snapshot.
+- Route: `app/history/page.tsx` (server component).
+- Inputs: none.
+- Outputs: a `PickCard` + `ResultSnapshot` pair per historical pick.
+- Connections: `services/picksService.ts` (`getPickHistory`) and `services/resultsService.ts` (`getResultByPickId`), which read directly from Supabase's legacy `picks` / `result_placeholders` tables via the Next.js server-side Supabase client — this page does not go through the .NET API.
+
+### `/picks/[id]` — Pick Detail
+- Purpose: detail view for one legacy "pick" (score breakdown, signals, options signals, bearish counterpoint, invalidation point, outcome snapshot).
+- Route: `app/picks/[id]/page.tsx` (server component, dynamic `id` param).
+- Inputs: pick ID from the URL.
+- Outputs: full breakdown of a single legacy pick and its linked options signals/result.
+- Connections: `services/picksService.ts`, `services/resultsService.ts`, `services/signalsService.ts` — all direct-to-Supabase legacy reads (not the .NET API). Reached from `/history`.
+
+### `/catalysts/[id]` — News Event (Catalyst) Detail
+- Purpose: detail view for one classified news catalyst, showing why it was scored the way it was, an AI-written plain-English explanation, which predictions it was linked to and their outcomes, and historical performance for that event type.
+- Route: `app/catalysts/[id]/page.tsx` (server component, `dynamic = 'force-dynamic'`).
+- Inputs: catalyst ID from the URL.
+- Outputs: classification stats (importance, source trust, freshness, ticker relevance, sentiment, confirmation counts), event types/keywords found, an AI explanation built strictly from those deterministic fields, linked predictions with outcomes, and historical win-rate stats for that event type.
+- Connections: `services/persistence/newsIntelligenceRepository.ts` and `services/persistence/researchRepository.ts` (direct Supabase reads from the Next.js app), plus one direct call to `requestAiCompletion` (the shared AI gateway) for the explanation text. Reached from the Dashboard's "News Analysis" section.
+
+### `/options-research` — Options Lookup
+- Purpose: ad hoc real-time options-chain lookup/scoring tool for any ticker, independent of the prediction pipeline.
+- Route: `app/options-research/page.tsx` (client component).
+- Outputs: a scored table of option contracts (liquidity/spread/IV/DTE component scores and an overall score) plus underlying stock quote.
+- Connections: `app/api/options-data/*` routes, proxying to .NET `OptionsDataController` (backed by `MarketDataOptionsProvider`, i.e., MarketData.app).
+
+### `/options-lab` — Options Simulator
+- Purpose: theoretical options-strategy simulator against a chosen prediction — generates strike/strategy scenarios and their payoff profile.
+- Route: `app/options-lab/page.tsx` (client component).
+- Outputs: scenario cards (strategy type, strikes, premium, breakevens, max profit/loss, estimated return, a confidence-fit score, and a plain-English "why this scenario was generated").
+- Connections: `app/api/options-lab/*` routes, proxying to .NET `OptionsLabController` (`AutomaticScenarioGenerator`, `TheoreticalOptionsSimulator`, `StrategyPayoffCalculator`, `ScenarioRankingService`).
+
+### `/paper-options` — Practice Options
+- Purpose: view/manage the paper option-contract candidates generated from qualifying stock predictions (an older, single-purpose page compared to the combined Options tab now on `/predictions`).
+- Route: `app/paper-options/page.tsx` (client component).
+- Outputs: prediction list, paper option candidates with full contract detail, evaluate/generate actions.
+- Connections: `app/api/paper-options/*` routes, proxying to .NET `PaperOptionsController` / `OptionsDataController`.
+
+### `/learning` — System Learning
+- Purpose: shows the output of the learning feedback loop in plain language.
+- Route: `app/learning/page.tsx` (server component).
+- Outputs: `LearningReportCard` (latest learning report), `SignalPerformancePanel` (per-signal accuracy), and a "Run Fresh Analysis" button.
+- Connections: `services/persistence/learningRepository.ts` — direct Supabase reads (legacy `learning_reports` / `signal_performance` tables) from the Next.js app, not the .NET dynamic pipeline's `research_signal_performance`/`learning_insights` tables. The "Run Fresh Analysis" button calls `POST /api/jobs/analyze-learning`, a self-contained Next.js-only analysis job (`services/learning/learningAnalysisService.ts`) that is distinct from every other job described in this document: it reads real `prediction_candidates`/`prediction_outcomes` plus live RSS news intake, computes signal performance and suggested weight changes, generates a small set of unsaved "auto picks" from today's headlines (`rssPickGenerator.ts`), asks the shared AI gateway for a short market briefing, and persists the resulting signal-performance and report rows back to the legacy `signal_performance`/`learning_reports` tables this page reads from.
+
+### `/connectivity` — Connection Status
+- Purpose: a live health check across every external dependency.
+- Route: `app/connectivity/page.tsx` (client component).
+- Outputs: status dot (ok/error/not_configured), latency, and message per service: .NET API health, Supabase (via .NET), Twelve Data, OpenAI, Finnhub, and each configured RSS feed.
+- Connections: `GET /api/connectivity`, a Next.js route that pings each dependency (some directly, some by asking the .NET API to check its own configured services).
+
+### `/settings` — Settings
+- Purpose: read-only preview of the current signal weighting used by the (legacy) scoring model.
+- Route: `app/settings/page.tsx` (server component).
+- Outputs: a list of signal names, their current weight multiplier, active/inactive status, and notes. The page explicitly states in its own copy that these will become user-adjustable "in a future update" — today it is view-only.
+- Connections: `services/persistence/picksRepository.ts` (`getSignalWeightsFromDb`) — direct Supabase read of the legacy `signal_weights` table.
+
+### `/demo` — Demo (unlisted)
+- Purpose: appears to be a leftover development/test page, not linked from navigation. Renders four `<iframe>`s pointing at external news sites (NYT, The Dispatch, Fox News, Al Jazeera) with the label "News source pipeline test."
+- Route: `app/demo/page.tsx`.
+- Connections: none — purely static, no data fetching.
+
+---
+
+## 3. Navigation Flow
+
+Primary flow (matches the persistent sidebar groups):
+
+Chat (default landing, `/`) → Dashboard → Research group: Stock Lab → Watchlist → Predictions → Congress Trades → Results → History → Options group: Options Lookup → Options Simulator → Practice Options → System group: Learning → Connectivity → Settings.
+
+Branches out of the flow above:
+
+- Dashboard → "View all predictions" → Predictions.
+- Dashboard → "Full watchlist" → Watchlist.
+- Dashboard → News Analysis section → Catalyst Detail (`/catalysts/[id]`) → (back to) Dashboard.
+- Dashboard → canned chat prompt → Chat (`/chat?q=...`).
+- Watchlist → click any ticker card → in-page Ticker Detail modal (not a separate route; fetches `/api/ticker-detail`) → "Back to Watchlist" closes it.
+- History → each `PickCard` → Pick Detail (`/picks/[id]`).
+- Congress Trades → "View filing" links → external PDF/filing pages (leaves the app).
+- Predictions (Options tab) and Practice Options and Options Lookup/Simulator are cross-referenced conceptually (all draw from the same `paper_option_candidates` data) but are not linked to one another by in-app navigation — each is reached only via the sidebar.
+- `/demo` is reachable only by direct URL; it has no inbound or outbound in-app links.
+
+There is no ticker-detail *page* route — the equivalent of "Ticker Detail" in a conceptual sense is the Watchlist page's modal, and separately the Predictions/Results pages' own expandable cards, and the Pick Detail page for legacy picks. These are three different implementations of "show me everything about one item," not one shared route.
+
+---
+
+## 4. Backend Data Flow
+
+### Ticker discovery (source: live web)
+`UniverseDiscoveryService` (.NET) combines: RSS financial news feeds (`RssFeedService`, ticker mentions scored higher for cashtags than bare tickers), Finnhub's upcoming-earnings calendar (7-day window) and Finnhub market news (both direct-ticker fields and text-extracted mentions via `TickerExtractor`), and a boost for tickers already on the active watchlist (pulled from Supabase). Results are deduplicated, scored, and capped to the top 30 tickers ("the universe"). Consumer: `DynamicWatchlistService`, invoked by the Weekly Research job.
+
+### Watchlist maintenance (processing + storage)
+`DynamicWatchlistService` loads the current active/review watchlist from Supabase (`watchlist_items`), loads prior scoring weights (`research_scoring_weights`), recent insights (`learning_insights`), and recent prediction/outcome history to compute each ticker's historical accuracy. It scores every discovered candidate, compares to the existing list (capped at 10 active items, minimum score threshold, staleness threshold, swap-delta threshold), and writes add/keep/review/swap/archive decisions back to `watchlist_items`, logging every change to `watchlist_change_log`. Consumers: Dashboard, Watchlist page, and the next Morning Scan (which only researches *active* watchlist tickers).
+
+### Morning Scan — feature generation (processing)
+`DailyResearchRunService.RunMorningScanAsync` reads the active watchlist, then for each ticker calls `PredictionGenerator.BuildMarketSnapshotAsync`, which pulls: a live quote + recent bars + computed technical indicators from Twelve Data (`MarketDataService`/`TwelveDataProvider`, feeding `IndicatorEngine`), fundamentals-only news/SEC filings/earnings-calendar context from StockFit (`StockFitProvider` — explicitly never used for price/technical data), and recent company news from Finnhub. Every one of these sources degrades to an honest warning (never fabricated data) if not configured or if the call fails. Storage: one `market_snapshots` row per ticker per run.
+
+### Morning Scan — scoring and prediction creation (processing + AI + storage)
+`ScoringEngine` (static, deterministic) combines weighted buckets — trend, momentum, volume, volatility, SPY-relative market context, catalyst importance, a "learning edge" term from past lessons, and a risk penalty — using the current `research_scoring_weights`, applies a confirmation multiplier when multiple buckets agree, a data-quality factor based on how many indicators could actually be computed, and a calibration factor from learning, to produce a directional score, confidence, risk, and prediction type. `PredictionGenerator` then asks OpenAI (model `OPENAI_PREDICTION_MODEL`, default `gpt-4.1-nano`) to write the narrative explanation (thesis, bull case, bear case, invalidation) strictly from those already-computed numbers and signals — OpenAI never determines direction, confidence, or risk. If OpenAI is unavailable, a rule-based explanation is generated from the signal list instead; the run never blocks on AI. Storage: `prediction_candidates` (the prediction itself) and `prediction_inputs` (the raw signal inputs, kept for audit).
+
+### Morning Scan — paper candidate + option generation (processing + storage)
+`DynamicPickOrchestrator.RunDynamicMorningPicksAsync` runs immediately after the above (within the same "Morning Scan" job), and for every prediction: computes a second, independent deterministic composite score (catalyst/trend/volume/market-context/historical-accuracy/confidence minus risk and missing-data penalties), assigns a quality tier (`very_weak` → `weak` → `medium` → `strong_paper` → `production_candidate`, based on confidence) and a candidate mode (`learning` / `actionable_shadow` / `live_eligible`, based on confidence+risk thresholds), and saves a `paper_stock_candidates` row. For candidates that qualify (directional, has market data, an option-data provider is configured, risk/confidence within learning thresholds) and fall within per-run (25) and per-ticker (1) caps, it calls `PaperOptionsService.GenerateCandidatesAsync`, which scans a real option chain via `MarketDataOptionsProvider` (MarketData.app) and saves a matching `paper_option_candidates` row. Every attempt — created or blocked, and the specific reason if blocked — is written to `candidate_generation_audit` for full funnel visibility. Consumers: Stock Lab, Predictions (Options tab), Practice Options, Dashboard funnel stats.
+
+### End of Day review (processing + storage)
+Three evaluators run, all against live Twelve Data / MarketData.app quotes, all refusing to fabricate a result when live data is unavailable (the item simply stays open for the next run):
+- `OutcomeEvaluator` scores every open `prediction_candidates` row into `prediction_outcomes` (direction correct, target/stop/invalidation hit, price-accuracy percent, max favorable/adverse move, and SPY-relative performance for short-term predictions).
+- `DynamicPickOrchestrator`'s own stock evaluator scores every open `paper_stock_candidates` row into `paper_stock_outcomes`, and immediately upserts `stock_learning_stats` bucketed by ticker / timeframe / prediction type / confidence bucket / catalyst type / trend signal / volume signal.
+- `PaperOptionsService.EvaluateAllOpenAsync` scores every open `paper_option_candidates` row into `paper_option_outcomes` (simulated P&L, IV change) and updates `option_learning_stats`.
+
+### Learning Update (processing + storage)
+`LearningEngine` re-tallies signal-level accuracy across recent predictions/outcomes into `research_signal_performance`, nudges `research_scoring_weights` up or down (bounded per-adjustment, minimum sample size required) based on measured accuracy, and writes plain-English summaries to `learning_insights`. These weights and insights are read back in on the *next* Morning Scan by both `ScoringEngine` (weights, calibration factor) and `DynamicWatchlistService` (insights, ticker accuracy).
+
+### Scheduled jobs (external trigger)
+Per `stock-research-agent-api/CLAUDE.md`, scheduling is external to both repositories: Supabase Edge Functions (`supabase/functions/morning-scan`, `end-of-day-review`, `learning-update`, `weekly-research`, in the separate Supabase project, not in this workspace) run on a `pg_cron` schedule and call the .NET API's job endpoints (`POST /api/jobs/run-*`) using a `DOTNET_API_BASE_URL` secret. Every job route requires an `x-job-secret` header matching `JOB_RUN_SECRET`. The Dashboard's manual "Run" buttons call the exact same .NET endpoints, via the Next.js proxy route `POST /api/jobs/trigger` (which adds the same secret server-side). Long-running jobs (weekly research, all three dynamic-orchestrator jobs) use a fire-and-forget pattern: the controller validates the secret, starts a background `Task.Run`, and returns HTTP 202 immediately; a `JobStatusTracker` singleton holds in-memory job state that `GET /api/jobs/status` exposes for polling.
+
+### AI processing (all of it, system-wide)
+There is exactly one place in the entire system that holds the OpenAI API key and calls OpenAI: `OpenAiCompletionService` inside the .NET API, exposed as `POST /api/ai/complete`. Every Next.js server route that needs AI text (`lib/ai/aiClient.ts`'s `requestAiCompletion`) calls that single endpoint over HTTP — the Next.js app never talks to OpenAI directly. Inside the .NET process, `PredictionGenerator` additionally instantiates its own `ChatClient` directly (not through `OpenAiCompletionService`) because it already runs server-side in the same process; it uses a separately configurable model (`OPENAI_PREDICTION_MODEL`, default `gpt-4.1-nano`) versus the general-purpose gateway's default (`OPENAI_MODEL`, default `gpt-4.1-mini`). See §6 for a full inventory of every AI call site.
+
+### An earlier TypeScript implementation that is present but not currently reachable
+The Next.js app also contains a full second implementation of the research pipeline, written entirely in TypeScript and talking to Supabase directly rather than through the .NET API: `services/researchEngine/*` (its own `dailyResearchRunService.ts`, `predictionGenerator.ts`, `outcomeEvaluator.ts`, `learningEngine.ts`, `dailyReportService.ts`) and `services/weeklyResearch/weeklyResearchService.ts`. It is built against a **hardcoded** 13-ticker watchlist (`SPY, QQQ, AAPL, MSFT, NVDA, AMD, TSLA, AMZN, META, GOOGL, PLTR, AVGO, NFLX, COIN`) rather than a discovered universe. Tracing every caller of these files from the app's routes shows none of them are currently imported or invoked anywhere reachable: `app/api/jobs/trigger` and the dedicated `app/api/jobs/run-weekly-research` shim both always forward to the .NET API over HTTP regardless of which job name is requested, and the job names that sound like they'd match this TS code (`run-morning-scan`, `run-end-of-day-review`, `run-learning-update`, `run-weekly-research`) are in fact handled by *.NET* controllers of the same names (`ResearchJobsController`, `WatchlistController`) that call the .NET `DailyResearchRunService` / `UniverseDiscoveryService` / `DynamicWatchlistService` described above — the same underlying service the "dynamic" endpoints wrap, not a separate system. In other words, this TS folder appears to be an earlier version of the pipeline that has since been fully reimplemented in .NET, left in place but not wired to anything live. Its would-be output tables (`picks`, `signal_weights`, `result_placeholders`, `weekly_research_runs`, `weekly_stock_reviews`, `weekly_candidates`) are consequently not being written by anything currently reachable in the app — see §9.
+
+Separately, and still genuinely live, `services/newsIntelligence/*` implements a news-catalyst classification subsystem (deterministic keyword/event extraction and strength scoring, no AI) that is invoked on demand via `POST /api/news-intelligence/reprocess` (re-processes the latest news intake items) and read via `GET /api/news-intelligence/catalysts` and `catalyst-stats` — all direct-to-Supabase Next.js routes, independent of the .NET pipeline. This is what actually populates `news_catalysts`, `catalyst_prediction_links`, and `catalyst_outcome_stats`, and is what powers the Dashboard's "News Analysis" section and the `/catalysts/[id]` page. No button in the pages reviewed was found to call the reprocess endpoint, so it is presumably triggered externally (manually or by an undiscovered scheduled call) rather than automatically as part of the .NET Morning Scan.
+
+---
+
+## 5. Database Schema
+
+All storage is Supabase Postgres, accessed via PostgREST. The .NET API uses a small hand-written REST client (`Services/Supabase/SupabaseClient.cs`) rather than a Supabase SDK; the Next.js app uses a direct `@supabase/supabase-js` server client (`lib/supabase/serverClient.ts`) for the tables it reads and writes directly. Tables below are grouped by which subsystem currently owns them: the .NET dynamic pipeline (actively read and written), an earlier TS pipeline whose write path is now orphaned (still read by a few pages, but effectively frozen — see §9), and a handful of Next.js-only tables that are still actively written today outside the .NET pipeline.
+
+### Current ("dynamic" pipeline) tables — used by Dashboard, Stock Lab, Watchlist, Predictions, Practice Options
+
+**`research_runs`** — one row per pipeline execution. Columns include `run_type` (morning_scan / end_of_day_review / learning_update / weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`. Every prediction/snapshot/outcome batch is tied back to a run via `run_id`. Used by: Dashboard job-status cards, Stock Lab.
+
+**`market_snapshots`** — one row per ticker per run: the raw quote, recent price bars, computed technical context, and news context captured at scan time. Relationship: many-to-one with `research_runs`. Used internally by the scoring engine; not directly rendered on any page.
+
+**`prediction_candidates`** (referred to in the UI simply as "predictions") — the core output of the scoring engine: `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, ATR-based volatility fields, `target_price`/`stop_price`/`invalidation_price`/`support_level`/`resistance_level`, `risk_reward_ratio`, `bullish_case`/`bearish_case`/`prediction_reason` (the AI-written narrative), `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired). Relationship: many-to-one with `research_runs`; one-to-one (eventually) with `prediction_outcomes`; one-to-one with a `paper_stock_candidates` row once wrapped. Used by: Dashboard, Predictions, Results, Watchlist ticker-detail modal, Chat (via `get_predictions` tool).
+
+**`prediction_inputs`** — the raw signal/indicator values that fed one prediction, kept as an audit trail. Relationship: many-to-one with `prediction_candidates`. Not directly rendered; exists for traceability.
+
+**`prediction_outcomes`** — the result of checking a prediction against reality: `start_price`/`close_price`/`percent_move`, `direction_correct`, `target_hit`/`stop_hit`/`invalidation_hit`, `price_accuracy_percent`, `max_favorable_percent`/`max_adverse_percent`, `outcome_score`, `outcome_summary`, `lesson`. Relationship: many-to-one with `prediction_candidates` (a prediction can be re-evaluated, producing more than one outcome row over time; the UI takes the latest). Used by: Dashboard, Predictions, Results, Watchlist ticker detail.
+
+**`research_signal_performance`** — rolling accuracy per named signal (e.g., a specific technical or catalyst signal), used to judge which signals are actually working. Used by: Dashboard "What the System Has Learned," Chat.
+
+**`research_scoring_weights`** — the current multiplier applied to each named signal inside `ScoringEngine`, adjusted by `LearningEngine`. Read at the start of every Morning Scan.
+
+**`learning_insights`** — plain-English insight + recommended action generated after a Learning Update run. Used by: Dashboard "Recent Insights."
+
+**`watchlist_items`** — the actively tracked ticker list: `ticker`, `status` (active/review_needed/swap_candidate/archived), `total_score`, `catalyst_score`, `risk_score`, `thesis_summary`, `bullish_case`/`bearish_case`, `data_confidence`, `invalidation_point`, `swap_reason`, `sources_used`, `missing_data_warnings`, a raw JSON `score_breakdown`. Used by: Dashboard, Watchlist page (all four sections read from this one table filtered by status).
+
+**`watchlist_change_log`** — an append-only history of every add/keep/flag/swap/archive/score-change event against `watchlist_items`. Used by: Dashboard "Recent Watchlist Changes," Watchlist page "Recent Changes."
+
+**`watchlist_candidates`** — raw discovery candidates considered by `DynamicWatchlistService` before (or instead of) promotion into `watchlist_items`; effectively a staging table for the discovery step.
+
+**`paper_stock_candidates`** — a prediction wrapped with its own composite score: `entry_price`/`target_price`/`stop_price`, `catalyst_score`/`trend_score`/`volume_score`/`market_context_score`/`historical_accuracy_score`, `risk_penalty`/`missing_data_penalty`, `total_score`, `candidate_mode` (learning/actionable_shadow/live_eligible), `quality_tier` (very_weak/weak/medium/strong_paper/production_candidate), `is_actionable`, `qualifies_for_options`, `inclusion_reason`/`exclusion_reason`, `status` (open/watch_only/unavailable/evaluated). Relationship: one-to-one with `prediction_candidates` via `prediction_id`; one-to-many with `paper_option_candidates`. Used by: Stock Lab, Watchlist ticker detail, Dashboard funnel stats.
+
+**`paper_stock_outcomes`** — EOD evaluation of one `paper_stock_candidates` row: `percent_move`, `direction_correct`, `target_hit`/`stop_hit`/`invalidation_hit`, `max_favorable`/`max_adverse`, `outcome_score`, `outcome_summary`, `lesson`. Used by: Stock Lab.
+
+**`stock_learning_stats`** — aggregated win-rate/accuracy stats keyed by a `(stat_type, stat_key)` pair (e.g., type=`ticker` key=`AAPL`, or type=`confidence_bucket` key=`high`), tracking `total_candidates`, `accuracy`, `average_outcome_score`. Read back into scoring (`ScoreHistoricalAccuracyAsync`) and shown on Stock Lab and Dashboard.
+
+**`paper_option_candidates`** — one specific real option contract matched to a qualifying stock candidate: `option_symbol`, `side` (call/put), `strike`, `expiration`, `dte_at_entry`, `entry_underlying_price`, entry `bid`/`ask`/`mid`/`iv`/`delta`/`open_interest`/`volume`, `contract_score`, `selection_reason`, `status`. Relationship: many-to-one with `paper_stock_candidates` (and, transitively, `prediction_candidates`). Used by: Predictions (Options tab), Practice Options, Options Lookup/Simulator context, Watchlist ticker detail.
+
+**`paper_option_outcomes`** — simulated P&L evaluation of one `paper_option_candidates` row: current Greeks/IV/underlying price, `paper_pnl_per_contract`/`paper_pnl_percent`, `underlying_move_percent`, `iv_change`, `outcome_summary`. Used by: Predictions (Options tab), Practice Options.
+
+**`option_learning_stats`** — aggregated option win-rate stats, structurally parallel to `stock_learning_stats`.
+
+**`candidate_generation_audit`** — one row per prediction per run recording exactly what happened during candidate generation: whether a stock candidate and/or option candidate was created, the candidate mode/quality tier, and — if an option candidate was *not* created — the specific block reason (e.g., `risk_too_high`, `confidence_below_learning_threshold`, `max_candidates_reached`, `missing_market_data`). Used by: Dashboard funnel/"block reason breakdown" stats.
+
+### Older tables — still read by some pages, but written by the earlier TS pipeline described above (which is not currently reachable)
+
+These tables are still queried directly from Supabase by a few Next.js pages, but their only known write path is the orphaned `services/researchEngine`/`services/weeklyResearch` code from §4 — meaning, as best this review could confirm by tracing callers, nothing currently reachable in the app is adding new rows to most of them. They should be read as historical/frozen data rather than an actively updating dataset:
+
+**`picks`** — an older, simpler model of a single stock pick (score, risk level, conviction level, main reason, bearish counterpoint, invalidation point, suggested research action). Used by: History, Pick Detail. Write path (`savePicks`) exists only inside the orphaned `weeklyResearchService.ts`.
+
+**`signal_weights`** — the legacy equivalent of `research_scoring_weights` (signal name, weight, active flag, notes). Used by: Settings (explicitly read-only in the current UI).
+
+**`result_placeholders`** — legacy outcome tracking tied to `picks`. Used by: History, Pick Detail (`ResultSnapshot`). Same orphaned write path as `picks`.
+
+**`signal_performance`** — legacy equivalent of `research_signal_performance` (distinct table, distinct columns: includes `avg_confidence_when_correct`/`avg_confidence_when_wrong`). Used by: Learning page.
+
+**`learning_reports`** — legacy learning-analysis report text. Used by: Learning page (`LearningReportCard`).
+
+**`weekly_research_runs`**, **`weekly_stock_reviews`**, **`weekly_candidates`** — the orphaned TS weekly-research service's own run/candidate tracking, parallel to (but separate from) `research_runs`/`watchlist_candidates`.
+
+**`option_watchlist_candidates`** — a legacy options-candidate scoring table (`services/persistence/scoringRepository.ts`), predating `paper_option_candidates`.
+
+**`agent_reports`, `daily_reports`, `notifications`, `agent_snapshots`** — legacy daily-report generation and notification tables (`services/persistence/reportsRepository.ts`); no current page reads these directly in the pages reviewed.
+
+**`catalyst_items`** — a separate, simpler news-item store from an even earlier intake pipeline (`services/informationIntake/*`), distinct from `news_catalysts`.
+
+### Tables that are still actively written today, outside the .NET pipeline
+
+**`chat_messages`** — every user and assistant chat turn from `/api/agent-chat`, saved for audit/learning even though the Chat page itself never reloads history from it. Actively written on every chat turn.
+
+**`agent_theses`** — trade theses captured from AI chat conversations (`saveThesis`, called from `/api/agent-chat` whenever the AI's JSON response includes a `thesis` object). Actively written; not surfaced as a dedicated page in this review, so it currently functions as a capture-only audit table.
+
+**`agent_feedback`** — thumbs-up/down or similar feedback tied to chat/theses (schema present in `learningRepository.ts`); no page in the nav was found writing or reading it through a visible UI control in this review.
+
+**`news_catalysts`** — the current news-catalyst-intelligence subsystem's classified news events (headline, source, detected event types, extracted keywords, sentiment, catalyst-strength/source-reliability/freshness/ticker-relevance scores, price/volume confirmation status, warnings). Used by: Dashboard "News Analysis," `/catalysts/[id]`.
+
+**`catalyst_prediction_links`** — join table linking a `news_catalysts` row to the `prediction_candidates`/`paper_option_candidates` row(s) it influenced, with an `influence_type`/`influence_score`/`reason_linked`. Used by: `/catalysts/[id]` "Predictions That Used This News."
+
+**`catalyst_outcome_stats`** — historical win-rate and average-move statistics aggregated per detected event type. Used by: `/catalysts/[id]` "Historical performance."
+
+### Congress trading module — no tables
+
+The congressional-trades feature (§8) stores nothing in Supabase. Its only "storage" is an in-process `Map` cache in the Next.js server process, keyed by chamber, expiring after 6 hours.
+
+---
+
+## 6. AI Responsibilities
+
+Every AI call in the system ultimately reaches OpenAI's Chat Completions API through `OpenAiCompletionService` in the .NET API (default model `gpt-4.1-mini`, overridable via `OPENAI_MODEL`), except one internal .NET caller (`PredictionGenerator`) that instantiates its own client directly with a separately configurable model (`OPENAI_PREDICTION_MODEL`, default `gpt-4.1-nano`). All AI output is narrative/explanatory text layered on top of numbers that are computed deterministically beforehand — no AI call in the system determines a prediction's direction, confidence, risk score, or any price level.
+
+**1. Prediction narrative generation**
+- Where: `PredictionGenerator.cs`, called once per ticker during Morning Scan.
+- Inputs: the already-computed direction/confidence/risk/importance scores, the list of contributing signals, and the raw market/news context for that ticker.
+- Prompt purpose: write the thesis, bullish case, bearish case, invalidation rule, and key price-level narrative in plain language, strictly from the supplied facts.
+- Output: free text stored in `prediction_candidates.bullish_case` / `bearish_case` / `prediction_reason` / `invalidation_rule`.
+- Displayed: Dashboard, Predictions, Results, Watchlist ticker detail — anywhere a prediction card is shown; the UI shows an "AI" badge when `data_sources_used` includes `openai-analysis`.
+- Deterministic or AI-generated: the *decision* (direction/confidence/risk) is 100% deterministic (`ScoringEngine`); only the *explanation text* is AI-generated. If OpenAI is unavailable, a rule-based fallback explanation is generated instead and the prediction still ships.
+
+**2. Chat assistant**
+- Where: `POST /api/agent-chat` (Next.js) → tool-calling loop → .NET `ChatToolsController` endpoints.
+- Inputs: the user's message, up to 8 prior turns of conversation, and the results of up to 3 rounds of tool calls (`get_dashboard_summary`, `get_predictions`, `get_stock_candidates`, and others defined in `lib/ai/chatToolDefinitions.ts`) executed against live Supabase-backed data.
+- Prompt purpose (`SLIM_SYSTEM_PROMPT`): act as a skeptical, factual research assistant that must base every answer only on tool-returned data, never invent numbers, always separate evidence-for/evidence-against/missing-data/confidence, and never give trade instructions or position sizing.
+- Output: a strict JSON envelope — `message`, `dataConfidence` (high/medium/low), `suggestedPrompts`, `riskWarnings`, and an optional `thesis` object (which, if present, is persisted to `agent_theses`).
+- Displayed: `/chat` page.
+- Deterministic or AI-generated: fully AI-generated conversational text, but constrained to only reference facts returned by deterministic tool calls; the assistant is explicitly instructed to say "no good setups today" when data doesn't support an idea rather than force an answer.
+
+**3. Congressional trades insight**
+- Where: `POST /api/congressional-trades/insight` → `generateInsight()` in `congressionalTradesService.ts`.
+- Inputs: up to 100 already-parsed trade records (politician, ticker, action, amount range, dates) — no market data, no scoring.
+- Prompt purpose: summarize clusters of activity in the same ticker/sector, notably large positions, and net buy/sell direction, in 3-5 factual sentences, explicitly instructed not to speculate about motive or give investment advice.
+- Output: a single paragraph of free text.
+- Displayed: top of `/congress-trades` as an "AI Insight" banner.
+- Deterministic or AI-generated: fully AI-generated summary over deterministically parsed data; the trades themselves are never AI-touched.
+
+**4. Catalyst explanation**
+- Where: `/catalysts/[id]` page, `buildExplanation()`, calling `requestAiCompletion` directly from a Next.js server component.
+- Inputs: the catalyst's deterministic classification fields (headline, detected event types, extracted keywords, sentiment, catalyst-strength score) and a text summary of linked-prediction outcomes.
+- Prompt purpose: explain in 2-3 sentences why the signals would matter for a prediction and what the outcome data shows, explicitly instructed never to invent facts not present in the inputs.
+- Output: free text, not persisted (recomputed on every page load).
+- Displayed: `/catalysts/[id]`, "Why This News Mattered" section.
+- Deterministic or AI-generated: AI-generated explanation strictly over deterministic classification/outcome data.
+
+**5. Learning-page market briefing**
+- Where: `POST /api/jobs/analyze-learning` → `services/learning/learningAnalysisService.ts`'s `tryAiSummary()`, triggered by the "Run Fresh Analysis" button on `/learning`.
+- Inputs: a computed sentiment/trending-ticker/catalyst summary of the latest RSS news intake, plus the top auto-generated picks derived from that news.
+- Prompt purpose: "You are a concise stock research analyst. No disclaimers, no filler." — write a short plain-text market briefing from the supplied intake summary.
+- Output: a short paragraph of free text (`aiBriefing`), plus a rule-based `summary` string used whenever the AI call is unavailable.
+- Displayed: `/learning` page, "AI Market Summary" panel (only shown when the call succeeds).
+- Deterministic or AI-generated: AI-generated text over a deterministic RSS-sentiment computation; falls back to a fully rule-based summary sentence if the AI gateway is unreachable.
+
+**6. Legacy prompt templates (present but unused)**
+- Where: `lib/ai/prompts.ts` — `AGENT_CHAT_SYSTEM_PROMPT`, `buildDailyReportPrompt`, `buildTickerExplanationPrompt`, `buildBearishCounterpointPrompt`.
+- Status: not imported anywhere in the current codebase (confirmed by search). This was an earlier, "context-stuffing" design for the chat assistant (feeding it entire watchlist/pick/news bundles) that has been superseded by the slim tool-calling design described in item 2. It is documented here only because it is present in the code, not because it currently runs.
+
+---
+
+## 7. Prediction Pipeline
+
+End-to-end, in execution order:
+
+**Candidate discovery.** `UniverseDiscoveryService.DiscoverUniverseAsync()` scans RSS financial news feeds for ticker mentions (weighted by whether the mention was a cashtag, a company name, or a bare ticker), pulls Finnhub's 7-day upcoming-earnings calendar, pulls Finnhub general market news (using both its structured related-tickers field and text extraction over headlines/summaries), and adds a small boost for tickers already on the active watchlist. All sources are merged into one scored, deduplicated list capped at the top 30 tickers. This runs as part of the Weekly Research job, feeding `DynamicWatchlistService`.
+
+**Watchlist selection.** `DynamicWatchlistService.BuildDynamicWatchlistAsync()` takes that universe plus the current watchlist state, scores every candidate (data-backed score plus a catalyst boost for news-discovered tickers, discounted by staleness and recent inaccuracy), and decides, per ticker, to add / keep / flag for review / mark as a swap candidate / archive — capped at 10 active items with a minimum-score floor. Every decision is logged to `watchlist_change_log`.
+
+**Feature generation.** For every *active* watchlist ticker, `PredictionGenerator.BuildMarketSnapshotAsync()` assembles: Twelve Data quote, recent daily bars, and computed technical indicators (`IndicatorEngine` — trend, momentum, RSI, volume, volatility; each indicator explicitly tracked as computed-or-skipped so downstream scoring knows exactly how much real signal it has), StockFit fundamentals context (news, SEC filings, earnings-calendar proximity — fundamentals only, never technicals, per the project's own engineering rule), and Finnhub recent company news. Anything unavailable is recorded as a warning, never invented.
+
+**Scoring.** `ScoringEngine.Score()` computes independent bucket scores for trend, momentum, volume, a volatility "setup" score, SPY-relative market context, catalyst importance, a "learning edge" score derived from `research_scoring_weights`/prior lessons, and a risk penalty. These sum to a directional score. A confirmation multiplier (1.00–1.30) rewards agreement across buckets and penalizes conflicting ones; a data-quality factor discounts confidence when few indicators were computable; a calibration factor (itself tuned by the learning engine) applies a final correction. Hard caps prevent high confidence when only one signal bucket is available or when trend and momentum directly conflict. The output is a prediction type (bullish/bearish/one of several neutral or rejected variants/watch_only), a confidence score, and a risk score — entirely rule-based, no AI involved in this step.
+
+**Prediction creation.** The scored result, plus entry price, ATR-derived expected move, target/stop/invalidation levels, and support/resistance, is saved as a `prediction_candidates` row. OpenAI (`gpt-4.1-nano` by default) is then given only the already-computed numbers and is asked to write the thesis and bull/bear case narrative — never to change or re-derive the numbers themselves. If OpenAI fails or is unconfigured, an automatically assembled explanation from the raw signal list is used instead so the prediction is never blocked on AI availability.
+
+**Candidate wrapping and option generation.** `DynamicPickOrchestrator` wraps each freshly created prediction in a `paper_stock_candidates` row with its own composite score (25% catalyst, 20% trend, 15% volume, 10% market context, 15% historical accuracy, 15% confidence, minus a risk penalty and a missing-data penalty), assigns a `quality_tier` from the confidence score and a `candidate_mode` from confidence+risk thresholds (`learning` → `actionable_shadow` → `live_eligible`), and computes deterministic target/stop bands (±2–3% depending on direction) directly from the entry price. Candidates that qualify for options (directional, has a live entry price, an options data provider is configured, risk ≤ 90, confidence ≥ 15 or in the run's top quartile) are ranked and — subject to a 25-per-run and 1-per-ticker cap — passed to `PaperOptionsService`, which scans a real option chain from MarketData.app and saves the best-fit contract as `paper_option_candidates`. Every prediction's outcome in this step (candidate created, option created, or specifically why not) is written to `candidate_generation_audit`.
+
+**Outcome tracking.** On End of Day review, three separate evaluators re-fetch live quotes and score every open item: `OutcomeEvaluator` for raw predictions (`prediction_outcomes`), `DynamicPickOrchestrator`'s stock evaluator for paper stock candidates (`paper_stock_outcomes`), and `PaperOptionsService` for paper option candidates (`paper_option_outcomes`). Each computes direction-correctness, target/stop/invalidation hits, maximum favorable/adverse excursion, and a 0–100 outcome score; each writes a short plain-English "lesson." Any item whose live quote can't be fetched is left open rather than scored with placeholder data.
+
+**Learning updates.** `LearningEngine` re-tallies which named signals were present in predictions that turned out correct vs. incorrect (`research_signal_performance`), and nudges `research_scoring_weights` toward signals that have been performing well and away from ones that haven't (bounded to a maximum ±0.3 adjustment per cycle, requiring at least 5 qualifying predictions before adjusting a given signal), and writes summary `learning_insights`. In parallel, the stock/option evaluators upsert `stock_learning_stats`/`option_learning_stats`, bucketed by ticker, timeframe, prediction type, confidence bucket, catalyst type, and trend/volume-signal strength. Both sets of updated weights/stats are read back in on the next Morning Scan — by `ScoringEngine` (weights, calibration factor) and by `PredictionGenerator`/`DynamicPickOrchestrator` (per-ticker historical accuracy) — closing the loop.
+
+---
+
+## 8. Congress Trading Module
+
+**Data source.** Two independent public government sources, fetched live on every (non-cached) request — no third-party API and no scraping of any private data:
+- U.S. House: the House Clerk's public financial-disclosure site (`disclosures-clerk.house.gov`). A yearly bulk ZIP index (`{year}FD.zip`) lists every filing; the code filters to `FilingType = "P"` (Periodic Transaction Reports — the actual stock-trade disclosures) and downloads the individual PTR PDF for each of the most recent 8 filings.
+- U.S. Senate: the Senate's electronic financial disclosure system (`efdsearch.senate.gov`). This system requires first accepting a "prohibition agreement" to obtain a session cookie, then POSTing a DataTables-style search request filtered to report type 11 (PTRs), then fetching each individual electronic filing's HTML transactions table.
+
+**Parsing pipeline.** House PDFs are downloaded and their text layer extracted (`unpdf`); a regex tuned to the Clerk's fixed row format (`(TICKER) [ST] P|S|E (partial)? date date $min - $max`) extracts individual trade rows, with the preceding asset-name text recovered by walking backward from each match. Senate filings are plain HTML tables scraped with a `<tr>`/`<td>` regex, decoding HTML entities and mapping `Purchase`/`Sale`/`Exchange` text to `buy`/`sell`/`exchange`. In both pipelines, any filing that has no usable text layer (a scanned/paper filing) or that yields zero parseable stock rows is explicitly recorded as "skipped" with a human-readable reason — it is never silently dropped or guessed at.
+
+**Database tables.** None. There is no persistence layer for this feature at all; results live only in an in-memory `Map` inside the Next.js server process (`congressionalTradesService.ts`), keyed by chamber selector, with a 6-hour expiry. A server restart or redeploy clears the cache entirely, and there is no historical record kept beyond what the source sites themselves currently expose (which, per the UI's own disclosure, can lag up to 45 days behind the actual trade date due to the statutory disclosure window).
+
+**Current UI.** `/congress-trades` (in the "Research" nav group): a refresh button (bypasses cache), a most-traded-tickers chip filter, a ticker/politician text filter, an AI insight banner, the trade list itself (ticker, buy/sell badge, amount range, politician, state/district, transaction/disclosure dates, link to the original filing), and a collapsible disclosure of filings that couldn't be parsed. The House and Senate chambers are fetched as two separate requests from the client specifically so that each stays within a serverless function's execution time limit.
+
+**Current AI usage.** One call: `POST /api/congressional-trades/insight` sends up to 100 already-normalized trades to the shared AI gateway (see §6, item 3) and returns a short factual summary paragraph, generated only after the trades themselves have already rendered (so a slow or failed AI call never blocks the page from showing real data).
+
+**Connection to the rest of STOCKJAWN.** None, functionally. This module does not read or write `watchlist_items`, `prediction_candidates`, any `paper_*` table, or any learning table; it is not one of the sources considered by `UniverseDiscoveryService`; it is not one of the tools available to the chat assistant (`chatToolDefinitions.ts` has no congress-related tool); and it does not appear in `candidate_generation_audit` or any scoring bucket in `ScoringEngine`. Its only shared infrastructure with the rest of the app is the `AGENT_API_BASE_URL`-routed AI completion gateway and the general Next.js hosting environment.
+
+---
+
+## 9. Current Limitations
+
+The codebase contains a full, hardcoded-13-ticker TypeScript reimplementation of the research pipeline (`services/researchEngine/*`, `services/weeklyResearch/weeklyResearchService.ts`) that, by tracing every import in the current routes, is not called from anywhere reachable in the running app — the actual pipeline behind every job name (legacy-sounding or "dynamic") is implemented once, in .NET, and the "dynamic" endpoints are a wrapper around the same underlying service the "legacy-named" endpoints call directly (see §4). This orphaned TS code and its output tables (`picks`, `signal_weights`, `result_placeholders`, `weekly_research_runs`, `weekly_stock_reviews`, `weekly_candidates`) still exist in the repository and are still read by a few pages (History, Pick Detail, Settings, Learning), which means those pages are showing historical/frozen data with no currently-active write path feeding them, rather than being wired to whichever pipeline generation is actually running today.
+
+The Learning page (`/learning`) and Settings page (`/settings`) read from the *legacy* tables (`learning_reports`, `signal_performance`, `signal_weights`) rather than the tables the current dynamic pipeline actually updates (`learning_insights`, `research_signal_performance`, `research_scoring_weights`), while the Dashboard reads from the newer tables. This means the Learning/Settings pages and the Dashboard's own "What the System Has Learned" section can be describing two different scoring systems at the same time.
+
+`lib/ai/prompts.ts`, including the more elaborate `AGENT_CHAT_SYSTEM_PROMPT` context-stuffing design, is present in the codebase but not imported or executed anywhere — it has been fully superseded by the slim tool-calling chat design in `lib/ai/chatToolDefinitions.ts` / `/api/agent-chat`.
+
+The Congress Trades module keeps no persistent history (in-memory cache only, cleared on every redeploy) and is fully disconnected from the prediction/scoring/learning system, as described in §8 — it functions purely as a read-only reference feed today.
+
+The Settings page is explicitly read-only; its own copy states that adjustable weights are planned "in a future update" but are not implemented.
+
+The `/demo` route is an orphaned page (four iframes of external news sites) with no navigation entry pointing to it and no data fetching — it appears to be a leftover from an earlier news-source connectivity test rather than a current feature.
+
+Every real-time data dependency — Twelve Data (quotes/bars/technicals), MarketData.app (option chains), Finnhub (news/earnings), StockFit (fundamentals/filings), the RSS feed list, and OpenAI itself — is treated as optional at every call site: each one degrades to an explicit warning rather than fabricated data when unavailable, which is a deliberate "no mock data" engineering rule (`stock-research-agent-api/CLAUDE.md`), but it also means the depth and confidence of any given day's predictions and candidates is directly gated by which of those API keys happen to be configured and healthy at run time.
+
+The actual cron schedule that triggers Morning Scan / EOD Review / Learning Update / Weekly Research lives outside both repositories in this workspace — in Supabase Edge Functions and a `pg_cron` job definition inside the linked Supabase project — so the exact cadence is not discoverable from this codebase alone; only the fact that it calls the .NET job endpoints with a shared secret is documented here (`stock-research-agent-api/CLAUDE.md`).
+
+No authentication, authorization, or multi-user data model exists anywhere in either application — this is architecturally a single-user system.
+
+---
+
+## 10. Future Vision
+
+There is no dedicated roadmap document in either repository (no `ROADMAP.md`, no phase plan, no explicit "next steps" file was found). What follows is inferred strictly from naming and structure already present in the code, not from any stated plan — it should be read as "what the current design implies it is heading toward," not as a confirmed plan.
+
+The `candidate_mode` enum on `paper_stock_candidates` (`learning` → `actionable_shadow` → `live_eligible`) and the `quality_tier` enum (`very_weak` → `weak` → `medium` → `strong_paper` → `production_candidate`), together with a versioned `ThresholdPolicyVersion` field (currently `learning_options_v1`) attached to every candidate, describe a graduation path: candidates start in a pure-learning bucket where nothing is actionable, and — as confidence/risk thresholds are met and a track record accumulates in `stock_learning_stats`/`option_learning_stats` — individual setups could eventually be distinguished as "live eligible" or "production" candidates. Today, the UI does not treat `live_eligible` items any differently from `learning` items beyond a text label, and there is no code path anywhere that places a real order or connects to a brokerage — the system currently stops at fully simulated, paper-only tracking for every candidate mode.
+
+The Settings page's own copy ("These will be adjustable in a future update — for now, this is a preview") indicates an intended move from the current read-only, algorithm-managed scoring weights toward direct user control over signal weighting.
+
+The presence of a chat-tool architecture (`chatToolDefinitions.ts`) that is explicitly designed to be extended with more callable tools, and a `get_ticker_detail` tool already shared between the chat assistant and the Watchlist page's detail modal, suggests the tool-calling surface is intended to keep growing as the single integration point between the AI assistant and new data the system starts tracking.
+
+Beyond these code-level signals, no further intended phases, integrations, or feature plans could be confirmed from the source.

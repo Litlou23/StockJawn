@@ -3,17 +3,158 @@
 import { useEffect, useMemo, useState } from 'react';
 import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
-import type {
-  CongressionalTrade,
-  CongressionalTradesResult,
-} from '@/services/congressionalTrades/congressionalTrades.types';
 
-function formatAmount(min: number, max: number): string {
-  const fmt = (n: number) => (n >= 1_000_000 ? `$${(n / 1_000_000).toFixed(1)}M` : `$${(n / 1000).toFixed(0)}K`);
-  return `${fmt(min)} – ${fmt(max)}`;
+// ---------------------------------------------------------------------------
+// Types matching GET /api/congress-intelligence response
+// ---------------------------------------------------------------------------
+
+interface PipelineMetrics {
+  filingsProcessed: number;
+  tradesParsed: number;
+  signalsGenerated: number;
+  qualifiedCandidates: number;
+  promotedToWatchlist: number;
+  predictionsGenerated: number;
+  paperTrades: number;
 }
 
-function ActionBadge({ action }: { action: CongressionalTrade['action'] }) {
+interface SignalPerf {
+  signalName: string;
+  totalPredictions: number;
+  correctPredictions: number;
+  accuracy: number;
+  weight: number;
+  lastUpdatedAt: string;
+}
+
+interface PipelineSignal {
+  signalType: string;
+  strength: number;
+  confidence: number;
+  active: boolean;
+  expiresAt: string | null;
+}
+
+type PipelineStage = 'parsed' | 'signal' | 'qualified' | 'watchlist' | 'prediction' | 'evaluated';
+
+interface PipelineTrade {
+  id: string;
+  ticker: string;
+  politician: string;
+  chamber: string;
+  stateDistrict: string;
+  action: string;
+  amountMin: number;
+  amountMax: number;
+  transactionDate: string;
+  filingDate: string;
+  daysLag: number;
+  pdfUrl: string;
+  partial: boolean;
+  assetName: string;
+  pipelineReached: PipelineStage;
+  filterReason: string | null;
+  signal: PipelineSignal | null;
+}
+
+interface CongressIntelligenceData {
+  metrics: PipelineMetrics;
+  signalPerformance: SignalPerf[];
+  trades: PipelineTrade[];
+  clusterTickers: string[];
+  skippedFilings: { docId: string; politician: string; reason: string }[];
+  warnings: string[];
+  lastCollected: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatAmount(min: number, max: number): string {
+  const fmt = (n: number) =>
+    n >= 1_000_000 ? `$${(n / 1_000_000).toFixed(1)}M` : `$${(n / 1000).toFixed(0)}K`;
+  return `${fmt(min)}–${fmt(max)}`;
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return '—';
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function accuracyColor(accuracy: number): string {
+  if (accuracy >= 0.6) return 'text-green-400';
+  if (accuracy >= 0.4) return 'text-yellow-400';
+  return 'text-red-400';
+}
+
+function weightColor(weight: number): string {
+  if (weight >= 1.2) return 'text-green-400';
+  if (weight >= 0.8) return 'text-zinc-200';
+  return 'text-red-400';
+}
+
+function strengthColor(strength: number): string {
+  if (strength >= 0.7) return 'text-green-400';
+  if (strength >= 0.5) return 'text-yellow-400';
+  return 'text-zinc-300';
+}
+
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function StatCard({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string | number;
+  accent?: 'green' | 'yellow' | 'red';
+}) {
+  const valueColor =
+    accent === 'green'
+      ? 'text-green-400'
+      : accent === 'yellow'
+        ? 'text-yellow-400'
+        : accent === 'red'
+          ? 'text-red-400'
+          : 'text-zinc-100';
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-center">
+      <div className={`text-xl font-bold ${valueColor}`}>{value}</div>
+      <div className="mt-0.5 text-[10px] text-zinc-500">{label}</div>
+    </div>
+  );
+}
+
+function Section({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+      <div className="flex items-center gap-2">
+        <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>
+        {subtitle && <span className="text-[10px] text-zinc-500">{subtitle}</span>}
+      </div>
+      <div className="mt-3">{children}</div>
+    </div>
+  );
+}
+
+function ActionBadge({ action }: { action: string }) {
   const styles =
     action === 'buy'
       ? 'bg-green-950/60 text-green-300 border-green-800'
@@ -27,20 +168,151 @@ function ActionBadge({ action }: { action: CongressionalTrade['action'] }) {
   );
 }
 
-export default function CongressTradesPage() {
-  const [result, setResult] = useState<CongressionalTradesResult | null>(null);
+const PIPELINE_STAGES: PipelineStage[] = [
+  'parsed',
+  'signal',
+  'qualified',
+  'watchlist',
+  'prediction',
+  'evaluated',
+];
+
+const STAGE_LABELS: Record<PipelineStage, string> = {
+  parsed: 'Parsed',
+  signal: 'Signal',
+  qualified: 'Qualified',
+  watchlist: 'Watchlist',
+  prediction: 'Prediction',
+  evaluated: 'Evaluated',
+};
+
+function PipelineIndicator({ reached }: { reached: PipelineStage }) {
+  const reachedIndex = PIPELINE_STAGES.indexOf(reached);
+  return (
+    <div className="flex flex-wrap items-center gap-1 text-[10px]">
+      <span className="text-zinc-500">Pipeline:</span>
+      {PIPELINE_STAGES.map((stage, i) => (
+        <span key={stage} className="flex items-center gap-1">
+          {i > 0 && <span className="text-zinc-700">→</span>}
+          <span className={i <= reachedIndex ? 'text-green-400' : 'text-zinc-700'}>
+            {i <= reachedIndex ? '●' : '○'}
+          </span>
+          <span className={i <= reachedIndex ? 'text-zinc-300' : 'text-zinc-600'}>
+            {STAGE_LABELS[stage]}
+          </span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function TradeCard({ trade, isCluster }: { trade: PipelineTrade; isCluster: boolean }) {
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+      {/* Row 1: ticker, action, amount, filing link */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-sm font-semibold text-zinc-100">{trade.ticker}</span>
+          <ActionBadge action={trade.action} />
+          {trade.partial && <span className="text-[10px] text-zinc-500">partial</span>}
+          <span className="text-xs text-zinc-400">
+            {formatAmount(trade.amountMin, trade.amountMax)}
+          </span>
+          {isCluster && (
+            <span className="rounded border border-purple-800 bg-purple-950/40 px-1.5 py-0.5 text-[10px] font-medium text-purple-300">
+              cluster
+            </span>
+          )}
+        </div>
+        <a
+          href={trade.pdfUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-xs text-zinc-500 hover:text-violet-400"
+        >
+          View filing ↗
+        </a>
+      </div>
+
+      {/* Row 2: politician, location, dates */}
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
+        <span className="font-medium text-zinc-300">{trade.politician}</span>
+        {trade.stateDistrict && <span>{trade.stateDistrict}</span>}
+        <span>Traded {trade.transactionDate}</span>
+        <span>Filed {trade.filingDate}</span>
+        <span className="text-zinc-500">({trade.daysLag}d lag)</span>
+      </div>
+
+      {/* Row 3: pipeline indicator */}
+      <div className="mt-3 border-t border-zinc-800/50 pt-3">
+        <PipelineIndicator reached={trade.pipelineReached} />
+      </div>
+
+      {/* Row 4: filter reason if stopped early */}
+      {trade.filterReason && (
+        <p className="mt-1.5 text-[10px] text-zinc-500">Filtered: {trade.filterReason}</p>
+      )}
+
+      {/* Row 5: signal details if signal was generated */}
+      {trade.signal && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px]">
+          <span className="text-zinc-500">
+            Signal:{' '}
+            <span className="font-medium text-purple-400">
+              {trade.signal.signalType.replace('congressional_', '')}
+            </span>
+          </span>
+          <span className="text-zinc-500">
+            strength{' '}
+            <span className={`font-mono ${strengthColor(trade.signal.strength)}`}>
+              {trade.signal.strength.toFixed(1)}
+            </span>
+          </span>
+          <span className="text-zinc-500">
+            confidence{' '}
+            <span className="font-mono text-zinc-300">{trade.signal.confidence.toFixed(1)}</span>
+          </span>
+          {trade.signal.active ? (
+            <span className="rounded bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400">
+              active
+            </span>
+          ) : (
+            <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
+              expired
+            </span>
+          )}
+          {trade.signal.expiresAt && (
+            <span className="text-zinc-600">
+              expires {new Date(trade.signal.expiresAt).toLocaleDateString()}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Page
+// ---------------------------------------------------------------------------
+
+type StageFilter = 'all' | PipelineStage;
+
+export default function CongressIntelligencePage() {
+  const [data, setData] = useState<CongressIntelligenceData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [tickerFilter, setTickerFilter] = useState('');
+  const [stageFilter, setStageFilter] = useState<StageFilter>('all');
+  const [searchFilter, setSearchFilter] = useState('');
 
-  // Parses a response defensively: serverless platforms return HTML error
-  // pages on timeouts, which would otherwise crash res.json().
   const readJson = async (res: Response) => {
     const text = await res.text();
     try {
       return JSON.parse(text);
     } catch {
-      throw new Error(`HTTP ${res.status} — server returned a non-JSON response (likely a function timeout)`);
+      throw new Error(
+        `HTTP ${res.status} — server returned a non-JSON response (likely a function timeout)`,
+      );
     }
   };
 
@@ -48,102 +320,56 @@ export default function CongressTradesPage() {
     setLoading(true);
     setError(null);
     try {
-      // Each chamber is a separate request so both fit inside serverless
-      // time limits; either can fail without hiding the other.
-      const qs = refresh ? '&refresh=1' : '';
-      const [houseRes, senateRes] = await Promise.allSettled(
-        (['house', 'senate'] as const).map(async (chamber) => {
-          const res = await fetch(`/api/congressional-trades?chamber=${chamber}${qs}`);
-          const data = await readJson(res);
-          if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-          return data as CongressionalTradesResult;
-        }),
-      );
-
-      const merged: CongressionalTradesResult = {
-        trades: [],
-        skippedFilings: [],
-        aiInsight: null,
-        warnings: [],
-        filingsChecked: 0,
-        generatedAt: new Date().toISOString(),
-        fromCache: false,
-      };
-
-      ([['House', houseRes], ['Senate', senateRes]] as const).forEach(([label, r]) => {
-        if (r.status === 'fulfilled') {
-          merged.trades.push(...r.value.trades);
-          merged.skippedFilings.push(...r.value.skippedFilings);
-          merged.warnings.push(...r.value.warnings);
-          merged.filingsChecked += r.value.filingsChecked;
-          merged.fromCache = merged.fromCache || r.value.fromCache;
-        } else {
-          merged.warnings.push(
-            `${label} filings unavailable: ${r.reason instanceof Error ? r.reason.message : 'fetch failed'}`,
-          );
-        }
-      });
-
-      if (houseRes.status === 'rejected' && senateRes.status === 'rejected') {
-        throw new Error(merged.warnings.join(' · '));
-      }
-
-      merged.trades.sort((a, b) => b.transactionDate.localeCompare(a.transactionDate));
-      setResult(merged);
-      setLoading(false);
-
-      // AI insight arrives as a follow-up so the trades render immediately.
-      if (merged.trades.length > 0) {
-        try {
-          const res = await fetch('/api/congressional-trades/insight', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trades: merged.trades }),
-          });
-          const data = await readJson(res);
-          if (res.ok && data.aiInsight) {
-            setResult((prev) => (prev ? { ...prev, aiInsight: data.aiInsight } : prev));
-          }
-        } catch {
-          // Insight is optional — the trades are already on screen.
-        }
-      }
+      const res = await fetch(`/api/congress-intelligence${refresh ? '?refresh=1' : ''}`);
+      const json = await readJson(res);
+      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      setData(json as CongressIntelligenceData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load trades');
+      setError(err instanceof Error ? err.message : 'Failed to load intelligence data');
+    } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+  }, []);
 
   const filteredTrades = useMemo(() => {
-    if (!result) return [];
-    const q = tickerFilter.trim().toUpperCase();
-    if (!q) return result.trades;
-    return result.trades.filter((t) => t.ticker.includes(q) || t.politician.toUpperCase().includes(q));
-  }, [result, tickerFilter]);
+    if (!data) return [];
+    let trades = data.trades;
 
-  const tickerCounts = useMemo(() => {
-    const counts = new Map<string, { buys: number; sells: number }>();
-    for (const t of result?.trades ?? []) {
-      const entry = counts.get(t.ticker) ?? { buys: 0, sells: 0 };
-      if (t.action === 'buy') entry.buys += 1;
-      else if (t.action === 'sell') entry.sells += 1;
-      counts.set(t.ticker, entry);
+    // Stage filter
+    if (stageFilter !== 'all') {
+      const stageIndex = PIPELINE_STAGES.indexOf(stageFilter);
+      trades = trades.filter((t) => PIPELINE_STAGES.indexOf(t.pipelineReached) >= stageIndex);
     }
-    return [...counts.entries()]
-      .sort((a, b) => b[1].buys + b[1].sells - (a[1].buys + a[1].sells))
-      .slice(0, 8);
-  }, [result]);
+
+    // Text search
+    const q = searchFilter.trim().toUpperCase();
+    if (q) {
+      trades = trades.filter(
+        (t) => t.ticker.includes(q) || t.politician.toUpperCase().includes(q),
+      );
+    }
+
+    return trades;
+  }, [data, stageFilter, searchFilter]);
+
+  const clusterSet = useMemo(
+    () => new Set(data?.clusterTickers ?? []),
+    [data?.clusterTickers],
+  );
 
   return (
     <AppShell>
       <div className="mx-auto max-w-5xl space-y-6 p-6">
+        {/* ── Header ─────────────────────────────────────────────── */}
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-zinc-100">Congress Trades</h1>
+            <h1 className="text-xl font-semibold text-zinc-100">Congress Intelligence Engine</h1>
             <p className="mt-1 text-sm text-zinc-400">
-              Stock trades disclosed by House and Senate members, parsed from public STOCK Act filings
+              Pipeline observability — filings → signals → watchlist → predictions → learning
             </p>
           </div>
           <button
@@ -151,146 +377,214 @@ export default function CongressTradesPage() {
             onClick={() => load(true)}
             disabled={loading}
             className={`rounded-lg px-4 py-2 text-sm font-medium transition ${
-              loading ? 'cursor-wait bg-zinc-800 text-zinc-500' : 'bg-violet-600 text-white hover:bg-violet-500'
+              loading
+                ? 'cursor-wait bg-zinc-800 text-zinc-500'
+                : 'bg-violet-600 text-white hover:bg-violet-500'
             }`}
           >
-            {loading ? 'Fetching…' : 'Refresh Filings'}
+            {loading ? 'Collecting…' : 'Collect Signals'}
           </button>
         </div>
 
         <FullScreenLoader
           loading={loading}
-          message="Reading Congressional Filings..."
-          detail="Downloading and parsing disclosure reports from the House Clerk"
+          message="Collecting Congressional Intelligence..."
+          detail="Downloading filings, parsing trades, computing pipeline status"
           steps={[
             'Downloading filing index...',
-            'Locating transaction reports...',
-            'Parsing disclosure PDFs...',
-            'Generating AI insight...',
+            'Parsing disclosure reports...',
+            'Applying gate filters...',
+            'Computing signal strength...',
           ]}
         />
 
+        {/* ── Error ──────────────────────────────────────────────── */}
         {error && (
           <div className="rounded-lg border border-red-800 bg-red-950/30 p-4">
             <p className="text-sm text-red-300">{error}</p>
           </div>
         )}
 
-        {result?.aiInsight && (
-          <div className="rounded-lg border border-violet-800 bg-violet-950/30 p-4">
-            <p className="mb-1 text-xs font-medium uppercase tracking-wide text-violet-400">AI Insight</p>
-            <p className="text-sm leading-relaxed text-zinc-200">{result.aiInsight}</p>
-          </div>
-        )}
-
-        {result && result.warnings.length > 0 && (
-          <div className="rounded-lg border border-yellow-800 bg-yellow-950/30 p-3">
-            {result.warnings.map((w) => (
-              <p key={w} className="text-xs text-yellow-300">⚠ {w}</p>
-            ))}
-          </div>
-        )}
-
-        {tickerCounts.length > 0 && (
-          <div>
-            <h2 className="mb-2 text-sm font-medium text-zinc-300">Most-Traded Tickers</h2>
-            <div className="flex flex-wrap gap-2">
-              {tickerCounts.map(([ticker, { buys, sells }]) => (
-                <button
-                  key={ticker}
-                  type="button"
-                  onClick={() => setTickerFilter(tickerFilter === ticker ? '' : ticker)}
-                  className={`rounded-lg border px-3 py-1.5 text-xs transition ${
-                    tickerFilter === ticker
-                      ? 'border-violet-600 bg-violet-950/50 text-violet-200'
-                      : 'border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-600'
-                  }`}
-                >
-                  <span className="font-mono font-semibold">{ticker}</span>
-                  <span className="ml-2 text-green-400">{buys}B</span>
-                  <span className="ml-1 text-red-400">{sells}S</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {result && (
-          <div>
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-sm font-medium text-zinc-300">
-                Disclosed Trades ({filteredTrades.length})
-              </h2>
-              <input
-                type="text"
-                value={tickerFilter}
-                onChange={(e) => setTickerFilter(e.target.value)}
-                placeholder="Filter by ticker or name…"
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-violet-600 focus:outline-none"
+        {data && (
+          <>
+            {/* ── 1. Pipeline Metrics ──────────────────────────────── */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
+              <StatCard label="Filings Processed" value={data.metrics.filingsProcessed} />
+              <StatCard label="Trades Parsed" value={data.metrics.tradesParsed} />
+              <StatCard
+                label="Signals Generated"
+                value={data.metrics.signalsGenerated}
+                accent={data.metrics.signalsGenerated > 0 ? 'green' : undefined}
               />
+              <StatCard label="Qualified Research" value={data.metrics.qualifiedCandidates} />
+              <StatCard
+                label="Promoted to Watchlist"
+                value={data.metrics.promotedToWatchlist}
+                accent={data.metrics.promotedToWatchlist > 0 ? 'green' : undefined}
+              />
+              <StatCard label="Predictions Generated" value={data.metrics.predictionsGenerated} />
+              <StatCard label="Paper Trades" value={data.metrics.paperTrades} />
             </div>
 
-            <div className="space-y-2">
-              {filteredTrades.map((trade) => (
-                <div key={trade.id} className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-3">
-                      <span className="font-mono text-sm font-semibold text-zinc-100">{trade.ticker}</span>
-                      <ActionBadge action={trade.action} />
-                      {trade.partial && <span className="text-[10px] text-zinc-500">partial</span>}
-                      <span className="text-xs text-zinc-400">{formatAmount(trade.amountMin, trade.amountMax)}</span>
-                    </div>
-                    <a
-                      href={trade.pdfUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-zinc-500 hover:text-violet-400"
-                    >
-                      View filing ↗
-                    </a>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-400">
-                    <span className="font-medium text-zinc-300">{trade.politician}</span>
-                    <span>{trade.stateDistrict}</span>
-                    <span>Traded {trade.transactionDate}</span>
-                    <span>Disclosed {trade.filingDate}</span>
-                  </div>
-                  {trade.assetName && (
-                    <p className="mt-1 truncate text-xs text-zinc-500">{trade.assetName}</p>
-                  )}
+            {/* ── 2. Signal Performance ─────────────────────────────── */}
+            <Section
+              title="Signal Performance"
+              subtitle="Learning engine stats for congressional signals"
+            >
+              {data.signalPerformance.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-zinc-800 text-zinc-500">
+                        <th className="pb-2 pr-3 font-medium">Signal Type</th>
+                        <th className="pb-2 pr-3 text-right font-medium">Predictions</th>
+                        <th className="pb-2 pr-3 text-right font-medium">Correct</th>
+                        <th className="pb-2 pr-3 text-right font-medium">Accuracy</th>
+                        <th className="pb-2 text-right font-medium">Weight</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.signalPerformance.map((s) => (
+                        <tr key={s.signalName} className="border-b border-zinc-800/50">
+                          <td className="py-2 pr-3 font-medium text-zinc-200">
+                            {s.signalName.replace('research_congressional_', '')}
+                          </td>
+                          <td className="py-2 pr-3 text-right text-zinc-400">
+                            {s.totalPredictions}
+                          </td>
+                          <td className="py-2 pr-3 text-right text-zinc-400">
+                            {s.correctPredictions}
+                          </td>
+                          <td
+                            className={`py-2 pr-3 text-right font-mono font-medium ${accuracyColor(s.accuracy)}`}
+                          >
+                            {(s.accuracy * 100).toFixed(1)}%
+                          </td>
+                          <td
+                            className={`py-2 text-right font-mono font-medium ${weightColor(s.weight)}`}
+                          >
+                            {s.weight.toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="mt-2 text-[10px] text-zinc-600">
+                    Last updated: {timeAgo(data.signalPerformance[0]?.lastUpdatedAt)}
+                  </p>
                 </div>
-              ))}
-
-              {filteredTrades.length === 0 && !loading && (
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-6 text-center text-sm text-zinc-500">
-                  No trades match the current filter.
-                </div>
+              ) : (
+                <p className="text-sm text-zinc-500">
+                  No performance data yet. The learning engine needs evaluated predictions with
+                  congressional signals to start tracking accuracy.
+                </p>
               )}
-            </div>
-          </div>
-        )}
+            </Section>
 
-        {result && result.skippedFilings.length > 0 && (
-          <details className="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
-            <summary className="cursor-pointer text-xs text-zinc-400">
-              {result.skippedFilings.length} filing(s) could not be parsed
-            </summary>
-            <ul className="mt-2 space-y-1">
-              {result.skippedFilings.map((s) => (
-                <li key={s.docId} className="text-xs text-zinc-500">
-                  {s.politician} (#{s.docId}) — {s.reason}
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+            {/* ── 3. Trade Pipeline ─────────────────────────────────── */}
+            <Section title="Trade Pipeline" subtitle={`${data.trades.length} trades processed`}>
+              {/* Filters */}
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap gap-1">
+                  {(
+                    [
+                      'all',
+                      'parsed',
+                      'signal',
+                      'qualified',
+                      'watchlist',
+                      'prediction',
+                      'evaluated',
+                    ] as StageFilter[]
+                  ).map((stage) => (
+                    <button
+                      key={stage}
+                      type="button"
+                      onClick={() => setStageFilter(stage)}
+                      className={`rounded-lg border px-2.5 py-1 text-[10px] font-medium transition ${
+                        stageFilter === stage
+                          ? 'border-violet-600 bg-violet-950/50 text-violet-200'
+                          : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600'
+                      }`}
+                    >
+                      {stage === 'all'
+                        ? 'All'
+                        : stage.charAt(0).toUpperCase() + stage.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  type="text"
+                  value={searchFilter}
+                  onChange={(e) => setSearchFilter(e.target.value)}
+                  placeholder="Filter by ticker or name…"
+                  className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-200 placeholder-zinc-500 focus:border-violet-600 focus:outline-none"
+                />
+              </div>
 
-        {result && (
-          <p className="text-[11px] text-zinc-600">
-            Source: House Clerk & Senate eFD public disclosures · {result.filingsChecked} most recent filings checked ·
-            Updated {new Date(result.generatedAt).toLocaleString()}
-            {result.fromCache ? ' (cached)' : ''} · Note: politicians have up to 45 days to disclose trades.
-          </p>
+              {/* Trade cards */}
+              <div className="space-y-2">
+                {filteredTrades.map((trade) => (
+                  <TradeCard
+                    key={trade.id}
+                    trade={trade}
+                    isCluster={clusterSet.has(trade.ticker)}
+                  />
+                ))}
+                {filteredTrades.length === 0 && !loading && (
+                  <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-6 text-center text-sm text-zinc-500">
+                    {stageFilter !== 'all'
+                      ? `No trades reached the "${stageFilter}" stage.`
+                      : 'No trades match the current filter.'}
+                  </div>
+                )}
+              </div>
+            </Section>
+
+            {/* ── 4. Processing Log ─────────────────────────────────── */}
+            {(data.skippedFilings.length > 0 || data.warnings.length > 0) && (
+              <Section
+                title="Processing Log"
+                subtitle={`${data.skippedFilings.length} skipped · ${data.warnings.length} warnings`}
+              >
+                {data.warnings.length > 0 && (
+                  <div className="mb-3 rounded-lg border border-yellow-800/50 bg-yellow-950/20 p-3">
+                    {data.warnings.map((w) => (
+                      <p key={w} className="text-xs text-yellow-300/80">
+                        ⚠ {w}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {data.skippedFilings.length > 0 && (
+                  <details>
+                    <summary className="cursor-pointer text-xs text-zinc-400">
+                      {data.skippedFilings.length} filing(s) could not be parsed
+                    </summary>
+                    <div className="mt-2 space-y-1">
+                      {data.skippedFilings.map((s) => (
+                        <div
+                          key={s.docId}
+                          className="flex items-center gap-3 text-xs text-zinc-500"
+                        >
+                          <span className="font-mono text-zinc-600">#{s.docId}</span>
+                          <span className="text-zinc-400">{s.politician}</span>
+                          <span className="text-zinc-600">— {s.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </Section>
+            )}
+
+            {/* ── Footer ───────────────────────────────────────────── */}
+            <p className="text-[11px] text-zinc-600">
+              Source: House Clerk &amp; Senate eFD public disclosures · Last collected{' '}
+              {timeAgo(data.lastCollected)} · Signals expire after 90 days · Gate filters: buys
+              ≥$15K, lag ≤90d
+            </p>
+          </>
         )}
       </div>
     </AppShell>

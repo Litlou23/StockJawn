@@ -340,14 +340,21 @@ public class OptionsLabController : ControllerBase
     [HttpGet("tests")]
     public IActionResult RunTests()
     {
-        var (passed, failed, failures) = OptionsLabTests.RunAll();
+        var (p1, f1, failures1) = OptionsLabTests.RunAll();
+        var (p2, f2, failures2) = DirectionNeutralScoringTests.RunAll();
+        var allFailures = failures1.Concat(failures2).ToList();
         return Ok(new
         {
-            passed,
-            failed,
-            total = passed + failed,
-            allPassed = failed == 0,
-            failures,
+            passed = p1 + p2,
+            failed = f1 + f2,
+            total = p1 + f1 + p2 + f2,
+            allPassed = f1 + f2 == 0,
+            failures = allFailures,
+            suites = new
+            {
+                optionsLab = new { passed = p1, failed = f1, failures = failures1 },
+                directionNeutralScoring = new { passed = p2, failed = f2, failures = failures2 },
+            },
         });
     }
 }

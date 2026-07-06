@@ -593,6 +593,7 @@ public class DynamicPickOrchestrator
             optionsProviderConfigured: _optionsProvider.IsConfigured);
 
         var reason = $"Prediction conf={pred.ConfidenceScore}, risk={pred.RiskScore}. " +
+                     $"Bull={pred.BullishScore:F1}, Bear={pred.BearishScore:F1}, dir={pred.WinningDirection ?? "n/a"}. " +
                      $"Deterministic total {total} (catalyst={catalystScore}, trend={trendScore}, " +
                      $"volume={volumeScore}, market={marketContextScore}, histAcc={histAcc}, " +
                      $"missingPenalty={missingPenalty}). Mode={candidateMode}, tier={qualityTier}, " +
@@ -633,6 +634,9 @@ public class DynamicPickOrchestrator
                 : $"paper stock candidate retained for evaluation; option path blocked by {exclusionReason ?? "policy"}",
             ExclusionReason = qualifies ? null : exclusionReason,
             ScorePercentileInRun = percentileInRun,
+            BullishScore = pred.BullishScore,
+            BearishScore = pred.BearishScore,
+            WinningDirection = pred.WinningDirection,
             Status = status,
             QualifiesForOptions = qualifies,
         };

@@ -270,7 +270,7 @@ public class ResearchRepository
 
     public async Task<bool> UpsertSignalPerformanceAsync(object perf)
     {
-        return await _db.UpsertAsync("research_signal_performance", perf, "signal_name");
+        return await _db.UpsertAsync("research_signal_performance", perf, "signal_name,direction");
     }
 
     public async Task<List<ResearchSignalPerformance>> GetAllSignalPerformanceAsync()
@@ -524,6 +524,10 @@ public class ResearchRepository
         ActionabilityScore = r["actionability_score"] is null ? null : GetInt(r, "actionability_score"),
         ActionabilityTier = Enum.TryParse<ActionabilityTier>(r["actionability_tier"]?.ToString(), out var actTier)
             ? actTier : (ActionabilityTier?)null,
+        BullishScore = GetNullableDouble(r, "bullish_score"),
+        BearishScore = GetNullableDouble(r, "bearish_score"),
+        WinningDirection = r["winning_direction"]?.ToString(),
+        DirectionConfidence = GetNullableDouble(r, "direction_confidence"),
         BullishCase = r["bullish_case"]?.ToString() ?? "",
         BearishCase = r["bearish_case"]?.ToString() ?? "",
         PredictionReason = r["prediction_reason"]?.ToString() ?? "",
@@ -568,6 +572,7 @@ public class ResearchRepository
         Id = r["id"]?.ToString() ?? "",
         SignalName = r["signal_name"]?.ToString() ?? "",
         SignalType = r["signal_type"]?.ToString() ?? "",
+        Direction = r["direction"]?.ToString() ?? "all",
         TotalPredictions = GetInt(r, "total_predictions"),
         CorrectPredictions = GetInt(r, "correct_predictions"),
         Accuracy = GetDouble(r, "accuracy"),

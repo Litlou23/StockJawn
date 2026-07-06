@@ -254,6 +254,10 @@ public class PredictionGenerator
         var confidence = scoring.Confidence;
         var risk = scoring.Risk;
         var totalScore = scoring.DirectionalScore;
+        var bullishScore = scoring.BullishScore;
+        var bearishScore = scoring.BearishScore;
+        var winningDirection = scoring.WinningDirection;
+        var directionMargin = scoring.DirectionMargin;
         var allSignals = scoring.Signals;
 
         if (confidence < 5 && predType == "watch_only") return (null, []);
@@ -329,6 +333,10 @@ public class PredictionGenerator
             ConfidenceScore = confidence,
             ImportanceScore = Math.Min(Math.Abs((int)totalScore), 100),
             RiskScore = risk,
+            BullishScore = bullishScore,
+            BearishScore = bearishScore,
+            WinningDirection = winningDirection,
+            DirectionConfidence = directionMargin,
             EntryReferencePrice = entryPrice,
             Atr14 = priceCalc.Atr14,
             AtrPercent = priceCalc.AtrPercent,
@@ -373,8 +381,8 @@ public class PredictionGenerator
         }
 
         _logger.LogInformation(
-            "[prediction] {Ticker}: {Direction} (conf={Conf}, risk={Risk}, score={Score:F1}) — AI explanation: {HasAI}",
-            ticker, predType, confidence, risk, totalScore, explanation is not null);
+            "[prediction] {Ticker}: {Direction} (conf={Conf}, risk={Risk}, bull={Bull:F1}, bear={Bear:F1}, margin={Margin:F1}) — AI explanation: {HasAI}",
+            ticker, predType, confidence, risk, bullishScore, bearishScore, directionMargin, explanation is not null);
 
         return (prediction, inputs);
     }
@@ -501,6 +509,8 @@ public class PredictionGenerator
         sb.AppendLine("### Computed prediction (from scoring engine — do NOT change these):");
         sb.AppendLine($"- Direction: {direction}");
         sb.AppendLine($"- Total score: {totalScore:F1}");
+        sb.AppendLine($"- Bullish score: {Math.Max(0, totalScore):F1} (independent bullish evidence)");
+        sb.AppendLine($"- Bearish score: {Math.Max(0, -totalScore):F1} (independent bearish evidence)");
         sb.AppendLine($"- Confidence: {confidence}/100");
         sb.AppendLine($"- Risk: {risk}/100");
         sb.AppendLine();

@@ -60,6 +60,9 @@ public class PaperStockCandidateRepository
                 inclusion_reason = c.InclusionReason,
                 exclusion_reason = c.ExclusionReason,
                 score_percentile_in_run = c.ScorePercentileInRun,
+                bullish_score = c.BullishScore,
+                bearish_score = c.BearishScore,
+                winning_direction = c.WinningDirection,
                 status = c.Status.ToString(),
                 qualifies_for_options = c.QualifiesForOptions,
             }
@@ -253,6 +256,9 @@ public class PaperStockCandidateRepository
         InclusionReason = r["inclusion_reason"]?.ToString() ?? "",
         ExclusionReason = r["exclusion_reason"]?.ToString(),
         ScorePercentileInRun = GetDouble(r, "score_percentile_in_run"),
+        BullishScore = GetNullableDouble(r, "bullish_score"),
+        BearishScore = GetNullableDouble(r, "bearish_score"),
+        WinningDirection = r["winning_direction"]?.ToString(),
         Status = Enum.TryParse<PaperStockStatus>(r["status"]?.ToString(), out var s)
             ? s : PaperStockStatus.open,
         QualifiesForOptions = GetBool(r, "qualifies_for_options"),

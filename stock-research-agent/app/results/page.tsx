@@ -95,7 +95,7 @@ export default function ResultsPage() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/research/predictions?limit=100').then((r) => r.ok ? r.json() : { predictions: [] }),
+      fetch('/api/research/predictions?limit=500').then((r) => r.ok ? r.json() : { predictions: [] }),
       fetch('/api/research/outcomes').then((r) => r.ok ? r.json() : { outcomes: [] }),
     ])
       .then(([predData, outcomeData]) => {
@@ -142,20 +142,26 @@ export default function ResultsPage() {
     }
   });
 
-  // Stats
+  // Stats — only count directional predictions (bullish/bearish) for accuracy.
+  // Non-directional types (watch_only, neutral_no_edge, etc.) don't have a
+  // direction call, so including them would falsely drag the hit rate down.
+  const directional = evaluated.filter(
+    (e) => e.prediction.predictionType === 'bullish' || e.prediction.predictionType === 'bearish',
+  );
   const totalEvaluated = evaluated.length;
-  const correct = evaluated.filter((e) => e.outcome?.directionCorrect === true).length;
-  const hitRate = totalEvaluated > 0 ? (correct / totalEvaluated) * 100 : 0;
-  const avgMove = totalEvaluated > 0
-    ? evaluated.reduce((sum, e) => sum + (e.outcome?.percentMove ?? 0), 0) / totalEvaluated
+  const totalDirectional = directional.length;
+  const correct = directional.filter((e) => e.outcome?.directionCorrect === true).length;
+  const hitRate = totalDirectional > 0 ? (correct / totalDirectional) * 100 : 0;
+  const avgMove = totalDirectional > 0
+    ? directional.reduce((sum, e) => sum + (e.outcome?.percentMove ?? 0), 0) / totalDirectional
     : 0;
-  const avgScore = totalEvaluated > 0
-    ? evaluated.reduce((sum, e) => sum + (e.outcome?.outcomeScore ?? 0), 0) / totalEvaluated
+  const avgScore = totalDirectional > 0
+    ? directional.reduce((sum, e) => sum + (e.outcome?.outcomeScore ?? 0), 0) / totalDirectional
     : 0;
 
-  // Per-ticker summary
+  // Per-ticker summary (directional only)
   const tickerStats = new Map<string, { correct: number; total: number; totalMove: number }>();
-  for (const e of evaluated) {
+  for (const e of directional) {
     const t = e.prediction.ticker;
     const prev = tickerStats.get(t) ?? { correct: 0, total: 0, totalMove: 0 };
     prev.total++;
@@ -173,7 +179,7 @@ export default function ResultsPage() {
           <div>
             <h1 className="text-lg font-bold text-zinc-100">Results</h1>
             <p className="text-sm text-zinc-500">
-              {predictions.length} predictions · {totalEvaluated} evaluated
+              {predictions.length} predictions · {totalDirectional} directional evaluated
               {isAiPowered && <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-400">AI-Powered</span>}
             </p>
           </div>
@@ -221,7 +227,7 @@ export default function ResultsPage() {
               <div className="text-xs text-zinc-500">avg price change</div>
             </div>
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">
-              <div className="text-xl font-bold text-zinc-100">{correct}/{totalEvaluated}</div>
+              <div className="text-xl font-bold text-zinc-100">{correct}/{totalDirectional}</div>
               <div className="text-xs text-zinc-500">right / total</div>
             </div>
             <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-center">

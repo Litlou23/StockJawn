@@ -165,6 +165,10 @@ public enum ActionabilityTier
 public record ScoringBreakdown
 {
     public double DirectionalScore { get; init; }
+    public double BullishScore { get; init; }
+    public double BearishScore { get; init; }
+    public string WinningDirection { get; init; } = "neutral";
+    public double DirectionMargin { get; init; }
     public int Confidence { get; init; }
     public int ActionabilityScore { get; init; }
     public ActionabilityTier ActionabilityTier { get; init; } = ActionabilityTier.scan;
@@ -174,6 +178,7 @@ public record ScoringBreakdown
     public int ConflictingBuckets { get; init; }
     public double RiskAdjustment { get; init; }
     public double CalibrationFactor { get; init; }
+    // Legacy net scores (bullish - bearish) for backward compat
     public double TrendScore { get; init; }
     public double MomentumScore { get; init; }
     public double VolumeScore { get; init; }
@@ -181,6 +186,21 @@ public record ScoringBreakdown
     public double MarketContextScore { get; init; }
     public double CatalystScore { get; init; }
     public double LearningScore { get; init; }
+    // Per-bucket independent scores
+    public double TrendBullish { get; init; }
+    public double TrendBearish { get; init; }
+    public double MomentumBullish { get; init; }
+    public double MomentumBearish { get; init; }
+    public double VolumeBullish { get; init; }
+    public double VolumeBearish { get; init; }
+    public double VolatilityBullish { get; init; }
+    public double VolatilityBearish { get; init; }
+    public double MarketContextBullish { get; init; }
+    public double MarketContextBearish { get; init; }
+    public double CatalystBullish { get; init; }
+    public double CatalystBearish { get; init; }
+    public double LearningBullish { get; init; }
+    public double LearningBearish { get; init; }
     public double RiskPenalty { get; init; }
     public List<string> IndicatorsUsed { get; init; } = [];
     public List<string> IndicatorsSkipped { get; init; } = [];
@@ -286,6 +306,10 @@ public record PredictionCandidate
     public string InvalidationRule { get; init; } = "";
     public List<string> DataSourcesUsed { get; init; } = [];
     public List<string> MissingDataWarnings { get; init; } = [];
+    public double? BullishScore { get; init; }
+    public double? BearishScore { get; init; }
+    public string? WinningDirection { get; init; }
+    public double? DirectionConfidence { get; init; }
     public string? ScoreDebugJson { get; init; }
     public int? ActionabilityScore { get; init; }
     public ActionabilityTier? ActionabilityTier { get; init; }
@@ -351,6 +375,7 @@ public record ResearchSignalPerformance
     public string Id { get; init; } = "";
     public string SignalName { get; init; } = "";
     public string SignalType { get; init; } = "";
+    public string Direction { get; init; } = "all"; // "bullish", "bearish", or "all"
     public int TotalPredictions { get; init; }
     public int CorrectPredictions { get; init; }
     public double Accuracy { get; init; }

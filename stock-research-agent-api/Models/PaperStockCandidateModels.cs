@@ -62,6 +62,11 @@ public record PaperStockCandidate
     public string? ExclusionReason { get; init; }
     public double ScorePercentileInRun { get; init; }
 
+    // Direction-neutral dual scores
+    public double? BullishScore { get; init; }
+    public double? BearishScore { get; init; }
+    public string? WinningDirection { get; init; }
+
     public PaperStockStatus Status { get; init; } = PaperStockStatus.open;
     public bool QualifiesForOptions { get; init; }
 

@@ -32,31 +32,45 @@ public class LearningEngine
         var outcomes = await _repo.GetRecentOutcomesAsync(200);
 
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
-        var tallies = new Dictionary<string, (int Total, int Correct, double TotalScore)>();
+        // Key: (signalName, direction) where direction is "bullish", "bearish", or "all"
+        var tallies = new Dictionary<(string Signal, string Direction), (int Total, int Correct, double TotalScore)>();
+
+        void Tally(string signalName, string direction, bool correct, double score)
+        {
+            var key = (signalName, direction);
+            var (total, corr, totalScore) = tallies.GetValueOrDefault(key);
+            total++;
+            if (correct) corr++;
+            totalScore += score;
+            tallies[key] = (total, corr, totalScore);
+        }
 
         foreach (var pred in predictions)
         {
             if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || outcome.DirectionCorrect is null)
                 continue;
 
+            var wasCorrect = outcome.DirectionCorrect == true;
+            var score = outcome.OutcomeScore ?? 50;
+            var direction = pred.PredictionType == PredictionType.bearish ? "bearish" : "bullish";
             var signals = ExtractSignalsFromPrediction(pred);
+
             foreach (var signalName in signals)
             {
-                var (total, correct, totalScore) = tallies.GetValueOrDefault(signalName);
-                total++;
-                if (outcome.DirectionCorrect == true) correct++;
-                totalScore += outcome.OutcomeScore ?? 50;
-                tallies[signalName] = (total, correct, totalScore);
+                // Track per-direction and aggregate
+                Tally(signalName, direction, wasCorrect, score);
+                Tally(signalName, "all", wasCorrect, score);
             }
         }
 
         var results = new List<ResearchSignalPerformance>();
-        foreach (var (signalName, (total, correct, totalScore)) in tallies)
+        foreach (var ((signalName, direction), (total, correct, totalScore)) in tallies)
         {
             await _repo.UpsertSignalPerformanceAsync(new
             {
                 signal_name = signalName,
                 signal_type = CategorizeSignal(signalName),
+                direction,
                 total_predictions = total,
                 correct_predictions = correct,
                 accuracy = total > 0 ? (double)correct / total : 0,
@@ -67,6 +81,7 @@ public class LearningEngine
             {
                 SignalName = signalName,
                 SignalType = CategorizeSignal(signalName),
+                Direction = direction,
                 TotalPredictions = total,
                 CorrectPredictions = correct,
                 Accuracy = total > 0 ? (double)correct / total : 0,
@@ -91,11 +106,19 @@ public class LearningEngine
         var weightMap = currentWeights.ToDictionary(w => w.SignalName, w => w.Weight);
         var changes = new List<WeightChange>();
 
+        // Group by signal — adjust per-direction weights independently
+        // Direction-specific perf rows produce direction-suffixed weight keys
+        // (e.g. "technical_trend_bullish", "technical_trend_bearish")
+        // "all" rows still adjust the generic weight key
         foreach (var perf in perfStats)
         {
             if (perf.TotalPredictions < MinPredictionsForAdjustment) continue;
 
-            var oldWeight = weightMap.GetValueOrDefault(perf.SignalName, 1.0);
+            var weightKey = perf.Direction is "bullish" or "bearish"
+                ? $"{perf.SignalName}_{perf.Direction}"
+                : perf.SignalName;
+
+            var oldWeight = weightMap.GetValueOrDefault(weightKey, 1.0);
             var accuracyDelta = perf.Accuracy - 0.5;
             var adjustment = Math.Clamp(accuracyDelta * MaxWeightChange * 2, -MaxWeightChange, MaxWeightChange);
             var newWeight = Math.Clamp(oldWeight + adjustment, 0.1, 3.0);
@@ -103,9 +126,9 @@ public class LearningEngine
             if (Math.Abs(newWeight - oldWeight) < 0.05) continue;
 
             newWeight = Math.Round(newWeight, 2);
-            var reason = $"Accuracy: {perf.Accuracy * 100:F1}% over {perf.TotalPredictions} predictions. Avg score: {perf.AverageOutcomeScore:F1}.";
-            await _repo.UpdateScoringWeightAsync(perf.SignalName, newWeight, reason);
-            changes.Add(new WeightChange(perf.SignalName, oldWeight, newWeight, reason));
+            var reason = $"Direction: {perf.Direction}. Accuracy: {perf.Accuracy * 100:F1}% over {perf.TotalPredictions} predictions. Avg score: {perf.AverageOutcomeScore:F1}.";
+            await _repo.UpdateScoringWeightAsync(weightKey, newWeight, reason);
+            changes.Add(new WeightChange(weightKey, oldWeight, newWeight, reason));
         }
 
         return (changes.Count, changes);
@@ -122,32 +145,58 @@ public class LearningEngine
         var predictions = await _repo.GetRecentPredictionsAsync(100);
         var insights = new List<object>();
 
-        // 1. Reliable signals
+        // 1. Reliable signals (direction-aware)
         var reliable = perfStats.Where(s => s.TotalPredictions >= MinPredictionsForAdjustment && s.Accuracy > 0.6).ToList();
         if (reliable.Count > 0)
         {
             insights.Add(new
             {
                 insight_type = "signal",
-                summary = $"Reliable signals: {string.Join(", ", reliable.Select(s => $"{s.SignalName} ({s.Accuracy * 100:F0}% accuracy, n={s.TotalPredictions})"))}",
+                summary = $"Reliable signals: {string.Join(", ", reliable.Select(s => $"{s.SignalName}[{s.Direction}] ({s.Accuracy * 100:F0}%, n={s.TotalPredictions})"))}",
                 evidence = $"Based on {reliable.Sum(s => s.TotalPredictions)} total predictions.",
                 action_recommendation = "Increase weight on these signals in future predictions.",
                 confidence = Math.Min((double)reliable[0].TotalPredictions / 20, 1),
             });
         }
 
-        // 2. Unreliable signals
+        // 2. Unreliable signals (direction-aware)
         var unreliable = perfStats.Where(s => s.TotalPredictions >= MinPredictionsForAdjustment && s.Accuracy < 0.4).ToList();
         if (unreliable.Count > 0)
         {
             insights.Add(new
             {
                 insight_type = "signal",
-                summary = $"Unreliable signals: {string.Join(", ", unreliable.Select(s => $"{s.SignalName} ({s.Accuracy * 100:F0}% accuracy, n={s.TotalPredictions})"))}",
+                summary = $"Unreliable signals: {string.Join(", ", unreliable.Select(s => $"{s.SignalName}[{s.Direction}] ({s.Accuracy * 100:F0}%, n={s.TotalPredictions})"))}",
                 evidence = $"Based on {unreliable.Sum(s => s.TotalPredictions)} total predictions.",
                 action_recommendation = "Decrease weight on these signals. Consider whether they are noise.",
                 confidence = Math.Min((double)unreliable[0].TotalPredictions / 20, 1),
             });
+        }
+
+        // 2b. Direction asymmetry — signals that work in one direction but not the other
+        var directionPairs = perfStats
+            .Where(s => s.Direction is "bullish" or "bearish" && s.TotalPredictions >= MinPredictionsForAdjustment)
+            .GroupBy(s => s.SignalName)
+            .Where(g => g.Count() == 2)
+            .ToList();
+        foreach (var pair in directionPairs)
+        {
+            var bull = pair.First(s => s.Direction == "bullish");
+            var bear = pair.First(s => s.Direction == "bearish");
+            var gap = Math.Abs(bull.Accuracy - bear.Accuracy);
+            if (gap >= 0.2)
+            {
+                var better = bull.Accuracy > bear.Accuracy ? "bullish" : "bearish";
+                var worse = better == "bullish" ? "bearish" : "bullish";
+                insights.Add(new
+                {
+                    insight_type = "direction_asymmetry",
+                    summary = $"{pair.Key} is much more reliable for {better} ({(better == "bullish" ? bull : bear).Accuracy * 100:F0}%) than {worse} ({(worse == "bullish" ? bull : bear).Accuracy * 100:F0}%).",
+                    evidence = $"Bull n={bull.TotalPredictions}, Bear n={bear.TotalPredictions}.",
+                    action_recommendation = $"Weight {pair.Key} higher for {better} predictions and lower for {worse}.",
+                    confidence = Math.Min((double)Math.Min(bull.TotalPredictions, bear.TotalPredictions) / 10, 1),
+                });
+            }
         }
 
         // 3. Per-ticker patterns
