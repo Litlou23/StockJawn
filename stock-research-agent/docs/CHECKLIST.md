@@ -25,7 +25,7 @@ These items significantly improve prediction quality, learning speed, or decisio
 
 - [ ] **Confidence calibration analysis** — Compare predicted confidence to actual accuracy across buckets. If 80%-confidence predictions only win 55% of the time, the system is overconfident. *(Prediction Engine)*
 - [ ] **Improve bearish prediction quality** — Bearish predictions have historically been less reliable. Investigate indicator weights, sample balance, and scoring bias. *(Prediction Engine)*
-- [ ] **Implement Research Signal Architecture** — Build `IResearchSignalProvider` interface, `ResearchSignalService`, and `research_signals` table in the backend. Wire `CongressSignalProvider` as first provider. *(Research Engine — see [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md))*
+- [ ] **Create research_signals migration** — Write Supabase migration to create `research_signals` and `research_scoring_weights` tables. Backend code is ready but needs the table. *(Research Engine)*
 - [ ] **Stop-loss / take-profit automation** — Paper trades should have predefined exit criteria rather than relying on manual evaluation. *(Paper Trading)*
 - [ ] **Drawdown analysis** — Track maximum drawdown, consecutive losses, and recovery time. Critical for risk management. *(Performance Analytics)*
 - [ ] **Market regime detection** — Bull, bear, and sideways markets demand different strategies. The scoring engine should adjust weights based on current regime. *(Learning Engine)*
@@ -42,7 +42,7 @@ These items improve the system's capabilities and prepare it for future growth.
 - [ ] **Greeks analysis and display** — Show delta, gamma, theta, vega for options positions. Essential for understanding options risk. *(Options Intelligence)*
 - [ ] **Implied volatility surface** — Visualize IV across strikes and expirations to identify mispriced options. *(Options Intelligence)*
 - [ ] **Liquidity scoring** — Filter out illiquid tickers and options that would be difficult to trade at reasonable spreads. *(Market Intelligence)*
-- [ ] **Congressional trades backend integration** — Move congress trade parsing to the .NET backend so signals can be persisted, scored, and learned from. *(Research Engine)*
+- [ ] **Congressional trades direct parsing** — Migrate House/Senate disclosure PDF parsing from frontend to `CongressSignalProvider` so backend doesn't depend on frontend API. *(Research Engine)*
 - [ ] **Spread strategy support** — Support vertical spreads, iron condors, and other multi-leg strategies in the options simulator. *(Options Intelligence)*
 - [ ] **Confidence threshold optimization** — Experiment with minimum confidence thresholds for trade entry. See [EXPERIMENTS.md](EXPERIMENTS.md) EXP-005. *(Prediction Engine)*
 
@@ -66,6 +66,8 @@ Move items here as they ship, with the date and any relevant notes.
 
 - [x] **2026-07 — Research Signal Architecture design** — Generic `IResearchSignalProvider` framework designed. See [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md).
 - [x] **2026-07 — Congress Intelligence observability page** — `/congress-trades` page rewritten as pipeline observability dashboard. See [congress-observability-page-design.md](congress-observability-page-design.md).
+- [x] **2026-07 — Research Signal Architecture backend** — `IResearchSignalProvider`, `ResearchSignalService`, `ResearchSignalRepository`, `CongressSignalProvider` implemented. Research signal bucket added to `ScoringEngine` and `DynamicWatchlistService`. Learning engine updated with `research_` prefix. Wired into weekly research job pipeline.
+- [x] **2026-07 — Frontend research signal display** — `ResearchSignals.tsx` component with badges + detail panel. Integrated into predictions page (inline badges + expanded panel) and watchlist page (card badges + score breakdown + detail modal). Backend `/api/research/signals` endpoint + frontend proxy route.
 
 ---
 

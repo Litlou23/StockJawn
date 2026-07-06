@@ -1,5 +1,6 @@
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.Watchlist;
@@ -7,18 +8,20 @@ namespace StockResearchAgent.Api.Services.Watchlist;
 /// <summary>
 /// Core dynamic watchlist engine. Scans the universe, scores candidates,
 /// compares against the current active watchlist, and produces add/keep/
-/// review/swap/archive decisions. Caps the active list at ~10 items.
+/// review/swap/archive decisions. Any candidate scoring above the minimum
+/// threshold becomes active — the list is uncapped and pruned by the
+/// existing review/archive logic (staleness, score drops, low confidence).
 ///
 /// Does NOT auto-trade, connect a brokerage, or give buy/sell advice.
 /// </summary>
 public class DynamicWatchlistService
 {
-    private const int MaxActiveItems = 10;
     private const int MinActiveTarget = 5;
     // With news-driven discovery, we have catalyst data. Tickers that were
     // discovered by news get a catalyst boost, so this threshold works.
     private const double MinScoreForCandidate = 15.0;
-    private const double SwapThresholdDelta = 25.0;
+    /// <summary>Operational warning — logs when active count exceeds this. Does NOT block additions.</summary>
+    private const int WarningThreshold = 25;
     private const int StaleDaysThreshold = 14;
     private const double HighRiskThreshold = 80.0;
     private const double LowConfidenceThreshold = 15.0;
@@ -26,17 +29,20 @@ public class DynamicWatchlistService
     private readonly MarketDataService _marketData;
     private readonly WatchlistRepository _watchlistRepo;
     private readonly ResearchRepository _researchRepo;
+    private readonly ResearchSignalService _signalService;
     private readonly ILogger<DynamicWatchlistService> _logger;
 
     public DynamicWatchlistService(
         MarketDataService marketData,
         WatchlistRepository watchlistRepo,
         ResearchRepository researchRepo,
+        ResearchSignalService signalService,
         ILogger<DynamicWatchlistService> logger)
     {
         _marketData = marketData;
         _watchlistRepo = watchlistRepo;
         _researchRepo = researchRepo;
+        _signalService = signalService;
         _logger = logger;
     }
 
@@ -60,7 +66,6 @@ public class DynamicWatchlistService
     public async Task<WatchlistGenerationResult> BuildDynamicWatchlistAsync(
         string[] universe,
         string? userId = null,
-        int maxActiveItems = MaxActiveItems,
         List<TickerDiscoveryContext>? discoveryContext = null)
     {
         _logger.LogInformation("[watchlist] Starting dynamic watchlist build for {Count} universe tickers", universe.Length);
@@ -212,10 +217,9 @@ public class DynamicWatchlistService
             }
         }
 
-        // 5. Find new candidates to add
+        // 5. Find new candidates to add — no cap, any qualifying ticker gets in
         var added = new List<WatchlistItem>();
         var activeCount = kept.Count;
-        var slotsAvailable = maxActiveItems - activeCount;
 
         _logger.LogInformation("[watchlist] Candidate filter: MinScore={Min}, existingTickers=[{Existing}], all scores: {Scores}",
             MinScoreForCandidate,
@@ -229,46 +233,32 @@ public class DynamicWatchlistService
 
         _logger.LogInformation("[watchlist] {Count} candidates passed filter (score >= {Min})", newCandidates.Count, MinScoreForCandidate);
 
-        // Check if new candidates are stronger than weakest kept items
-        var weakestKept = kept.OrderBy(k => k.TotalScore ?? 0).FirstOrDefault();
-        var weakestScore = weakestKept?.TotalScore ?? 0;
-
         foreach (var candidate in newCandidates)
         {
-            if (activeCount >= maxActiveItems)
+            var newItem = await AddNewWatchlistItemAsync(candidate, userId);
+            if (newItem is not null)
             {
-                // Only add if significantly stronger than weakest kept
-                if (weakestKept is not null && candidate.TotalScore > weakestScore + SwapThresholdDelta)
-                {
-                    // Swap: archive the weakest, add the new one
-                    await _watchlistRepo.UpdateWatchlistStatusAsync(weakestKept.Id,
-                        WatchlistStatus.SwapCandidate,
-                        $"Replaced by {candidate.Ticker} (score {candidate.TotalScore:F0} vs {weakestScore:F0})");
-                    changeLogs.Add(MakeChangeLog(weakestKept, WatchlistChangeType.MarkedSwapCandidate,
-                        WatchlistStatus.Active, WatchlistStatus.SwapCandidate, weakestScore, weakestScore,
-                        $"Replaced by stronger candidate {candidate.Ticker}", userId));
-                    swapCandidates.Add(weakestKept with { Status = WatchlistStatus.SwapCandidate });
-                    kept.Remove(weakestKept);
-                    activeCount--;
-
-                    weakestKept = kept.OrderBy(k => k.TotalScore ?? 0).FirstOrDefault();
-                    weakestScore = weakestKept?.TotalScore ?? 0;
-                }
-                else break;
+                added.Add(newItem);
+                changeLogs.Add(MakeChangeLog(newItem, WatchlistChangeType.Added,
+                    null, WatchlistStatus.Active, null, candidate.TotalScore,
+                    candidate.Reason, userId));
+                activeCount++;
             }
+        }
 
-            if (activeCount < maxActiveItems)
-            {
-                var newItem = await AddNewWatchlistItemAsync(candidate, userId);
-                if (newItem is not null)
-                {
-                    added.Add(newItem);
-                    changeLogs.Add(MakeChangeLog(newItem, WatchlistChangeType.Added,
-                        null, WatchlistStatus.Active, null, candidate.TotalScore,
-                        candidate.Reason, userId));
-                    activeCount++;
-                }
-            }
+        // Operational telemetry — warn if watchlist is getting large
+        if (activeCount > WarningThreshold)
+        {
+            var avgScore = kept.Concat(added).Average(w => w.TotalScore ?? 0);
+            var oldestReview = allCurrent
+                .Where(w => w.LastReviewedAt.HasValue)
+                .Select(w => (DateTimeOffset.UtcNow - w.LastReviewedAt!.Value).TotalDays)
+                .DefaultIfEmpty(0)
+                .Max();
+            _logger.LogWarning(
+                "[watchlist] Active count ({ActiveCount}) exceeds warning threshold ({WarningThreshold}). " +
+                "AvgScore={AvgScore:F1}, OldestReviewAgeDays={OldestReviewAge:F0}, NewlyAdded={Added}",
+                activeCount, WarningThreshold, avgScore, oldestReview, added.Count);
         }
 
         // 6. Save candidates for history
@@ -616,6 +606,36 @@ public class DynamicWatchlistService
         missingWarnings.Add("Options-chain data not connected -- options_readiness_score is null");
 
         // =================================================================
+        // Research signal scoring (congress, etc.)
+        // =================================================================
+        var researchSignals = await _signalService.GetActiveSignalsForTickerAsync(ticker);
+        if (researchSignals.Count > 0)
+        {
+            sources.Add("research-signals");
+            foreach (var sig in researchSignals)
+            {
+                var sigWeight = weights.GetValueOrDefault($"research_{sig.SignalType}", 1.0);
+                var pts = sig.Strength * sig.Confidence * 15 * sigWeight;
+
+                if (sig.SignalType.Contains("buy") || sig.SignalType.Contains("cluster"))
+                {
+                    AddBull(Math.Round(pts, 1), $"Research: {sig.Summary ?? sig.SignalType}", "research", sigWeight);
+                }
+                else if (sig.SignalType.Contains("sell"))
+                {
+                    AddBear(Math.Round(pts, 1), $"Research: {sig.Summary ?? sig.SignalType}", "research", sigWeight);
+                }
+                else
+                {
+                    // Unknown direction — split contribution
+                    var halfPts = Math.Round(pts * 0.5, 1);
+                    bullScore += halfPts; bearScore += halfPts;
+                    scoreBreakdown.Add(new { signal = $"Research: {sig.Summary ?? sig.SignalType}", points = halfPts, category = "research", weight = sigWeight, direction = "both" });
+                }
+            }
+        }
+
+        // =================================================================
         // Blend with prediction confidence (direction-aware)
         // =================================================================
         var latestPrediction = recentPredictions
@@ -730,9 +750,9 @@ public class DynamicWatchlistService
         if (scoreDrop > 15)
             reasons.Add($"Score dropped significantly: {oldScore:F0} -> {newScore.TotalScore:F0}");
 
-        // Check if better candidates exist
+        // Check if significantly better candidates exist (informational flag for review)
         var betterCandidates = allCandidates
-            .Where(c => c.Ticker != item.Ticker && c.TotalScore > newScore.TotalScore + SwapThresholdDelta)
+            .Where(c => c.Ticker != item.Ticker && c.TotalScore > newScore.TotalScore + 25)
             .Take(3).ToList();
         if (betterCandidates.Count > 0)
             reasons.Add($"Stronger candidates available: {string.Join(", ", betterCandidates.Select(c => $"{c.Ticker} ({c.TotalScore:F0})"))}");
@@ -745,7 +765,7 @@ public class DynamicWatchlistService
         if (reasons.Count >= 3 || newScore.TotalScore < -10)
             return new ItemDecision("archive", string.Join(". ", reasons));
 
-        // Swap candidate if better alternatives exist and score dropped
+        // Flag for review if better alternatives exist and score dropped
         if (betterCandidates.Count > 0 && scoreDrop > 5)
             return new ItemDecision("swap_candidate", string.Join(". ", reasons));
 

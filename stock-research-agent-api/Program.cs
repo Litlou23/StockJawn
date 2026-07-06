@@ -9,6 +9,9 @@ using StockResearchAgent.Api.Services.UniverseDiscovery;
 using StockResearchAgent.Api.Services.OptionsLab;
 using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Providers.StockFit;
+using StockResearchAgent.Api.Services.ResearchSignals;
+using StockResearchAgent.Api.Services.ResearchSignals.Providers;
+using StockResearchAgent.Api.Models;
 
 // =====================================================================
 // TOP-LEVEL TRY/CATCH — catches fatal startup exceptions and writes
@@ -105,6 +108,11 @@ builder.Services.AddSingleton<OptionsDataService>();
     // Twelve Data + MarketData.app). Marked unavailable if key missing.
     builder.Services.AddSingleton<StockFitClient>();
     builder.Services.AddSingleton<StockFitProvider>();
+
+    // Research signal infrastructure
+    builder.Services.AddSingleton<ResearchSignalRepository>();
+    builder.Services.AddSingleton<ResearchSignalService>();
+    builder.Services.AddSingleton<IResearchSignalProvider, CongressSignalProvider>();
 
     // Dynamic pick orchestrator — wraps research engine + paper options
     // services to auto-generate stock + linked option candidates daily.

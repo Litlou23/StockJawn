@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
+import { useResearchSignals, ResearchSignalBadges, ResearchSignalPanel } from '@/components/ResearchSignals';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -11,7 +12,7 @@ import FullScreenLoader from '@/components/FullScreenLoader';
 interface BreakdownSignal {
   signal: string;
   points: number;
-  category: 'technical' | 'catalyst';
+  category: 'technical' | 'catalyst' | 'research';
   weight: number;
 }
 
@@ -455,12 +456,13 @@ function deltaExplain(delta: number): string {
 // Score Breakdown (expandable detail)
 // ---------------------------------------------------------------------------
 
-function ScoreBreakdown({ item }: { item: WatchlistItemDto }) {
+function ScoreBreakdown({ item, researchSignals }: { item: WatchlistItemDto; researchSignals?: import('@/components/ResearchSignals').ResearchSignal[] }) {
   const breakdown = item.rawContext?.score_breakdown;
 
   if (breakdown && breakdown.length > 0) {
     const techSignals = breakdown.filter((s) => s.category === 'technical');
     const catalystSignals = breakdown.filter((s) => s.category === 'catalyst');
+    const researchBreakdown = breakdown.filter((s) => s.category === 'research');
 
     return (
       <div className="mt-3 rounded-lg border border-zinc-700/50 bg-zinc-950 p-3 space-y-3">
@@ -492,6 +494,28 @@ function ScoreBreakdown({ item }: { item: WatchlistItemDto }) {
                 </div>
               ))}
             </div>
+          </div>
+        )}
+        {(researchBreakdown.length > 0 || (researchSignals && researchSignals.length > 0)) && (
+          <div>
+            {researchBreakdown.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wide mb-1">Research Signals</div>
+                <div className="space-y-0.5 mb-2">
+                  {researchBreakdown.map((s, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs">
+                      <span className="text-zinc-400">{friendlySignalName(s.signal)}</span>
+                      <span className={`font-mono ${s.points >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {s.points > 0 ? '+' : ''}{Math.round(s.points * 10) / 10}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            {researchSignals && researchSignals.length > 0 && researchBreakdown.length === 0 && (
+              <ResearchSignalPanel signals={researchSignals} />
+            )}
           </div>
         )}
         {item.sourcesUsed && item.sourcesUsed.length > 0 && (
@@ -561,13 +585,14 @@ function SectionCard({ title, subtitle, children }: { title: string; subtitle?: 
 }
 
 function TickerDetailModal({
-  item, detail, detailLoading, detailError, onClose,
+  item, detail, detailLoading, detailError, onClose, researchSignals,
 }: {
   item: WatchlistItemDto;
   detail: TickerDetailData | null;
   detailLoading: boolean;
   detailError: string | null;
   onClose: () => void;
+  researchSignals?: import('@/components/ResearchSignals').ResearchSignal[];
 }) {
   const { prediction: pred, stock_candidate: stock, option_candidate: opt, outcome, option_block_reason } = detail ?? {};
 
@@ -625,7 +650,7 @@ function TickerDetailModal({
           {(item.thesisSummary || item.rawContext?.score_breakdown) && (
             <SectionCard title="Why It's on the Watchlist" subtitle="How this stock scored when it was added or last checked">
               {item.thesisSummary && <p className="text-sm text-zinc-300 mb-4">{friendlyThesisText(item.thesisSummary)}</p>}
-              <ScoreBreakdown item={item} />
+              <ScoreBreakdown item={item} researchSignals={researchSignals} />
             </SectionCard>
           )}
 
@@ -827,7 +852,7 @@ function cardSummary(item: WatchlistItemDto): string {
   return item.watchReason ? friendlyThesisText(item.watchReason) : '';
 }
 
-function WatchlistCard({ item, onClick }: { item: WatchlistItemDto; onClick: () => void }) {
+function WatchlistCard({ item, onClick, researchSignals }: { item: WatchlistItemDto; onClick: () => void; researchSignals?: import('@/components/ResearchSignals').ResearchSignal[] }) {
   const verdict = deriveAction(item);
   const sl = scoreLabel(item.totalScore);
   const rl = riskLabel(item);
@@ -853,6 +878,11 @@ function WatchlistCard({ item, onClick }: { item: WatchlistItemDto; onClick: () 
       </div>
       <p className="text-xs text-zinc-500 mt-2">{verdict.detail}</p>
       <p className="text-xs text-zinc-400 mt-2 line-clamp-2">{cardSummary(item)}</p>
+      {researchSignals && researchSignals.length > 0 && (
+        <div className="mt-2">
+          <ResearchSignalBadges signals={researchSignals} />
+        </div>
+      )}
       <div className="flex gap-3 mt-3">
         <span className={`text-[10px] px-2 py-0.5 rounded-full ring-1 ring-inset ring-zinc-700 ${rl.color}`}>Risk: {rl.text}</span>
         <span className={`text-[10px] px-2 py-0.5 rounded-full ring-1 ring-inset ring-zinc-700 ${il.color}`}>Info: {il.text}</span>
@@ -889,8 +919,8 @@ function sortItems(items: WatchlistItemDto[], sortBy: WatchlistSort): WatchlistI
   }
 }
 
-function WatchlistSection({ title, items, emptyText, sortBy, onCardClick }: {
-  title: string; items: WatchlistItemDto[]; emptyText: string; sortBy: WatchlistSort; onCardClick: (item: WatchlistItemDto) => void;
+function WatchlistSection({ title, items, emptyText, sortBy, onCardClick, signalsByTicker }: {
+  title: string; items: WatchlistItemDto[]; emptyText: string; sortBy: WatchlistSort; onCardClick: (item: WatchlistItemDto) => void; signalsByTicker?: Record<string, import('@/components/ResearchSignals').ResearchSignal[]>;
 }) {
   const sorted = sortItems(items, sortBy);
   return (
@@ -903,7 +933,7 @@ function WatchlistSection({ title, items, emptyText, sortBy, onCardClick }: {
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {sorted.map((item) => (
-            <WatchlistCard key={item.id} item={item} onClick={() => onCardClick(item)} />
+            <WatchlistCard key={item.id} item={item} onClick={() => onCardClick(item)} researchSignals={signalsByTicker?.[item.ticker]} />
           ))}
         </div>
       )}
@@ -997,6 +1027,18 @@ export default function WatchlistPage() {
     setDetailError(null);
   }
 
+  // Collect all tickers from all watchlist sections
+  const allTickers = useMemo(() => {
+    if (!watchlist) return [];
+    const t = [
+      ...watchlist.active.items,
+      ...watchlist.reviewNeeded.items,
+      ...watchlist.swapCandidates.items,
+    ].map((i) => i.ticker);
+    return [...new Set(t)];
+  }, [watchlist]);
+  const { signals: signalsByTicker } = useResearchSignals(allTickers);
+
   if (loading) {
     return (
       <AppShell>
@@ -1038,16 +1080,16 @@ export default function WatchlistPage() {
           </label>
         </div>
 
-        <WatchlistSection title="Active" items={watchlist.active.items} emptyText="No stocks being watched yet. Run a weekly research scan to find some." sortBy={sortBy} onCardClick={openDetail} />
-        <WatchlistSection title="Needs a Second Look" items={watchlist.reviewNeeded.items} emptyText="Nothing flagged for review." sortBy={sortBy} onCardClick={openDetail} />
-        <WatchlistSection title="Might Replace" items={watchlist.swapCandidates.items} emptyText="No stocks up for replacement." sortBy={sortBy} onCardClick={openDetail} />
+        <WatchlistSection title="Active" items={watchlist.active.items} emptyText="No stocks being watched yet. Run a weekly research scan to find some." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} />
+        <WatchlistSection title="Needs a Second Look" items={watchlist.reviewNeeded.items} emptyText="Nothing flagged for review." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} />
+        <WatchlistSection title="Might Replace" items={watchlist.swapCandidates.items} emptyText="No stocks up for replacement." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} />
         <WatchlistSection title="Removed" items={watchlist.archived.items} emptyText="Nothing removed yet." sortBy={sortBy} onCardClick={openDetail} />
 
         <ChangeHistory changes={changes} />
       </div>
 
       {selectedItem && (
-        <TickerDetailModal item={selectedItem} detail={detail} detailLoading={detailLoading} detailError={detailError} onClose={closeDetail} />
+        <TickerDetailModal item={selectedItem} detail={detail} detailLoading={detailLoading} detailError={detailError} onClose={closeDetail} researchSignals={signalsByTicker[selectedItem.ticker]} />
       )}
     </AppShell>
   );

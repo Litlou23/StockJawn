@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Providers.StockFit;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -28,6 +29,7 @@ public class PredictionGenerator
 {
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
+    private readonly ResearchSignalService _signalService;
     private readonly StockFitProvider _stockFit;
     private readonly FinnhubProvider _finnhub;
     private readonly ILogger<PredictionGenerator> _logger;
@@ -36,6 +38,7 @@ public class PredictionGenerator
     public PredictionGenerator(
         MarketDataService marketData,
         ResearchRepository repo,
+        ResearchSignalService signalService,
         StockFitProvider stockFit,
         FinnhubProvider finnhub,
         IConfiguration configuration,
@@ -43,6 +46,7 @@ public class PredictionGenerator
     {
         _marketData = marketData;
         _repo = repo;
+        _signalService = signalService;
         _stockFit = stockFit;
         _finnhub = finnhub;
         _logger = logger;
@@ -249,7 +253,10 @@ public class PredictionGenerator
 
         var benchmark = IndicatorEngine.ComputeBenchmarkContext(snapshot.Quote, spyQuote, qqqQuote);
 
-        var scoring = ScoringEngine.Score(snapshot, indicators, benchmark, weights, lessons);
+        // Fetch active research signals for this ticker
+        var researchSignals = await _signalService.GetActiveSignalsForTickerAsync(ticker);
+
+        var scoring = ScoringEngine.Score(snapshot, indicators, benchmark, weights, lessons, researchSignals);
         var predType = scoring.PredictionType;
         var confidence = scoring.Confidence;
         var risk = scoring.Risk;

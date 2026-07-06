@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
+import { InfoBanner } from '@/components/InfoTip';
 
 // ---------------------------------------------------------------------------
 // Types matching GET /api/congress-intelligence response
@@ -385,6 +386,24 @@ export default function CongressIntelligencePage() {
             {loading ? 'Collecting…' : 'Collect Signals'}
           </button>
         </div>
+
+        <InfoBanner items={[
+          { term: 'Pipeline', definition: 'The journey each congressional trade takes through the system: Filing → Parsed → Signal → Qualified → Watchlist → Prediction → Evaluated. Each stage is a checkpoint.' },
+          { term: 'Filings Processed', definition: 'How many disclosure documents were downloaded from the House Clerk and Senate eFD websites.' },
+          { term: 'Trades Parsed', definition: 'Individual stock trades extracted from the filings. One filing can contain multiple trades.' },
+          { term: 'Signal', definition: 'A trade that passed the gate filters (buy only, ≥$15K, filed within 90 days). The system assigns it a strength and confidence score.' },
+          { term: 'Qualified', definition: 'A signal that is still active (not expired). This means the trade is recent enough to be relevant. It does NOT mean it was added to the watchlist — it just means it\'s eligible.' },
+          { term: 'Promoted to Watchlist', definition: 'A qualified signal whose ticker was picked up by the weekly research scan and added to the active watchlist. This only happens during scheduled research runs.' },
+          { term: 'Prediction', definition: 'The system generated a price prediction for this ticker. Requires the ticker to be on the watchlist first.' },
+          { term: 'Evaluated', definition: 'The prediction\'s timeframe has passed and the system checked whether it was right or wrong.' },
+          { term: 'Strength', definition: 'How strong the signal is (0 to 1). Higher amounts, committee members, and cluster activity increase strength.' },
+          { term: 'Confidence', definition: 'How reliable the signal is (0 to 1). Trades filed quickly after the transaction date score higher because the information is fresher.' },
+          { term: 'Cluster', definition: 'Three or more members of Congress bought the same stock around the same time. Clusters are automatically qualified because multiple insiders acting together is a stronger signal.' },
+          { term: 'Weight', definition: 'How much the learning engine trusts this signal type. Starts at 1.0. Goes up if predictions using this signal are accurate, down if they\'re not.' },
+          { term: 'Accuracy', definition: 'What percentage of predictions that used this signal type turned out to be correct.' },
+          { term: 'Filing Lag', definition: 'Days between when the trade happened and when it was disclosed. Congress members have 45 days to file. Shorter lag = fresher info.' },
+          { term: 'Gate Filters', definition: 'Rules that filter out low-quality trades: must be a buy (not sell), amount ≥$15K, and filed within 90 days of the trade.' },
+        ]} />
 
         <FullScreenLoader
           loading={loading}

@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import AppShell from '@/components/AppShell';
 import FullScreenLoader from '@/components/FullScreenLoader';
 import { InfoBanner } from '@/components/InfoTip';
+import { useResearchSignals, ResearchSignalBadges, ResearchSignalPanel } from '@/components/ResearchSignals';
 
 export const dynamic = 'force-dynamic';
 
@@ -389,6 +390,13 @@ export default function PredictionsPage() {
       default:                return +new Date(b.prediction.createdAt) - +new Date(a.prediction.createdAt);
     }
   });
+
+  // Fetch research signals for visible tickers
+  const visibleTickers = useMemo(
+    () => [...new Set(filtered.map((i) => i.prediction.ticker))],
+    [filtered],
+  );
+  const { signals: researchSignals } = useResearchSignals(visibleTickers);
 
   const rangeLabel = datePreset === 'all' ? 'all time'
     : datePreset === 'custom' ? `${customFrom}${customTo ? ` to ${customTo}` : ' to now'}`
@@ -890,6 +898,12 @@ export default function PredictionsPage() {
 
                     <p className="mt-1.5 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
 
+                    {(researchSignals[p.ticker]?.length ?? 0) > 0 && (
+                      <div className="mt-1.5">
+                        <ResearchSignalBadges signals={researchSignals[p.ticker]} />
+                      </div>
+                    )}
+
                     {o && (
                       <div className="mt-2 flex flex-wrap gap-4 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px]">
                         <div>
@@ -1029,6 +1043,12 @@ export default function PredictionsPage() {
                         {p.dataSourcesUsed.map((s) => (
                           <span key={s} className="mr-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{s}</span>
                         ))}
+                      </div>
+                    )}
+
+                    {(researchSignals[p.ticker]?.length ?? 0) > 0 && (
+                      <div className="mb-3 rounded-lg border border-zinc-700/50 bg-zinc-950 p-3">
+                        <ResearchSignalPanel signals={researchSignals[p.ticker]} />
                       </div>
                     )}
 

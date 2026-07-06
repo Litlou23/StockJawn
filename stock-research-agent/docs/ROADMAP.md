@@ -133,18 +133,21 @@ Tools for comparing, backtesting, and evolving trading strategies.
 
 ---
 
-## 8. Research Engine — 40%
+## 8. Research Engine — 75%
 
 The pluggable signal framework that feeds the prediction and scoring engines.
 
 | Aspect | Status |
 |---|---|
-| **Scoring engine integration** | Active — 8-bucket scoring with learning weights |
+| **Scoring engine integration** | Active — 8-bucket scoring with learning weights + research signal bucket |
 | **Signal performance tracking** | Active — `signal_performance` table |
-| **Congress intelligence** | Active — parsing + observability page; architecture designed but not yet backend-integrated |
-| **Research signal architecture** | Designed — `IResearchSignalProvider` interface, `ResearchSignal` model, generic schema (see [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md)) |
+| **Congress intelligence** | Active — parsing + observability page + `CongressSignalProvider` backend |
+| **Research signal architecture** | Active — `IResearchSignalProvider`, `ResearchSignalService`, `ResearchSignalRepository`, generic `research_signals` table |
+| **Research signal scoring** | Active — research bucket in `ScoringEngine.Score()`, research section in `DynamicWatchlistService.ScoreTickerAsync` |
+| **Auto-seeding weights** | Active — `ResearchSignalService.SeedNewWeightsAsync` auto-creates scoring weights for new signal types |
+| **Learning integration** | Active — `CategorizeSignal` handles `research_` prefix |
 
-**Remaining work:** Implement `IResearchSignalProvider` interface and `ResearchSignalService` in backend, build `CongressSignalProvider` as first provider, create `research_signals` table, wire generic scoring block into `ScoreTickerAsync`.
+**Remaining work:** Create `research_signals` Supabase table (migration), add second signal provider (insider trades or analyst ratings).
 
 **Future vision:** Insider trading clusters, SEC filing analysis, analyst upgrades, options flow, short interest — each as a pluggable signal provider feeding the same scoring engine.
 
@@ -194,7 +197,7 @@ Connecting to a real brokerage for live execution.
 | Market Intelligence | 70% | Core |
 | Options Intelligence | 65% | High |
 | Paper Trading | 55% | Critical |
-| Research Engine | 40% | High |
+| Research Engine | 75% | High |
 | Performance Analytics | 35% | High |
 | Strategy Lab | 25% | Medium |
 | Portfolio AI | 5% | Critical |

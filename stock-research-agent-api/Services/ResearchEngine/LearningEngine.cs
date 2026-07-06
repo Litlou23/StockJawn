@@ -292,6 +292,7 @@ public class LearningEngine
         name.StartsWith("technical_") ? "technical"
         : name.StartsWith("news_") ? "news_sentiment"
         : name.StartsWith("catalyst_") ? "catalyst"
+        : name.StartsWith("research_") ? "research"
         : name.StartsWith("volume") ? "volume"
         : "market_context";
 }

@@ -201,6 +201,10 @@ public record ScoringBreakdown
     public double CatalystBearish { get; init; }
     public double LearningBullish { get; init; }
     public double LearningBearish { get; init; }
+    public double ResearchSignalScore { get; init; }
+    public double ResearchSignalBullish { get; init; }
+    public double ResearchSignalBearish { get; init; }
+    public int ResearchSignalCount { get; init; }
     public double RiskPenalty { get; init; }
     public List<string> IndicatorsUsed { get; init; } = [];
     public List<string> IndicatorsSkipped { get; init; } = [];

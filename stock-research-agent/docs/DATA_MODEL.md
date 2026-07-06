@@ -31,6 +31,7 @@
 | `paper_option_candidates` | Options paper trade positions | `PaperOptionCandidate` | `PaperOptionsRepository` |
 | `paper_option_outcomes` | Closed options paper trade results | `PaperOptionOutcome` | `PaperOptionsRepository` |
 | `option_learning_stats` | Aggregate options paper trading statistics | `OptionLearningStat` | `PaperOptionsRepository` |
+| `research_signals` | Normalized signals from pluggable providers | `ResearchSignal` | `ResearchSignalRepository` |
 
 ---
 
@@ -66,6 +67,35 @@ research_runs → research_scoring_weights (adjusted by LearningEngine)
 - **research_signal_performance** — Tracks accuracy per signal type over time. Will become more important as the Research Signal Architecture adds providers.
 - **learning_insights** — Auto-generated text observations (e.g., "momentum signals are underperforming this week"). Used for system observability.
 - **market_snapshots** — Captures market-level data (indices, VIX, breadth) at the time of each research run for context.
+
+### Research Signals
+
+Pluggable signal providers emit normalized signals that feed into the scoring engine.
+
+```
+IResearchSignalProvider → ResearchSignalService → research_signals
+                                                → research_scoring_weights (auto-seeded)
+```
+
+- **research_signals** — Normalized signals with ticker, signal type, category, provider, strength (-1 to 1), confidence (0 to 1), event timestamp, expiry, and JSONB metadata. Deduplicated on (ticker, signal_type, event_timestamp). Expired signals are marked `active = false`. Repository: `ResearchSignalRepository`.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary key |
+| `ticker` | text | Stock symbol |
+| `signal_type` | text | e.g. `congressional_buy`, `congressional_cluster` |
+| `signal_category` | text | Scoring bucket: `institutional`, `technical`, etc. |
+| `provider` | text | Provider ID: `congress`, etc. |
+| `strength` | double | -1 to 1 |
+| `confidence` | double | 0 to 1 |
+| `event_timestamp` | timestamptz | When the underlying event occurred |
+| `detected_at` | timestamptz | When the signal was collected |
+| `expires_at` | timestamptz | Nullable; signals auto-expire |
+| `active` | boolean | False after expiry |
+| `summary` | text | Human-readable description |
+| `metadata` | jsonb | Provider-specific data |
+
+**Note:** This table must be created via Supabase migration before the backend can persist signals. The backend code (`ResearchSignalRepository`) is ready.
 
 ### Watchlist
 

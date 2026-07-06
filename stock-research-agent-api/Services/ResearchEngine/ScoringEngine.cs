@@ -1,4 +1,5 @@
 using StockResearchAgent.Api.Models;
+using ResearchSignal = StockResearchAgent.Api.Models.ResearchSignal;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
@@ -34,7 +35,8 @@ public static class ScoringEngine
         TechnicalIndicators indicators,
         BenchmarkContext benchmark,
         Dictionary<string, double> weights,
-        List<string> lessons)
+        List<string> lessons,
+        List<ResearchSignal>? researchSignals = null)
     {
         var signals = new List<string>();
 
@@ -46,12 +48,13 @@ public static class ScoringEngine
         var market = ScoreMarketContext(benchmark, signals);
         var catalyst = ScoreCatalyst(snapshot, weights, signals);
         var learning = ScoreLearning(weights, lessons, signals);
+        var research = ScoreResearchSignals(researchSignals ?? [], weights, signals);
 
         // Aggregate independent scores
         var bullishScore = trend.Bullish + momentum.Bullish + volume.Bullish
-            + volatility.Bullish + market.Bullish + catalyst.Bullish + learning.Bullish;
+            + volatility.Bullish + market.Bullish + catalyst.Bullish + learning.Bullish + research.Bullish;
         var bearishScore = trend.Bearish + momentum.Bearish + volume.Bearish
-            + volatility.Bearish + market.Bearish + catalyst.Bearish + learning.Bearish;
+            + volatility.Bearish + market.Bearish + catalyst.Bearish + learning.Bearish + research.Bearish;
 
         bullishScore = Math.Clamp(bullishScore, 0, 100);
         bearishScore = Math.Clamp(bearishScore, 0, 100);
@@ -76,7 +79,7 @@ public static class ScoringEngine
         // --- Confirmation multiplier ---
         var buckets = new BucketScores[]
         {
-            trend, momentum, volume, market, catalyst, learning,
+            trend, momentum, volume, market, catalyst, learning, research,
         };
 
         int aligned = 0, conflicting = 0;
@@ -197,6 +200,10 @@ public static class ScoringEngine
                 LearningScore = Math.Round(learning.Bullish - learning.Bearish, 2),
                 LearningBullish = Math.Round(learning.Bullish, 2),
                 LearningBearish = Math.Round(learning.Bearish, 2),
+                ResearchSignalScore = Math.Round(research.Bullish - research.Bearish, 2),
+                ResearchSignalBullish = Math.Round(research.Bullish, 2),
+                ResearchSignalBearish = Math.Round(research.Bearish, 2),
+                ResearchSignalCount = (researchSignals ?? []).Count,
                 RiskPenalty = Math.Round(riskPenalty, 2),
                 IndicatorsUsed = indicators.IndicatorsComputed,
                 IndicatorsSkipped = indicators.IndicatorsSkipped,
@@ -573,6 +580,47 @@ public static class ScoringEngine
             signals.Add($"Learning: {lessons.Count} prior lessons considered");
 
         return new BucketScores(Math.Clamp(bull, 0, 15), Math.Clamp(bear, 0, 15));
+    }
+
+    // -----------------------------------------------------------------------
+    // Research signal bucket: bullish 0..20, bearish 0..20
+    // Scores active signals from registered providers (congress, etc.)
+    // -----------------------------------------------------------------------
+
+    private static BucketScores ScoreResearchSignals(
+        List<ResearchSignal> researchSignals, Dictionary<string, double> weights, List<string> signals)
+    {
+        if (researchSignals.Count == 0) return new BucketScores(0, 0);
+
+        double bull = 0, bear = 0;
+
+        foreach (var sig in researchSignals)
+        {
+            var weightKey = $"research_{sig.SignalType}";
+            var w = weights.GetValueOrDefault(weightKey, 1.0);
+            var contribution = sig.Strength * sig.Confidence * 15 * w;
+
+            if (sig.SignalCategory == "institutional")
+            {
+                // Congressional buys are bullish signals, sells are bearish
+                if (sig.SignalType.Contains("buy") || sig.SignalType.Contains("cluster"))
+                    bull += contribution;
+                else if (sig.SignalType.Contains("sell"))
+                    bear += contribution;
+                else
+                    bull += contribution * 0.5; // unknown direction — mild bullish lean
+            }
+            else
+            {
+                // Generic: positive strength = bullish, negative = bearish
+                if (sig.Strength > 0) bull += contribution;
+                else bear += Math.Abs(contribution);
+            }
+
+            signals.Add($"Research: {sig.Summary ?? sig.SignalType} (str={sig.Strength:F2}, conf={sig.Confidence:F2})");
+        }
+
+        return new BucketScores(Math.Clamp(bull, 0, 20), Math.Clamp(bear, 0, 20));
     }
 
     // -----------------------------------------------------------------------

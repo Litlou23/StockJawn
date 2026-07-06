@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Controllers;
@@ -14,8 +15,13 @@ namespace StockResearchAgent.Api.Controllers;
 public class ResearchController : ControllerBase
 {
     private readonly ResearchRepository _repo;
+    private readonly ResearchSignalService _signalService;
 
-    public ResearchController(ResearchRepository repo) => _repo = repo;
+    public ResearchController(ResearchRepository repo, ResearchSignalService signalService)
+    {
+        _repo = repo;
+        _signalService = signalService;
+    }
 
     [HttpGet("predictions")]
     public async Task<IActionResult> GetPredictions(
@@ -107,6 +113,38 @@ public class ResearchController : ControllerBase
         "scan" => "prediction_type=in.(neutral_no_edge,neutral_range_bound,neutral_high_volatility,watch_only,rejected,unavailable,neutral)",
         _ => null,
     };
+
+    [HttpGet("signals")]
+    public async Task<IActionResult> GetResearchSignals([FromQuery] string? tickers = null)
+    {
+        if (string.IsNullOrWhiteSpace(tickers))
+            return Ok(new { count = 0, signals = new Dictionary<string, object>() });
+
+        var tickerList = tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var grouped = await _signalService.GetActiveSignalsAsync(tickerList);
+
+        var result = grouped.ToDictionary(
+            kvp => kvp.Key,
+            kvp => kvp.Value.Select(s => new
+            {
+                s.Id,
+                s.Ticker,
+                signalType = s.SignalType,
+                signalCategory = s.SignalCategory,
+                provider = s.Provider,
+                strength = s.Strength,
+                confidence = s.Confidence,
+                eventTimestamp = s.EventTimestamp,
+                detectedAt = s.DetectedAt,
+                expiresAt = s.ExpiresAt,
+                summary = s.Summary,
+                metadata = s.Metadata,
+            }).ToList()
+        );
+
+        var totalCount = result.Values.Sum(v => v.Count);
+        return Ok(new { count = totalCount, signals = result });
+    }
 
     [HttpGet("latest-report")]
     public async Task<IActionResult> GetLatestReport()

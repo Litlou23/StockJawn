@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.Watchlist;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
+using StockResearchAgent.Api.Services.ResearchSignals;
 
 namespace StockResearchAgent.Api.Controllers;
 
@@ -85,6 +86,7 @@ public class WatchlistJobController : ControllerBase
 {
     private readonly DynamicWatchlistService _watchlistService;
     private readonly UniverseDiscoveryService _universeDiscovery;
+    private readonly ResearchSignalService _signalService;
     private readonly JobStatusTracker _jobStatus;
     private readonly IConfiguration _config;
     private readonly ILogger<WatchlistJobController> _logger;
@@ -92,12 +94,14 @@ public class WatchlistJobController : ControllerBase
     public WatchlistJobController(
         DynamicWatchlistService watchlistService,
         UniverseDiscoveryService universeDiscovery,
+        ResearchSignalService signalService,
         JobStatusTracker jobStatus,
         IConfiguration config,
         ILogger<WatchlistJobController> logger)
     {
         _watchlistService = watchlistService;
         _universeDiscovery = universeDiscovery;
+        _signalService = signalService;
         _jobStatus = jobStatus;
         _config = config;
         _logger = logger;
@@ -166,6 +170,11 @@ public class WatchlistJobController : ControllerBase
                     },
                 });
             }
+
+            // Collect research signals (congress, etc.) before scoring
+            var signalResult = await _signalService.CollectAllSignalsAsync();
+            _logger.LogInformation("[jobs] Research signals: {Persisted} persisted, {Expired} expired, {Errors} errors",
+                signalResult.Persisted, signalResult.Expired, signalResult.Errors.Count);
 
             // Pass discovery context so scoring can use news/earnings data
             var discoveryContext = discovery.Universe.Select(t =>

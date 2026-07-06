@@ -67,9 +67,8 @@ public class DailyResearchRunService
 
         try
         {
-            // 1. Build market snapshots from active watchlist (not hardcoded)
-            var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
-            var tickers = activeWatchlist.Select(w => w.Ticker).ToArray();
+            // 1. Build market snapshots from research candidates
+            var tickers = await GetResearchCandidatesAsync();
 
             if (tickers.Length == 0)
             {
@@ -251,6 +250,22 @@ public class DailyResearchRunService
             await _repo.CompleteResearchRunAsync(run.Id, $"EOD review failed: {ex.Message}", 0, 0, errors);
             return new EndOfDayReviewResult { RunId = run.Id, Report = $"EOD review failed: {ex.Message}", Errors = errors };
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Research Candidate Selection
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the tickers that Morning Scan should research. Today this is
+    /// simply every active watchlist item. Tomorrow it can layer in
+    /// prioritization, budget awareness, or round-robin without touching
+    /// the rest of the scan pipeline.
+    /// </summary>
+    private async Task<string[]> GetResearchCandidatesAsync()
+    {
+        var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
+        return activeWatchlist.Select(w => w.Ticker).ToArray();
     }
 
     // -----------------------------------------------------------------------
