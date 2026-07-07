@@ -26,6 +26,10 @@
 - **Drawdown circuit breaker** — If the portfolio drops X% from peak, pause all new trades and switch to capital preservation mode until recovery signals appear.
 - **Multi-account simulation** — Run multiple portfolio simulations in parallel with different risk profiles (aggressive, moderate, conservative) to compare long-term outcomes.
 - **Cash drag optimization** — Track uninvested cash as an opportunity cost. Alert when cash sits idle too long without a qualifying trade opportunity.
+- **Auto-link paper trade outcomes to portfolio positions** — When `DynamicPickOrchestrator` closes a paper trade outcome, automatically create/close a corresponding portfolio position so the portfolio balance stays in sync with the paper trading pipeline without manual intervention.
+- **Portfolio equity curve snapshots** — Periodically snapshot portfolio balance to a `portfolio_snapshots` table. Enables charting the equity curve over time and calculating drawdown metrics.
+- **Challenge leaderboard** — If multiple challenges run concurrently with different risk profiles, rank them by return, Sharpe ratio, and max drawdown to discover which strategy profile works best.
+- **Portfolio-aware prediction filtering** — Before generating new predictions, check the active portfolio's cash and open positions. Skip predictions for tickers already held or for trades the portfolio can't afford.
 
 ## Research Engine
 

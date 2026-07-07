@@ -11,6 +11,7 @@ using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Providers.StockFit;
 using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.ResearchSignals.Providers;
+using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Models;
 
 // =====================================================================
@@ -63,7 +64,12 @@ try
     // =================================================================
     BootstrapLogger.Log("BOOT 008", "Services registration started...");
 
-    builder.Services.AddControllers();
+    builder.Services.AddControllers()
+        .AddJsonOptions(opts =>
+        {
+            opts.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+            opts.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
+        });
     builder.Services.AddOpenApi();
 
     builder.Services.AddSingleton<IOpenAiCompletionService, OpenAiCompletionService>();
@@ -121,6 +127,12 @@ builder.Services.AddSingleton<OptionsDataService>();
     // services to auto-generate stock + linked option candidates daily.
     builder.Services.AddSingleton<PaperStockCandidateRepository>();
     builder.Services.AddSingleton<DynamicPickOrchestrator>();
+
+    // Portfolio Challenge — simulated portfolio growth tracking.
+    // Portfolio AI is separate from the Prediction Engine: predictions
+    // find opportunities, Portfolio AI decides whether/how much to invest.
+    builder.Services.AddSingleton<PortfolioChallengeRepository>();
+    builder.Services.AddSingleton<PortfolioBalanceEngine>();
 
     // In-memory request counter — recorded on every request, displayed
     // on the dashboard with a "per-instance, resets on restart" caveat.
@@ -193,6 +205,15 @@ builder.Services.AddSingleton<OptionsDataService>();
         new("POST", "/api/paper-options/evaluate-open-candidates", "Evaluate every open paper candidate.", false, "Next.js app, browser or scheduled job", "This server"),
         new("GET", "/api/paper-options/outcomes", "Recent paper option outcomes.", false, "Next.js app, browser", "This server"),
         new("GET", "/api/paper-options/debug", "Counts, learning stats, and provider config for paper options.", false, "Dev only", "This server"),
+        new("GET", "/api/portfolio/summary", "Portfolio challenge dashboard: balance, progress, positions, return, win rate.", false, "Next.js app, browser", "This server"),
+        new("GET", "/api/portfolio/summary/{id}", "Dashboard summary for a specific challenge.", false, "Next.js app, browser", "This server"),
+        new("GET", "/api/portfolio/challenges", "List all portfolio challenges.", false, "Next.js app, browser", "This server"),
+        new("POST", "/api/portfolio/challenges", "Create a new portfolio challenge.", false, "Next.js app, browser", "This server"),
+        new("PATCH", "/api/portfolio/challenges/{id}/status", "Update challenge status (active/paused/abandoned).", false, "Next.js app, browser", "This server"),
+        new("GET", "/api/portfolio/positions/open", "Open positions for the active (or specified) challenge.", false, "Next.js app, browser", "This server"),
+        new("GET", "/api/portfolio/positions/closed", "Closed positions for the active (or specified) challenge.", false, "Next.js app, browser", "This server"),
+        new("POST", "/api/portfolio/positions/open", "Open a new portfolio position (deducts from cash).", false, "Next.js app, browser", "This server"),
+        new("POST", "/api/portfolio/positions/close", "Close a position (records P&L, updates balance).", false, "Next.js app, browser", "This server"),
     };
 
     var frontendAppEndpoints = new List<EndpointInfo>
@@ -275,9 +296,61 @@ builder.Services.AddSingleton<OptionsDataService>();
     // =================================================================
     BootstrapLogger.Log("BOOT 012", "App starting (calling app.Run)...");
 
-    app.Lifetime.ApplicationStarted.Register(() =>
+    app.Lifetime.ApplicationStarted.Register(async () =>
     {
         BootstrapLogger.Log("BOOT 013", "App started successfully — listening for requests");
+
+        // ── Startup schema validation ─────────────────────────────────
+        // Probe critical tables for expected columns. PostgREST returns
+        // 400 when a column doesn't exist, so an empty result = OK,
+        // an exception = missing column(s).
+        try
+        {
+            var db = app.Services.GetRequiredService<SupabaseClient>();
+            var logger = app.Services.GetRequiredService<ILoggerFactory>()
+                .CreateLogger("StartupSchemaCheck");
+
+            var expectedColumns = new Dictionary<string, string[]>
+            {
+                ["paper_stock_candidates"] = [
+                    "id", "prediction_id", "run_id", "ticker", "prediction_type", "timeframe",
+                    "entry_price", "confidence_score", "risk_score", "status", "candidate_mode",
+                    "quality_tier", "is_actionable", "bullish_score", "bearish_score", "winning_direction"
+                ],
+                ["portfolio_challenges"] = [
+                    "id", "name", "starting_balance", "current_balance", "target_balance",
+                    "current_cash", "status", "risk_profile", "portfolio_mode"
+                ],
+                ["portfolio_positions"] = [
+                    "id", "portfolio_id", "ticker", "entry_price", "quantity",
+                    "dollars_invested", "status", "prediction_id"
+                ],
+            };
+
+            foreach (var (table, columns) in expectedColumns)
+            {
+                try
+                {
+                    await db.SelectAsync(table,
+                        filter: "id=eq.00000000-0000-0000-0000-000000000000",
+                        select: string.Join(",", columns),
+                        limit: 1);
+                }
+                catch
+                {
+                    logger.LogError(
+                        "SCHEMA DRIFT DETECTED: Table '{Table}' is missing expected columns. " +
+                        "Expected: {Columns}. Pipeline inserts WILL fail silently until this is fixed.",
+                        table, string.Join(", ", columns));
+                }
+            }
+
+            BootstrapLogger.Log("BOOT 014", "Startup schema validation completed");
+        }
+        catch (Exception ex)
+        {
+            BootstrapLogger.Log("BOOT 014", $"Startup schema validation failed: {ex.Message}");
+        }
     });
 
     app.Run();

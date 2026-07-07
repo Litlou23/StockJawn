@@ -36,6 +36,12 @@
 ### paper_option_outcomes
 `id`, `paper_candidate_id`, `evaluation_time`, `current_underlying_price`, `current_bid`, `current_ask`, `current_mid`, `current_iv`, `current_delta`, `current_open_interest`, `current_volume`, `paper_pnl_per_contract`, `paper_pnl_percent`, `underlying_move_percent`, `iv_change`, `outcome_summary`, `created_at`
 
+### portfolio_challenges
+`id`, `name`, `starting_balance`, `current_balance`, `target_balance`, `current_cash`, `buying_power`, `realized_profit`, `unrealized_profit`, `total_return`, `percent_return`, `number_of_trades`, `winning_trades`, `losing_trades`, `win_rate`, `status` (active/completed/paused/abandoned), `portfolio_mode` (swing_trading/day_trading/options_only/stock_only/mixed), `risk_profile` (conservative/moderate/aggressive), `notes`, `created_at`, `updated_at`
+
+### portfolio_positions
+`id`, `portfolio_id` (FK → portfolio_challenges.id), `prediction_id`, `ticker`, `asset_type` (stock/option), `entry_date`, `exit_date`, `entry_price`, `exit_price`, `quantity`, `dollars_invested`, `dollars_returned`, `profit_loss`, `percent_gain`, `reason_entered`, `reason_exited`, `status` (open/closed/cancelled), `created_at`, `updated_at`
+
 ### pg_cron jobs
 Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM cron.job`
 

@@ -1,6 +1,7 @@
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.OptionsData;
+using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -41,6 +42,8 @@ public class DynamicPickOrchestrator
     private readonly MarketDataOptionsProvider _optionsProvider;
     private readonly MarketDataService _marketData;
     private readonly LearningEngine _learning;
+    private readonly PortfolioBalanceEngine _portfolio;
+    private readonly PortfolioChallengeRepository _portfolioRepo;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
 
     public DynamicPickOrchestrator(
@@ -53,6 +56,8 @@ public class DynamicPickOrchestrator
         MarketDataOptionsProvider optionsProvider,
         MarketDataService marketData,
         LearningEngine learning,
+        PortfolioBalanceEngine portfolio,
+        PortfolioChallengeRepository portfolioRepo,
         ILogger<DynamicPickOrchestrator> logger)
     {
         _dailyService = dailyService;
@@ -64,6 +69,8 @@ public class DynamicPickOrchestrator
         _optionsProvider = optionsProvider;
         _marketData = marketData;
         _learning = learning;
+        _portfolio = portfolio;
+        _portfolioRepo = portfolioRepo;
         _logger = logger;
     }
 
@@ -96,6 +103,7 @@ public class DynamicPickOrchestrator
 
         var directionalRankings = BuildDirectionalRankings(runPredictions);
         var stockBuilds = new List<StockCandidateBuild>();
+        var stockSaveFailures = 0;
         foreach (var pred in runPredictions)
         {
             directionalRankings.TryGetValue(pred.Id, out var ranking);
@@ -105,7 +113,22 @@ public class DynamicPickOrchestrator
                 ranking?.Percentile ?? 0,
                 ranking?.IsTopQuartile ?? false);
             var saved = await _stockRepo.SaveCandidateAsync(candidate);
+            if (saved is null)
+            {
+                stockSaveFailures++;
+                _logger.LogError("[dynamic] PIPELINE BREAK: Failed to save paper stock candidate for {Ticker} (prediction {PredId}). " +
+                    "This likely means the database schema is out of sync with the code. Check for missing columns.",
+                    pred.Ticker, pred.Id);
+            }
             stockBuilds.Add(new StockCandidateBuild(pred, candidate, saved, ranking));
+        }
+
+        if (stockSaveFailures > 0)
+        {
+            var msg = $"PIPELINE BREAK: {stockSaveFailures}/{runPredictions.Count} paper stock candidates failed to save. " +
+                      "Database schema may be missing columns. No portfolio positions or options can be generated from failed saves.";
+            _logger.LogError("[dynamic] {Message}", msg);
+            errors.Add(msg);
         }
 
         // 4. Option generation in learning mode with per-run and per-ticker caps.
@@ -232,10 +255,50 @@ public class DynamicPickOrchestrator
             .Select(b => b.SavedCandidate!)
             .ToList();
 
+        // 5. Auto-open portfolio positions for actionable candidates.
+        var portfolioPositionsOpened = 0;
+        var activeChallenge = await _portfolioRepo.GetActiveChallengeAsync();
+        if (activeChallenge is not null)
+        {
+            var actionableCandidates = savedStockCandidates
+                .Where(c => c.IsActionable
+                    && c.Status == PaperStockStatus.open
+                    && c.EntryPrice is > 0
+                    && PredictionCategoryHelper.IsDirectional(c.PredictionType))
+                .ToList();
+
+            foreach (var c in actionableCandidates)
+            {
+                try
+                {
+                    var pos = await _portfolio.AutoOpenPositionAsync(
+                        activeChallenge.Id,
+                        c.PredictionId,
+                        c.Ticker,
+                        c.EntryPrice!.Value,
+                        PositionAssetType.stock,
+                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}");
+
+                    if (pos is not null) portfolioPositionsOpened++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[dynamic] Portfolio position open failed for {Ticker}", c.Ticker);
+                    errors.Add($"portfolio-open {c.Ticker}: {ex.Message}");
+                }
+            }
+
+            if (portfolioPositionsOpened > 0)
+                _logger.LogInformation("[dynamic] Opened {Count} portfolio positions from actionable candidates",
+                    portfolioPositionsOpened);
+        }
+
         var optionEligible = savedStockCandidates.Count(c => c.QualifiesForOptions);
-        var report = $"Generated {savedStockCandidates.Count} paper stock candidates from {runPredictions.Count} predictions. " +
-                     $"{optionEligible} were learning-eligible for options. " +
-                     $"Saved {optionsGenerated} paper option candidates and blocked {blockedOptionCandidates}.";
+        var report = $"Generated {savedStockCandidates.Count} paper stock candidates from {runPredictions.Count} predictions" +
+                     (stockSaveFailures > 0 ? $" (WARNING: {stockSaveFailures} FAILED TO SAVE)" : "") +
+                     $". {optionEligible} were learning-eligible for options. " +
+                     $"Saved {optionsGenerated} paper option candidates and blocked {blockedOptionCandidates}." +
+                     (portfolioPositionsOpened > 0 ? $" Opened {portfolioPositionsOpened} portfolio positions." : "");
 
         return new DynamicMorningResult
         {
@@ -284,9 +347,45 @@ public class DynamicPickOrchestrator
         var eod = await _dailyService.RunEndOfDayReviewAsync();
         errors.AddRange(eod.Errors);
 
+        // 4. Auto-close portfolio positions whose paper stock candidates were just evaluated.
+        //    We look up the exit price by fetching a current quote for each ticker
+        //    that had open portfolio positions. This is more reliable than searching
+        //    outcomes (which may not have been saved yet at query time).
+        var portfolioPositionsClosed = 0;
+        foreach (var c in openStock)
+        {
+            if (c.PredictionId is null) continue;
+            try
+            {
+                var portfolioPositions = await _portfolioRepo.GetOpenPositionsByPredictionIdAsync(c.PredictionId);
+                if (portfolioPositions.Count == 0) continue;
+
+                var quote = await _marketData.GetQuoteAsync(c.Ticker);
+                if (quote is null || quote.Price <= 0) continue;
+
+                foreach (var pos in portfolioPositions)
+                {
+                    var closed = await _portfolio.ClosePositionAsync(new ClosePositionRequest
+                    {
+                        PositionId = pos.Id,
+                        ExitPrice = quote.Price,
+                        ReasonExited = $"EOD auto-close. {c.Ticker} current price ${quote.Price:F2}.",
+                    });
+
+                    if (closed is not null) portfolioPositionsClosed++;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[dynamic] Portfolio position close failed for prediction {PredId}", c.PredictionId);
+                errors.Add($"portfolio-close {c.Ticker}: {ex.Message}");
+            }
+        }
+
         var report = $"Evaluated {stockEvaluated} paper stock candidates, " +
                      $"{optionOutcomes.Count} paper option candidates. " +
-                     $"Existing predictions: {eod.PredictionsEvaluated}.";
+                     $"Existing predictions: {eod.PredictionsEvaluated}." +
+                     (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "");
 
         return new DynamicEodResult
         {
@@ -434,6 +533,9 @@ public class DynamicPickOrchestrator
         var qualityTierPerformance = BuildQualityTierPerformance(recentStockCandidates, recentStockOutcomes);
         var confidenceCalibration = BuildConfidenceCalibration(recentStockCandidates, recentStockOutcomes);
 
+        // Portfolio challenge summary (if one exists)
+        var portfolioSummary = await _portfolio.GetSummaryAsync();
+
         var totalCandidates = totalStockCandidatesTask.Result + totalOptionCandidatesTask.Result;
         var totalOutcomes = stockOutcomesTotalTask.Result + optionOutcomesTotalTask.Result;
         var outcomeCoverageRate = totalCandidates > 0
@@ -487,6 +589,7 @@ public class DynamicPickOrchestrator
             BlockReasonBreakdown = blockBreakdown,
             QualityTierPerformance = qualityTierPerformance,
             ConfidenceCalibration = confidenceCalibration,
+            PortfolioChallenge = portfolioSummary,
         };
     }
 

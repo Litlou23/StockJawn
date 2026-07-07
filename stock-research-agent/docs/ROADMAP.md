@@ -82,7 +82,7 @@ The closed-loop feedback system that makes every other capability improve over t
 
 ---
 
-## 5. Paper Trading — 55%
+## 5. Paper Trading — 65%
 
 Simulated trading that tests predictions with real market data.
 
@@ -92,26 +92,34 @@ Simulated trading that tests predictions with real market data.
 | **Options paper candidates** | Active — `PaperOptionsService.cs` manages options paper trades |
 | **Outcome tracking** | Active — `paper_stock_outcomes` + `paper_option_outcomes` tables |
 | **Individual trade P&L** | Active — per-trade outcome recorded |
+| **Portfolio balance tracking** | Active — `portfolio_challenges` + `portfolio_positions` tables, `PortfolioBalanceEngine` updates balance on every trade close |
 
-**Remaining work:** Portfolio-level P&L aggregation, position sizing logic, concurrent position limits, portfolio balance tracking over time, stop-loss / take-profit automation.
+**Remaining work:** Position sizing logic, concurrent position limits, stop-loss / take-profit automation, link existing paper trade outcomes to portfolio positions.
 
 **Future vision:** A full portfolio simulator that manages a $100 balance, sizes positions, enforces risk limits, and tracks equity curve over weeks/months.
 
 ---
 
-## 6. Portfolio AI — 5%
+## 6. Portfolio AI — 30%
 
 Intelligent capital allocation and risk management.
 
 | Aspect | Status |
 |---|---|
-| **Position sizing** | Not started |
+| **Portfolio challenge model** | Active — `portfolio_challenges` table with starting/current/target balance, cash, realized P&L, win rate, risk profile, portfolio mode |
+| **Position tracking** | Active — `portfolio_positions` table with entry/exit prices, quantity, dollars invested/returned, P&L, reasons |
+| **Balance engine** | Active — `PortfolioBalanceEngine` updates cash, balance, realized P&L, and statistics when positions open/close |
+| **Dashboard API** | Active — `GET /api/portfolio/summary` exposes balance, progress %, cash, positions, return, win rate, current goal. Also embedded in `/api/dashboard/dynamic-summary`. |
+| **Multiple challenge support** | Active — schema supports multiple challenges with different balances, targets, risk profiles, and modes |
+| **Basic position sizing** | Active — `CalculatePositionSize` uses fixed-fraction sizing (5%/10%/20% per risk profile). `AutoOpenPositionAsync` auto-sizes from available cash. |
+| **Orchestrator integration** | Active — `DynamicPickOrchestrator` auto-opens portfolio positions for actionable candidates during morning picks, auto-closes during EOD review |
+| **Frontend proxy routes** | Active — Next.js proxy routes for `/api/portfolio/summary`, `/api/portfolio/challenges`, `/api/portfolio/positions` |
 | **Risk budgeting** | Not started |
 | **Drawdown management** | Not started |
 | **Correlation-aware allocation** | Not started |
 | **Portfolio rebalancing** | Not started |
 
-**Remaining work:** Everything. This is the largest gap between the current system and the $100→$1,000 objective.
+**Remaining work:** Kelly criterion or volatility-based position sizing, risk budgeting, drawdown management, correlation-aware allocation, portfolio equity curve snapshots, concurrent position limits.
 
 **Future vision:** The system knows its current balance, maximum acceptable drawdown, position correlations, and sizes every trade to maximize expected portfolio growth (Kelly criterion or similar).
 
@@ -196,11 +204,11 @@ Connecting to a real brokerage for live execution.
 | Learning Engine | 75% | Core |
 | Market Intelligence | 70% | Core |
 | Options Intelligence | 65% | High |
-| Paper Trading | 55% | Critical |
+| Paper Trading | 65% | Critical |
 | Research Engine | 75% | High |
 | Performance Analytics | 35% | High |
 | Strategy Lab | 25% | Medium |
-| Portfolio AI | 5% | Critical |
+| Portfolio AI | 30% | Critical |
 | Live Portfolio | 0% | Future |
 
 ---

@@ -32,6 +32,8 @@
 | `paper_option_outcomes` | Closed options paper trade results | `PaperOptionOutcome` | `PaperOptionsRepository` |
 | `option_learning_stats` | Aggregate options paper trading statistics | `OptionLearningStat` | `PaperOptionsRepository` |
 | `research_signals` | Normalized signals from pluggable providers | `ResearchSignal` | `ResearchSignalRepository` |
+| `portfolio_challenges` | Simulated portfolio growth challenges | `PortfolioChallenge` | `PortfolioChallengeRepository` |
+| `portfolio_positions` | Individual positions within a challenge | `PortfolioPosition` | `PortfolioChallengeRepository` |
 
 ---
 
@@ -133,6 +135,54 @@ paper_option_candidates → paper_option_outcomes → option_learning_stats
 - **paper_option_outcomes** — Closed positions with exit premium, P&L, and performance vs prediction.
 - **option_learning_stats** — Aggregate options trading statistics for the learning engine.
 
+### Portfolio Challenge
+
+Simulated portfolio growth tracking: create challenge → open positions → close positions → update balance.
+
+```
+portfolio_challenges → portfolio_positions (open → closed)
+                     ↘ PortfolioBalanceEngine updates balance on each close
+```
+
+- **portfolio_challenges** — Each row is a portfolio growth challenge with starting balance, current balance, target balance, cash, realized P&L, and aggregate statistics (win rate, trade count). Supports multiple challenges with different risk profiles and portfolio modes.
+- **portfolio_positions** — Each row is a position (stock or option) within a challenge. Records entry/exit prices, quantity, dollars invested/returned, P&L, and reasons for entering and exiting. Links to `prediction_candidates` via `prediction_id`.
+
+| Column (portfolio_challenges) | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary key |
+| `name` | text | e.g. "Small Account Challenge" |
+| `starting_balance` | double | Initial portfolio value |
+| `current_balance` | double | Current total portfolio value |
+| `target_balance` | double | Goal to reach |
+| `current_cash` | double | Uninvested cash |
+| `buying_power` | double | Available to invest (= cash in Phase 1) |
+| `realized_profit` | double | Sum of closed position P&L |
+| `unrealized_profit` | double | Mark-to-market of open positions |
+| `number_of_trades` | int | Total closed positions |
+| `winning_trades` | int | Trades with positive P&L |
+| `win_rate` | double | winning_trades / number_of_trades × 100 |
+| `status` | text | active, completed, paused, abandoned |
+| `portfolio_mode` | text | swing_trading, day_trading, options_only, stock_only, mixed |
+| `risk_profile` | text | conservative, moderate, aggressive |
+
+| Column (portfolio_positions) | Type | Notes |
+|---|---|---|
+| `id` | uuid | Primary key |
+| `portfolio_id` | uuid | FK → portfolio_challenges.id |
+| `prediction_id` | text | FK → prediction_candidates.id |
+| `ticker` | text | Stock symbol |
+| `asset_type` | text | stock, option |
+| `entry_price` | double | Price at entry |
+| `exit_price` | double | Nullable; set on close |
+| `quantity` | double | Shares or contracts |
+| `dollars_invested` | double | entry_price × quantity |
+| `dollars_returned` | double | Nullable; exit_price × quantity |
+| `profit_loss` | double | Nullable; dollars_returned - dollars_invested |
+| `percent_gain` | double | Nullable; (profit_loss / dollars_invested) × 100 |
+| `reason_entered` | text | Why the position was opened |
+| `reason_exited` | text | Why the position was closed |
+| `status` | text | open, closed, cancelled |
+
 ---
 
 ## Planned Tables
@@ -154,6 +204,8 @@ These tables are designed but not yet created. See [research-signal-architecture
 - `paper_option_candidates.prediction_id` → `prediction_candidates.id`
 - `candidate_generation_audit.run_id` → `research_runs.id`
 - `watchlist_change_log.ticker` → `watchlist_items.ticker`
+- `portfolio_positions.portfolio_id` → `portfolio_challenges.id`
+- `portfolio_positions.prediction_id` → `prediction_candidates.id`
 
 ---
 

@@ -49,6 +49,16 @@ const OptionsIcon = (
   </svg>
 );
 
+const PortfolioIcon = (
+  <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12M9 9l3-3 3 3M6.5 15.5C4.5 15.5 3 14 3 12s1.5-3.5 3.5-3.5" />
+    <rect x="2" y="7" width="20" height="13" rx="2" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 7V4M8 4h8" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M7 14h2M15 14h2" />
+    <circle cx="12" cy="14" r="2.5" />
+  </svg>
+);
+
 const SystemIcon = (
   <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
     <circle cx="12" cy="12" r="3" />
@@ -94,10 +104,16 @@ export const navEntries: NavEntry[] = [
     ],
   },
   {
+    label: 'Portfolio',
+    icon: PortfolioIcon,
+    href: '/portfolio',
+  },
+  {
     label: 'System',
     icon: SystemIcon,
     children: [
       { href: '/learning', label: 'System Learning' },
+      { href: '/pipeline-health', label: 'Pipeline Health' },
       { href: '/connectivity', label: 'Connection Status' },
       { href: '/settings', label: 'Settings' },
     ],

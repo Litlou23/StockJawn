@@ -178,6 +178,7 @@ public record DynamicDashboardSummary
     public List<BlockReasonCount> BlockReasonBreakdown { get; init; } = [];
     public List<QualityTierPerformance> QualityTierPerformance { get; init; } = [];
     public List<ConfidenceCalibrationBucket> ConfidenceCalibration { get; init; } = [];
+    public PortfolioChallengeSummary? PortfolioChallenge { get; init; }
 }
 
 public record CandidateGenerationAuditEntry

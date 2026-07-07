@@ -13,7 +13,7 @@
 These items block the portfolio growth objective. Without them, the system cannot meaningfully track whether it's winning or losing.
 
 - [ ] **Position sizing engine** — Calculate how much of the portfolio to allocate per trade based on confidence, expected value, and current balance. Without this, every trade is an arbitrary bet. *(Portfolio AI)*
-- [ ] **Portfolio balance tracker** — Track simulated portfolio value over time. The system currently records individual trade outcomes but has no aggregate balance. *(Paper Trading)*
+- [ ] **Portfolio equity curve** — Visualize portfolio value over time. Infrastructure complete (tables, balance engine, orchestrator integration). Remaining: periodic `portfolio_snapshots` table for historical equity curve data, frontend chart. *(Performance Analytics / Portfolio AI)*
 - [ ] **Portfolio equity curve** — Visualize portfolio value over time to measure progress toward the $100→$1,000 goal. *(Performance Analytics)*
 - [ ] **Budget-aware option selection** — Filter options contracts the portfolio can actually afford. A $100 account cannot buy a $500 premium contract. *(Options Intelligence)*
 - [ ] **Expected value calculations** — Every prediction should compute `(probability × potential gain) - ((1 - probability) × potential loss)`. Select trades by EV, not confidence alone. *(Prediction Engine)*
@@ -68,6 +68,8 @@ Move items here as they ship, with the date and any relevant notes.
 - [x] **2026-07 — Congress Intelligence observability page** — `/congress-trades` page rewritten as pipeline observability dashboard. See [congress-observability-page-design.md](congress-observability-page-design.md).
 - [x] **2026-07 — Research Signal Architecture backend** — `IResearchSignalProvider`, `ResearchSignalService`, `ResearchSignalRepository`, `CongressSignalProvider` implemented. Research signal bucket added to `ScoringEngine` and `DynamicWatchlistService`. Learning engine updated with `research_` prefix. Wired into weekly research job pipeline.
 - [x] **2026-07 — Frontend research signal display** — `ResearchSignals.tsx` component with badges + detail panel. Integrated into predictions page (inline badges + expanded panel) and watchlist page (card badges + score breakdown + detail modal). Backend `/api/research/signals` endpoint + frontend proxy route.
+- [x] **2026-07 — Portfolio Challenge infrastructure (Phase 1)** — `portfolio_challenges` and `portfolio_positions` Supabase tables, `PortfolioChallengeRepository`, `PortfolioBalanceEngine` service, `PortfolioChallengeController` with dashboard summary API. Default "Small Account Challenge" ($100→$1,000). Supports multiple challenges with different risk profiles and portfolio modes. Balance engine updates cash, P&L, and statistics on every position open/close.
+- [x] **2026-07 — Portfolio orchestrator integration (Phase 2)** — `DynamicPickOrchestrator` auto-opens portfolio positions for actionable candidates during morning picks and auto-closes during EOD review. Basic fixed-fraction position sizing (5%/10%/20% by risk profile). Portfolio summary embedded in dynamic dashboard. Next.js frontend proxy routes for `/api/portfolio/*`.
 
 ---
 

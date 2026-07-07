@@ -91,6 +91,54 @@
 
 ---
 
+## ADR-008 — Portfolio AI Separate from Prediction Engine
+
+| Field | Value |
+|---|---|
+| **Date** | 2026-07 |
+| **Decision** | Portfolio challenge infrastructure (balance tracking, position management, cash accounting) is implemented as a separate service layer (`PortfolioBalanceEngine`, `PortfolioChallengeRepository`) that does not depend on or duplicate the Prediction Engine or Paper Trading services. |
+| **Reason** | The Prediction Engine finds opportunities; Portfolio AI decides whether and how much to invest. These are distinct concerns. Prediction quality is measured by directional accuracy and confidence calibration. Portfolio quality is measured by capital growth, risk-adjusted return, and cash management. Coupling them would make it impossible to improve one without affecting the other. |
+| **Alternatives Considered** | (1) Embed portfolio tracking inside `DynamicPickOrchestrator` — rejected because it mixes prediction generation with capital allocation. (2) Extend `PaperStockCandidateRepository` with balance fields — rejected because portfolio state spans both stock and option positions and shouldn't be tied to one asset type. |
+| **Consequences** | Portfolio positions reference `prediction_candidates` via `prediction_id` but don't depend on the paper trading tables. Existing paper trading outcome tracking (`paper_stock_outcomes`, `paper_option_outcomes`) continues unchanged. Future position sizing logic lives in the Portfolio AI layer, not the Prediction Engine. |
+
+---
+
+## ADR-009 — Portfolio Challenges as Configurable Entities
+
+| Field | Value |
+|---|---|
+| **Date** | 2026-07 |
+| **Decision** | Portfolio challenges are modeled as database entities with configurable starting balance, target balance, risk profile, and portfolio mode rather than hardcoded values. The default seed is $100→$1,000 but nothing in the code assumes these amounts. |
+| **Reason** | The product vision states the $100→$1,000 challenge, but the system should support future scenarios: different starting balances, different targets, multiple concurrent challenges with different risk profiles (conservative, aggressive), and asset-type-restricted portfolios (options-only, stock-only). Hardcoding would require code changes for each new challenge type. |
+| **Alternatives Considered** | (1) Hardcoded $100 starting balance with `const` — rejected because it limits experimentation. (2) Configuration-file-based challenge definitions — rejected because challenges should be created dynamically via API and persist in the database. |
+| **Consequences** | The API supports creating multiple challenges. The `GetActiveChallengeAsync()` method returns the oldest active challenge as the default, which works for the single-challenge Phase 1 but will need refinement when multiple concurrent challenges are supported. |
+
+---
+
+## ADR-010 — Fixed-Fraction Position Sizing for Phase 1
+
+| Field | Value |
+|---|---|
+| **Date** | 2026-07 |
+| **Decision** | The initial position sizing uses a simple fixed-fraction approach: 5% of available cash per position for conservative profiles, 10% for moderate, 20% for aggressive. No Kelly criterion, no volatility adjustment, no confidence-weighted sizing. |
+| **Reason** | The system needs a working position sizing strategy before it can auto-open portfolio positions from the orchestrator pipeline. A fixed fraction is simple, predictable, and doesn't require historical calibration data. It prevents the $100 account from going all-in on a single trade while allowing meaningful position sizes. The infrastructure supports swapping in more sophisticated sizing later. |
+| **Alternatives Considered** | (1) Kelly criterion — rejected for Phase 1 because it requires calibrated win rate and payoff ratio, which the system hasn't accumulated yet. (2) Fixed dollar amount (e.g., $10 per trade) — rejected because it doesn't scale across different starting balances. (3) Confidence-weighted sizing — deferred to Phase 2 once calibration data exists. |
+| **Consequences** | On a $100 moderate portfolio, each position is ~$10. This means the portfolio can hold roughly 10 concurrent positions before running out of cash. As the portfolio grows, position sizes grow proportionally. This is intentionally conservative — losing a single trade costs ~10% of starting capital, which is recoverable. |
+
+---
+
+## ADR-011 — Auto-Open/Close Portfolio Positions from Orchestrator
+
+| Field | Value |
+|---|---|
+| **Date** | 2026-07 |
+| **Decision** | The `DynamicPickOrchestrator` automatically opens portfolio positions for actionable stock candidates (not learning-mode) during morning picks, and automatically closes them during EOD review when the corresponding paper stock candidate is evaluated. |
+| **Reason** | Without automatic portfolio tracking, the balance would never change and the $100→$1,000 challenge would be meaningless. Only actionable candidates (confidence ≥ 40, risk ≤ 75) are invested in — learning-mode candidates are tracked by the paper trading system but don't consume portfolio capital. |
+| **Alternatives Considered** | (1) Manual position opening via API — rejected because the pipeline runs automatically and the portfolio should track it. (2) Open positions for all candidates including learning mode — rejected because learning-mode trades are noisy and would drain the small account quickly. (3) Only open live-eligible candidates — rejected as too restrictive; `actionable_shadow` mode represents meaningful signals worth tracking. |
+| **Consequences** | The portfolio balance is updated automatically by the daily pipeline. Users can still manually open/close positions via the API. The EOD close uses a live quote for the exit price (same data source as the paper stock evaluation). Positions that can't be priced (no quote available) remain open until the next EOD cycle. |
+
+---
+
 ## Template
 
 Copy this template for new decisions:
