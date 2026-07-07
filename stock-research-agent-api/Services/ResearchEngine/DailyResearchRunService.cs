@@ -145,6 +145,7 @@ public class DailyResearchRunService
                 invalidation_rule = p.InvalidationRule,
                 data_sources_used = p.DataSourcesUsed.ToArray(),
                 missing_data_warnings = p.MissingDataWarnings.ToArray(),
+                downgrade_reasons = p.DowngradeReasons.ToArray(),
                 status = p.Status,
             }).ToList();
             var (persisted, ids) = await _repo.SavePredictionsAsync(predRows);
@@ -274,8 +275,7 @@ public class DailyResearchRunService
 
     public async Task<LearningUpdateResult> RunLearningUpdateAsync(string? existingRunId = null)
     {
-        _logger.LogInformation("[research-engine] Starting learning update...");
-        var errors = new List<string>();
+        _logger.LogInformation("[research-engine] Starting full learning cycle...");
 
         ResearchRun? run;
         if (existingRunId is not null)
@@ -294,35 +294,21 @@ public class DailyResearchRunService
 
         try
         {
-            var (perfUpdated, _) = await _learning.UpdateSignalPerformanceAsync();
-            var (weightsAdjusted, weightChanges) = await _learning.UpdateScoringWeightsFromOutcomesAsync();
-            var insights = await _learning.GenerateLearningInsightsAsync();
+            // Run the unified learning pipeline
+            var result = await _learning.RunFullLearningCycleAsync();
+            result = result with { RunId = run.Id };
 
-            var parts = new List<string>
-            {
-                $"Updated {perfUpdated} signal performance records.",
-                $"Adjusted {weightsAdjusted} scoring weights.",
-                $"Generated {insights.Count} learning insights.",
-            };
-            if (weightChanges.Count > 0)
-                parts.Add("Weight changes: " + string.Join(", ", weightChanges.Select(c => $"{c.Signal}: {c.OldWeight} -> {c.NewWeight}")));
-            var report = string.Join(" ", parts);
+            await _repo.CompleteResearchRunAsync(run.Id, result.Report, 0, 0, result.Errors);
 
-            await _repo.CompleteResearchRunAsync(run.Id, report, 0, 0, errors);
-
-            _logger.LogInformation("[research-engine] Learning update complete: {Insights} insights, {Weights} weight changes",
-                insights.Count, weightsAdjusted);
-            return new LearningUpdateResult
-            {
-                RunId = run.Id, InsightsGenerated = insights.Count,
-                WeightsAdjusted = weightsAdjusted, Report = report, Errors = errors,
-            };
+            _logger.LogInformation("[research-engine] Learning cycle complete: {Obs} observations, {Insights} insights, {Weights} weight changes",
+                result.ObservationsCreated, result.InsightsGenerated, result.WeightsAdjusted);
+            return result;
         }
         catch (Exception ex)
         {
-            errors.Add(ex.Message);
-            await _repo.CompleteResearchRunAsync(run.Id, $"Learning update failed: {ex.Message}", 0, 0, errors);
-            return new LearningUpdateResult { RunId = run.Id, Report = $"Learning update failed: {ex.Message}", Errors = errors };
+            var errors = new List<string> { ex.Message };
+            await _repo.CompleteResearchRunAsync(run.Id, $"Learning cycle failed: {ex.Message}", 0, 0, errors);
+            return new LearningUpdateResult { RunId = run.Id, Report = $"Learning cycle failed: {ex.Message}", Errors = errors };
         }
     }
 }

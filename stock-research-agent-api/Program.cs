@@ -77,6 +77,9 @@ try
     builder.Services.AddSingleton<OutcomeEvaluator>();
     builder.Services.AddSingleton<LearningEngine>();
     builder.Services.AddSingleton<DailyReportService>();
+    builder.Services.AddSingleton<PatternDetectionService>();
+    builder.Services.AddSingleton<IntakeAnalysisService>();
+    builder.Services.AddSingleton<EnsembleScoringService>();
     builder.Services.AddSingleton<DailyResearchRunService>();
 
     // Universe discovery services

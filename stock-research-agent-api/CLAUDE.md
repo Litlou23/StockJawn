@@ -21,10 +21,10 @@
 ### prediction_outcomes
 `id`, `prediction_id`, `evaluation_time`, `start_price`, `close_price`, `high_after_prediction`, `low_after_prediction`, `percent_move`, `direction_correct`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `price_accuracy_percent`, `price_prediction_error_percent`, `was_in_projected_zone`, `target_hit`, `stop_hit`, `invalidation_hit`, `max_favorable_percent`, `max_adverse_percent`, `outcome_score`, `outcome_summary`, `lesson`, `created_at`
 
-### signal_performance
+### research_signal_performance
 `id`, `signal_name`, `total_predictions`, `correct_predictions`, `accuracy`, `avg_confidence_when_correct`, `avg_confidence_when_wrong`, `last_updated`
 
-### signal_weights
+### research_scoring_weights
 `id`, `signal_name`, `weight`, `updated_at`, `reason`
 
 ### learning_insights

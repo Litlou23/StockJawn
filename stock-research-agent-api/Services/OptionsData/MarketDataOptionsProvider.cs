@@ -258,7 +258,7 @@ public class MarketDataOptionsProvider
             }
 
             var api = JsonSerializer.Deserialize<MarketDataCandlesResponse>(body);
-            if (api is null || api.Status != "ok" || (api.Timestamps?.Length ?? 0) == 0)
+            if (api is null || api.Status != "ok" || api.Timestamps is null || api.Timestamps.Length == 0)
                 return [];
 
             var count = api.Timestamps.Length;

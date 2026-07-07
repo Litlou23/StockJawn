@@ -30,15 +30,18 @@ public class PredictionGenerator
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
     private readonly ResearchSignalService _signalService;
+    private readonly EnsembleScoringService _ensemble;
     private readonly StockFitProvider _stockFit;
     private readonly FinnhubProvider _finnhub;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
+    private readonly bool _ensembleEnabled;
 
     public PredictionGenerator(
         MarketDataService marketData,
         ResearchRepository repo,
         ResearchSignalService signalService,
+        EnsembleScoringService ensemble,
         StockFitProvider stockFit,
         FinnhubProvider finnhub,
         IConfiguration configuration,
@@ -47,9 +50,13 @@ public class PredictionGenerator
         _marketData = marketData;
         _repo = repo;
         _signalService = signalService;
+        _ensemble = ensemble;
         _stockFit = stockFit;
         _finnhub = finnhub;
         _logger = logger;
+        _ensembleEnabled = string.Equals(
+            configuration["ENSEMBLE_SCORING_ENABLED"], "true",
+            StringComparison.OrdinalIgnoreCase);
 
         var apiKey = configuration["OPENAI_API_KEY"];
         if (!string.IsNullOrWhiteSpace(apiKey))
@@ -231,6 +238,12 @@ public class PredictionGenerator
         // ── Step 1: Compute indicators, benchmark, and scores ────────
         var weights = (await _repo.GetScoringWeightsAsync())
             .ToDictionary(w => w.SignalName, w => w.Weight);
+
+        // Merge adaptive weight overrides from the learning engine
+        var overrides = await _repo.GetActiveWeightOverridesAsync();
+        foreach (var o in overrides)
+            weights[o.SignalName] = o.EffectiveWeight;
+
         var lessons = (await _repo.GetRecentLearningInsightsAsync(10))
             .Select(i => i.Summary).ToList();
 
@@ -256,7 +269,23 @@ public class PredictionGenerator
         // Fetch active research signals for this ticker
         var researchSignals = await _signalService.GetActiveSignalsForTickerAsync(ticker);
 
-        var scoring = ScoringEngine.Score(snapshot, indicators, benchmark, weights, lessons, researchSignals);
+        ScoringEngine.ScoringResult scoring;
+        EnsembleScoringService.EnsembleResult? ensembleResult = null;
+
+        if (_ensembleEnabled)
+        {
+            ensembleResult = await _ensemble.ScoreWithEnsembleAsync(
+                snapshot, indicators, benchmark, weights, lessons, researchSignals);
+            scoring = ensembleResult.BlendedResult;
+            _logger.LogInformation(
+                "[prediction] {Ticker}: ensemble scoring — agreement={Agreement:P0}, dominant={Dominant}",
+                ticker, ensembleResult.Agreement, ensembleResult.DominantModel);
+        }
+        else
+        {
+            scoring = ScoringEngine.Score(snapshot, indicators, benchmark, weights, lessons, researchSignals);
+        }
+
         var predType = scoring.PredictionType;
         var confidence = scoring.Confidence;
         var risk = scoring.Risk;
@@ -283,6 +312,9 @@ public class PredictionGenerator
             if (sources.Any(s => s.Contains("stockfit", StringComparison.OrdinalIgnoreCase) || s.Contains("SEC", StringComparison.OrdinalIgnoreCase))) dataSources.Add("stockfit-news");
         }
         else missingWarnings.Add("No recent news/catalysts found");
+
+        if (ensembleResult is not null)
+            dataSources.Add("ensemble-scoring");
 
         if (!snapshot.DataAvailability.OptionsChainAvailable)
             missingWarnings.Add("Options-chain data not connected — cannot confirm options setups");
@@ -319,6 +351,15 @@ public class PredictionGenerator
         scoring = ScoringEngine.FinalizeWithRiskReward(scoring, priceCalc.RiskRewardRatio);
         confidence = scoring.Confidence;
 
+        // Track downgrade reasons for watch_only calibration learning.
+        // Start with ScoringEngine's actionability reasons, then add R:R downgrade if applicable.
+        var downgradeReasons = new List<string>();
+        foreach (var reason in scoring.Breakdown.ActionabilityReasons)
+        {
+            if (reason.Contains("Downgraded", StringComparison.OrdinalIgnoreCase))
+                downgradeReasons.Add(reason);
+        }
+
         // If R:R ratio is extremely poor, downgrade to watch_only.
         // Threshold is 0.5 (not 1.5) — in learning mode we want to observe
         // predictions with marginal R:R so the learning engine can calibrate.
@@ -326,7 +367,9 @@ public class PredictionGenerator
             && (predType == "bullish" || predType == "bearish"))
         {
             predType = "watch_only";
-            priceCalc.Warnings.Add($"Downgraded to watch_only: R:R ratio {rr:F2} < 0.5 minimum");
+            var rrReason = $"Downgraded to watch_only: R:R ratio {rr:F2} < 0.5 minimum";
+            priceCalc.Warnings.Add(rrReason);
+            downgradeReasons.Add(rrReason);
         }
 
         // ── Step 5: Assemble prediction (scores from engine, text from AI) ──
@@ -369,9 +412,14 @@ public class PredictionGenerator
             InvalidationRule = invalidation,
             DataSourcesUsed = dataSources,
             MissingDataWarnings = missingWarnings,
-            ScoreDebugJson = JsonSerializer.Serialize(scoring.Breakdown, new JsonSerializerOptions { WriteIndented = false }),
+            ScoreDebugJson = JsonSerializer.Serialize(
+                ensembleResult is not null
+                    ? new { scoring.Breakdown, Ensemble = new { ensembleResult.Agreement, ensembleResult.DominantModel, Models = ensembleResult.ModelScores.Select(m => new { m.ModelName, m.HistoricalAccuracy, m.ModelWeight }) } }
+                    : (object)scoring.Breakdown,
+                new JsonSerializerOptions { WriteIndented = false }),
             ActionabilityScore = scoring.Breakdown.ActionabilityScore,
             ActionabilityTier = scoring.Breakdown.ActionabilityTier,
+            DowngradeReasons = downgradeReasons,
             Status = "open",
         };
 

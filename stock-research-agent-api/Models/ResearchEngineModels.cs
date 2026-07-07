@@ -317,6 +317,7 @@ public record PredictionCandidate
     public string? ScoreDebugJson { get; init; }
     public int? ActionabilityScore { get; init; }
     public ActionabilityTier? ActionabilityTier { get; init; }
+    public List<string> DowngradeReasons { get; init; } = [];
     public string Status { get; init; } = "open";
     public DateTimeOffset CreatedAt { get; init; }
 }
@@ -367,6 +368,12 @@ public record PredictionOutcome
     public double? OutcomeScore { get; init; }
     public string? OutcomeSummary { get; init; }
     public string? Lesson { get; init; }
+    // Watch-only / abstention evaluation fields
+    public bool? AbstentionCorrect { get; init; }
+    public double? MissedAlphaPercent { get; init; }
+    public bool? GuardrailJustified { get; init; }
+    public string? OriginalDirection { get; init; }
+    public List<string>? DowngradeReasonsEvaluated { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
 
@@ -504,6 +511,105 @@ public record LearningUpdateResult
     public string? RunId { get; init; }
     public int InsightsGenerated { get; init; }
     public int WeightsAdjusted { get; init; }
+    public int ObservationsCreated { get; init; }
     public string Report { get; init; } = "";
+    public string? AiSummary { get; init; }
     public List<string> Errors { get; init; } = [];
+}
+
+// ---------------------------------------------------------------------------
+// Signal Observation (per-bucket per-prediction learning data)
+// ---------------------------------------------------------------------------
+
+public record SignalObservation
+{
+    public string? Id { get; init; }
+    public string PredictionId { get; init; } = "";
+    public string? OutcomeId { get; init; }
+    public string SignalName { get; init; } = "";
+    public double BullScore { get; init; }
+    public double BearScore { get; init; }
+    public string PredictedDirection { get; init; } = "";
+    public bool? Correct { get; init; }
+    public double RawWeight { get; init; } = 1.0;
+    public double EffectiveWeight { get; init; } = 1.0;
+    public double WeightedContribution { get; init; }
+    public double? Confidence { get; init; }
+    public double? OutcomeScore { get; init; }
+    public string? MarketRegime { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+// ---------------------------------------------------------------------------
+// Scoring Weight Override (three-layer weight system)
+// ---------------------------------------------------------------------------
+
+public record ScoringWeightOverride
+{
+    public string? Id { get; init; }
+    public string SignalName { get; init; } = "";
+    public double BaseWeight { get; init; } = 1.0;
+    public double AdjustmentPercent { get; init; }
+    public double EffectiveWeight { get; init; } = 1.0;
+    public double Confidence { get; init; }
+    public int SampleSize { get; init; }
+    public string Status { get; init; } = "active";
+    public string? Reason { get; init; }
+    public DateTimeOffset LastUpdated { get; init; }
+}
+
+// ---------------------------------------------------------------------------
+// Enhanced Learning Report
+// ---------------------------------------------------------------------------
+
+public record EnhancedLearningReport
+{
+    public string? Id { get; init; }
+    public DateTimeOffset ReportDate { get; init; }
+    public int EvaluationWindowDays { get; init; } = 30;
+    public int PredictionCount { get; init; }
+    public double? OverallAccuracy { get; init; }
+    public double? BullAccuracy { get; init; }
+    public double? BearAccuracy { get; init; }
+    public string? MarketRegime { get; init; }
+    public List<SignalPerformanceSummary> TopSignals { get; init; } = [];
+    public List<SignalPerformanceSummary> WeakSignals { get; init; } = [];
+    public List<WeightChangeSummary> WeightChanges { get; init; } = [];
+    public ConfidenceAnalysis? ConfidenceCalibration { get; init; }
+    public string? AiSummary { get; init; }
+}
+
+public record SignalPerformanceSummary
+{
+    public string SignalName { get; init; } = "";
+    public double Accuracy { get; init; }
+    public int SampleSize { get; init; }
+    public double? BullAccuracy { get; init; }
+    public double? BearAccuracy { get; init; }
+    public double AverageContribution { get; init; }
+}
+
+public record WeightChangeSummary
+{
+    public string SignalName { get; init; } = "";
+    public double PreviousWeight { get; init; }
+    public double NewWeight { get; init; }
+    public double ChangePercent { get; init; }
+    public string? Reason { get; init; }
+}
+
+public record ConfidenceAnalysis
+{
+    public List<ConfidenceBucket> Buckets { get; init; } = [];
+    public bool IsOverconfident { get; init; }
+    public string? Summary { get; init; }
+}
+
+public record ConfidenceBucket
+{
+    public string Range { get; init; } = "";
+    public int Count { get; init; }
+    public double ActualAccuracy { get; init; }
+    public double ExpectedAccuracy { get; init; }
+    public double CalibrationError { get; init; }
 }

@@ -356,22 +356,6 @@ export default function PredictionsPage() {
   const isScanTab = category === 'scan_results';
   const isOptionsTab = category === 'options';
 
-  if (loading) {
-    return (
-      <AppShell>
-        <FullScreenLoader loading message="Loading predictions..." steps={['Fetching predictions...', 'Matching outcomes...']} />
-      </AppShell>
-    );
-  }
-
-  if (error) {
-    return (
-      <AppShell>
-        <div className="p-6 text-red-400">{error}</div>
-      </AppShell>
-    );
-  }
-
   const items = data?.items ?? [];
   const stats = data?.stats ?? { total: 0, evaluated: 0, correct: 0, incorrect: 0, pending: 0, accuracy: 0 };
 
@@ -397,6 +381,22 @@ export default function PredictionsPage() {
     [filtered],
   );
   const { signals: researchSignals } = useResearchSignals(visibleTickers);
+
+  if (loading) {
+    return (
+      <AppShell>
+        <FullScreenLoader loading message="Loading predictions..." steps={['Fetching predictions...', 'Matching outcomes...']} />
+      </AppShell>
+    );
+  }
+
+  if (error) {
+    return (
+      <AppShell>
+        <div className="p-6 text-red-400">{error}</div>
+      </AppShell>
+    );
+  }
 
   const rangeLabel = datePreset === 'all' ? 'all time'
     : datePreset === 'custom' ? `${customFrom}${customTo ? ` to ${customTo}` : ' to now'}`

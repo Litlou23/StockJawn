@@ -249,10 +249,11 @@ public class DynamicWatchlistService
         // Operational telemetry — warn if watchlist is getting large
         if (activeCount > WarningThreshold)
         {
-            var avgScore = kept.Concat(added).Average(w => w.TotalScore ?? 0);
+            var allActive = kept.Concat(added).ToList();
+            var avgScore = allActive.Count > 0 ? allActive.Average(w => w.TotalScore ?? 0) : 0;
             var oldestReview = allCurrent
-                .Where(w => w.LastReviewedAt.HasValue)
-                .Select(w => (DateTimeOffset.UtcNow - w.LastReviewedAt!.Value).TotalDays)
+                .Where(w => w.LastReviewedAt is not null)
+                .Select(w => (DateTimeOffset.UtcNow - w.LastReviewedAt.GetValueOrDefault()).TotalDays)
                 .DefaultIfEmpty(0)
                 .Max();
             _logger.LogWarning(

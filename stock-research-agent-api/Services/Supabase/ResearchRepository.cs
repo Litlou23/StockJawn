@@ -296,17 +296,6 @@ public class ResearchRepository
         }).ToList();
     }
 
-    public async Task<bool> UpdateScoringWeightAsync(string signalName, double weight, string reason)
-    {
-        return await _db.UpsertAsync("research_scoring_weights", new
-        {
-            signal_name = signalName,
-            weight,
-            reason,
-            updated_at = DateTimeOffset.UtcNow.ToString("o"),
-        }, "signal_name");
-    }
-
     // -----------------------------------------------------------------------
     // Learning Insights
     // -----------------------------------------------------------------------
@@ -332,6 +321,133 @@ public class ResearchRepository
             Confidence = GetDouble(r, "confidence"),
             CreatedAt = GetDateTimeOffset(r, "created_at"),
         }).ToList();
+    }
+
+    // -----------------------------------------------------------------------
+    // Signal Observations (prediction_signal_observations)
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> InsertSignalObservationsAsync(List<object> observations)
+    {
+        if (observations.Count == 0) return true;
+        await _db.InsertAsync("prediction_signal_observations", observations, returnRows: false);
+        return true;
+    }
+
+    public async Task<List<SignalObservation>> GetSignalObservationsAsync(
+        int limit = 500, int? windowDays = null)
+    {
+        var filter = windowDays.HasValue
+            ? $"created_at=gte.{DateTimeOffset.UtcNow.AddDays(-windowDays.Value):yyyy-MM-dd}"
+            : null;
+        var rows = await _db.SelectAsync("prediction_signal_observations",
+            filter: filter, order: "created_at.desc", limit: limit);
+        return rows.Select(r => new SignalObservation
+        {
+            Id = r["id"]?.ToString(),
+            PredictionId = r["prediction_id"]?.ToString() ?? "",
+            OutcomeId = r["outcome_id"]?.ToString(),
+            SignalName = r["signal_name"]?.ToString() ?? "",
+            BullScore = GetDouble(r, "bull_score"),
+            BearScore = GetDouble(r, "bear_score"),
+            PredictedDirection = r["predicted_direction"]?.ToString() ?? "",
+            Correct = GetNullableBool(r, "correct"),
+            RawWeight = GetDouble(r, "raw_weight"),
+            EffectiveWeight = GetDouble(r, "effective_weight"),
+            WeightedContribution = GetDouble(r, "weighted_contribution"),
+            Confidence = GetNullableDouble(r, "confidence"),
+            OutcomeScore = GetNullableDouble(r, "outcome_score"),
+            MarketRegime = r["market_regime"]?.ToString(),
+            CreatedAt = GetDateTimeOffset(r, "created_at"),
+        }).ToList();
+    }
+
+    public async Task<bool> HasObservationsForPredictionAsync(string predictionId)
+    {
+        var rows = await _db.SelectAsync("prediction_signal_observations",
+            filter: $"prediction_id=eq.{predictionId}", limit: 1);
+        return rows.Count > 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Scoring Weight Overrides
+    // -----------------------------------------------------------------------
+
+    public async Task<List<ScoringWeightOverride>> GetActiveWeightOverridesAsync()
+    {
+        var rows = await _db.SelectAsync("scoring_weight_overrides",
+            filter: "status=eq.active", order: "signal_name.asc");
+        return rows.Select(r => new ScoringWeightOverride
+        {
+            Id = r["id"]?.ToString(),
+            SignalName = r["signal_name"]?.ToString() ?? "",
+            BaseWeight = GetDouble(r, "base_weight"),
+            AdjustmentPercent = GetDouble(r, "adjustment_percent"),
+            EffectiveWeight = GetDouble(r, "effective_weight"),
+            Confidence = GetDouble(r, "confidence"),
+            SampleSize = (int)GetDouble(r, "sample_size"),
+            Status = r["status"]?.ToString() ?? "active",
+            Reason = r["reason"]?.ToString(),
+            LastUpdated = GetDateTimeOffset(r, "last_updated"),
+        }).ToList();
+    }
+
+    public async Task<bool> UpsertWeightOverrideAsync(ScoringWeightOverride wt)
+    {
+        return await _db.UpsertAsync("scoring_weight_overrides", new
+        {
+            signal_name = wt.SignalName,
+            base_weight = wt.BaseWeight,
+            adjustment_percent = wt.AdjustmentPercent,
+            effective_weight = wt.EffectiveWeight,
+            confidence = wt.Confidence,
+            sample_size = wt.SampleSize,
+            status = wt.Status,
+            reason = wt.Reason,
+            last_updated = DateTimeOffset.UtcNow.ToString("o"),
+        }, "signal_name");
+    }
+
+    // -----------------------------------------------------------------------
+    // Enhanced Learning Reports
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> SaveEnhancedLearningReportAsync(object report)
+    {
+        await _db.InsertAsync("learning_reports", report, returnRows: false);
+        return true;
+    }
+
+    public async Task<EnhancedLearningReport?> GetLatestLearningReportAsync()
+    {
+        var rows = await _db.SelectAsync("learning_reports",
+            order: "created_at.desc", limit: 1);
+        if (rows.Count == 0) return null;
+        var r = rows[0];
+        return new EnhancedLearningReport
+        {
+            Id = r["id"]?.ToString(),
+            ReportDate = GetDateTimeOffset(r, "created_at"),
+            EvaluationWindowDays = (int)GetDouble(r, "evaluation_window_days"),
+            PredictionCount = (int)GetDouble(r, "prediction_count"),
+            OverallAccuracy = GetNullableDouble(r, "overall_accuracy"),
+            BullAccuracy = GetNullableDouble(r, "bull_accuracy"),
+            BearAccuracy = GetNullableDouble(r, "bear_accuracy"),
+            MarketRegime = r["market_regime"]?.ToString(),
+            TopSignals = DeserializeJsonColumn<List<SignalPerformanceSummary>>(r, "top_signals_json") ?? [],
+            WeakSignals = DeserializeJsonColumn<List<SignalPerformanceSummary>>(r, "weak_signals_json") ?? [],
+            WeightChanges = DeserializeJsonColumn<List<WeightChangeSummary>>(r, "weight_changes_json") ?? [],
+            ConfidenceCalibration = DeserializeJsonColumn<ConfidenceAnalysis>(r, "confidence_analysis_json"),
+            AiSummary = r["ai_summary"]?.ToString(),
+        };
+    }
+
+    private static T? DeserializeJsonColumn<T>(JsonObject row, string column) where T : class
+    {
+        var val = row[column]?.ToString();
+        if (string.IsNullOrWhiteSpace(val)) return null;
+        try { return System.Text.Json.JsonSerializer.Deserialize<T>(val, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true }); }
+        catch { return null; }
     }
 
     // -----------------------------------------------------------------------
@@ -423,15 +539,6 @@ public class ResearchRepository
     {
         var rows = await _db.SelectAsync("prediction_candidates",
             filter: NonDirectionalTypes,
-            order: "created_at.desc",
-            limit: limit);
-        return rows.Select(MapPrediction).ToList();
-    }
-
-    public async Task<List<PredictionCandidate>> GetRecentDirectionalPredictionsAsync(int limit = 10)
-    {
-        var rows = await _db.SelectAsync("prediction_candidates",
-            filter: DirectionalTypes,
             order: "created_at.desc",
             limit: limit);
         return rows.Select(MapPrediction).ToList();
@@ -534,6 +641,7 @@ public class ResearchRepository
         InvalidationRule = r["invalidation_rule"]?.ToString() ?? "",
         DataSourcesUsed = GetStringList(r, "data_sources_used"),
         MissingDataWarnings = GetStringList(r, "missing_data_warnings"),
+        DowngradeReasons = GetStringList(r, "downgrade_reasons"),
         Status = r["status"]?.ToString() ?? "open",
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };
@@ -564,6 +672,11 @@ public class ResearchRepository
         OutcomeScore = GetNullableDouble(r, "outcome_score"),
         OutcomeSummary = r["outcome_summary"]?.ToString(),
         Lesson = r["lesson"]?.ToString(),
+        AbstentionCorrect = GetNullableBool(r, "abstention_correct"),
+        MissedAlphaPercent = GetNullableDouble(r, "missed_alpha_percent"),
+        GuardrailJustified = GetNullableBool(r, "guardrail_justified"),
+        OriginalDirection = r["original_direction"]?.ToString(),
+        DowngradeReasonsEvaluated = GetStringList(r, "downgrade_reasons_evaluated"),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };
 

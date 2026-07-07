@@ -1,8 +1,6 @@
 import { AgentAction, AgentResponseCatalyst, ChatMessage, OptionsSignal, Pick } from '@/types/stockAgent';
-import SuggestedPrompts from './SuggestedPrompts';
 import ResponseCards from './ResponseCards';
 import MarkdownLite from './MarkdownLite';
-import FeedbackButtons from '../learning/FeedbackButtons';
 
 export interface DisplayMessage extends ChatMessage {
   action?: AgentAction;
@@ -27,7 +25,6 @@ export default function ChatMessageBubble({
 }: {
   message: DisplayMessage;
   onSelectPrompt: (prompt: string) => void;
-  /** Only the latest agent message should offer next-step suggestions -- older ones in history should not. */
   showSuggestedPrompts?: boolean;
 }) {
   const isUser = message.role === 'user';
@@ -74,8 +71,6 @@ export default function ChatMessageBubble({
           options={message.options}
           catalysts={message.catalysts}
         />
-
-        {/* Suggested prompts and feedback buttons removed for cleaner UI */}
       </div>
     </div>
   );
