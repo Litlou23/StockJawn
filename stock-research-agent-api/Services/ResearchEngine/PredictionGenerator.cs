@@ -31,6 +31,7 @@ public class PredictionGenerator
     private readonly ResearchRepository _repo;
     private readonly ResearchSignalService _signalService;
     private readonly EnsembleScoringService _ensemble;
+    private readonly TradeSetupEngine _setupEngine;
     private readonly StockFitProvider _stockFit;
     private readonly FinnhubProvider _finnhub;
     private readonly ILogger<PredictionGenerator> _logger;
@@ -42,6 +43,7 @@ public class PredictionGenerator
         ResearchRepository repo,
         ResearchSignalService signalService,
         EnsembleScoringService ensemble,
+        TradeSetupEngine setupEngine,
         StockFitProvider stockFit,
         FinnhubProvider finnhub,
         IConfiguration configuration,
@@ -51,6 +53,7 @@ public class PredictionGenerator
         _repo = repo;
         _signalService = signalService;
         _ensemble = ensemble;
+        _setupEngine = setupEngine;
         _stockFit = stockFit;
         _finnhub = finnhub;
         _logger = logger;
@@ -349,6 +352,25 @@ public class PredictionGenerator
         // Second-pass finalization: apply R/R-aware caps + actionability tier
         // now that we know the risk/reward ratio.
         scoring = ScoringEngine.FinalizeWithRiskReward(scoring, priceCalc.RiskRewardRatio);
+
+        // Setup history adjustment: if this fingerprint has historical performance
+        // data, boost or penalize confidence accordingly.
+        try
+        {
+            var setupEvidence = TradeSetupEngine.BuildSignalEvidenceFromBreakdown(scoring.Breakdown);
+            var setupFp = TradeSetupEngine.GenerateFingerprint(setupEvidence, scoring.WinningDirection);
+            if (!string.IsNullOrEmpty(setupFp.Fingerprint))
+            {
+                var setupPerf = await _setupEngine.LookupSetupPerformanceAsync(setupFp.Fingerprint);
+                var isFavorable = TradeSetupEngine.IsHistoricallyFavorable(setupPerf, null);
+                scoring = ScoringEngine.AdjustForSetupHistory(scoring, setupPerf, isFavorable);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[prediction] Setup history adjustment skipped for {Ticker}", ticker);
+        }
+
         confidence = scoring.Confidence;
 
         // Track downgrade reasons for watch_only calibration learning.

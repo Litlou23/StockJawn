@@ -39,15 +39,18 @@ public class LearningEngine
 
     private readonly ResearchRepository _repo;
     private readonly PatternDetectionService _patternDetection;
+    private readonly TradeSetupEngine _setupEngine;
     private readonly IOpenAiCompletionService _ai;
     private readonly ILogger<LearningEngine> _logger;
 
     public LearningEngine(
         ResearchRepository repo, PatternDetectionService patternDetection,
+        TradeSetupEngine setupEngine,
         IOpenAiCompletionService ai, ILogger<LearningEngine> logger)
     {
         _repo = repo;
         _patternDetection = patternDetection;
+        _setupEngine = setupEngine;
         _ai = ai;
         _logger = logger;
     }
@@ -80,8 +83,9 @@ public class LearningEngine
         // Stage 2: Compute signal performance stats
         var (perfUpdated, signalStats) = await ComputeSignalPerformanceAsync();
 
-        // Stage 3: Confidence calibration
+        // Stage 3: Confidence calibration — detect AND correct overconfidence
         var calibration = await ComputeConfidenceCalibrationAsync();
+        await ApplyCalibrationFactorAsync(calibration);
 
         // Stage 4: Optimize weights (signal-level first-order adjustments)
         var (weightsAdjusted, weightChanges) = await OptimizeWeightsAsync(signalStats);
@@ -92,14 +96,17 @@ public class LearningEngine
         weightsAdjusted += patternAdjusted;
         weightChanges.AddRange(patternChanges);
 
-        // Stage 5: Generate AI-summarized learning report
+        // Stage 5: Setup Analytics — learn complete trade setups
+        var setupStatsUpdated = await ComputeSetupPerformanceAsync();
+
+        // Stage 6: Generate AI-summarized learning report
         var aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges);
 
-        // Stage 6: Generate structured insights
+        // Stage 7: Generate structured insights (includes setup-level insights)
         var insights = await GenerateLearningInsightsAsync();
 
         var report = $"Learning cycle complete: {obsCreated} observations, {perfUpdated} signal stats, " +
-                     $"{weightsAdjusted} weight adjustments, {insights.Count} insights.";
+                     $"{weightsAdjusted} weight adjustments, {setupStatsUpdated} setup stats, {insights.Count} insights.";
 
         _logger.LogInformation("[learning-engine] {Report}", report);
 
@@ -332,6 +339,89 @@ public class LearningEngine
     }
 
     // -----------------------------------------------------------------------
+    // Stage 3b: Apply Calibration Factor
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Closes the calibration feedback loop. Computes a calibration_factor
+    /// from the weighted average calibration error across confidence bands,
+    /// then persists it as a weight override so ScoringEngine applies it
+    /// on the next scoring pass.
+    ///
+    /// Movement is gradual (max 1% per day) to avoid whiplash.
+    /// The factor is clamped to [0.85, 1.15] by both this method and
+    /// the ScoringEngine consumer.
+    /// </summary>
+    private async Task ApplyCalibrationFactorAsync(ConfidenceAnalysis calibration)
+    {
+        try
+        {
+            if (calibration.Buckets.Count < 2) return; // Not enough data
+
+            // Compute weighted-average calibration error across all bands.
+            // Negative error = overconfident (actual accuracy < expected).
+            var totalWeight = 0;
+            var weightedError = 0.0;
+            foreach (var bucket in calibration.Buckets)
+            {
+                totalWeight += bucket.Count;
+                weightedError += bucket.CalibrationError * bucket.Count;
+            }
+
+            if (totalWeight < 20) return; // Need meaningful sample
+
+            var avgError = weightedError / totalWeight;
+            // avgError < 0 means overconfident → we need factor < 1.0 to dampen
+            // avgError > 0 means underconfident → factor > 1.0 to boost
+
+            // Target calibration factor: 1.0 + (error scaled to factor range)
+            // Scale: a -0.20 avg error → target factor of ~0.90
+            var targetFactor = Math.Clamp(1.0 + (avgError * 0.5), 0.85, 1.15);
+
+            // Get current calibration_factor from overrides
+            var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+            var currentFactor = currentOverrides
+                .Where(o => o.SignalName == "calibration_factor")
+                .Select(o => o.EffectiveWeight)
+                .FirstOrDefault(1.0);
+
+            // Gradual movement: max 1% per day toward target
+            var delta = targetFactor - currentFactor;
+            var movement = Math.Clamp(delta, -MaxDailyMovement, MaxDailyMovement);
+            var newFactor = Math.Round(currentFactor + movement, 4);
+            newFactor = Math.Clamp(newFactor, 0.85, 1.15);
+
+            if (Math.Abs(movement) < 0.0005) return; // No meaningful change
+
+            var reason = $"Calibration error: {avgError * 100:F1}% across {totalWeight} predictions. " +
+                         $"Target factor: {targetFactor:F4}. " +
+                         (calibration.IsOverconfident
+                             ? "System is overconfident — dampening confidence scores."
+                             : "Calibration adjustment applied.");
+
+            await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+            {
+                SignalName = "calibration_factor",
+                BaseWeight = 1.0,
+                AdjustmentPercent = newFactor - 1.0,
+                EffectiveWeight = newFactor,
+                Confidence = Math.Min((double)totalWeight / 200.0, 1.0),
+                SampleSize = totalWeight,
+                Status = "active",
+                Reason = reason,
+            });
+
+            _logger.LogInformation(
+                "[learning-engine] Calibration factor: {Old:F4} → {New:F4} (error={Error:F1}%, overconfident={OC})",
+                currentFactor, newFactor, avgError * 100, calibration.IsOverconfident);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to apply calibration factor");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Stage 4: Weight Optimization (safe, gradual, Bayesian-smoothed)
     // -----------------------------------------------------------------------
 
@@ -393,6 +483,207 @@ public class LearningEngine
         }
 
         return (changes.Count, changes);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 5: Setup Analytics — learn complete trade setups
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Computes performance statistics for each unique setup fingerprint.
+    /// This is the heart of setup-level learning: which COMBINATIONS of
+    /// signals consistently produce positive outcomes?
+    /// </summary>
+    public async Task<int> ComputeSetupPerformanceAsync()
+    {
+        try
+        {
+            var predictions = await _repo.GetRecentPredictionsAsync(500);
+            var outcomes = await _repo.GetRecentOutcomesAsync(500);
+            var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+
+            // Group evaluated predictions by their setup fingerprint
+            var setupGroups = new Dictionary<string, List<(PredictionCandidate Pred, PredictionOutcome Outcome, ScoringBreakdown? Breakdown)>>();
+
+            foreach (var pred in predictions)
+            {
+                if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || outcome.DirectionCorrect is null)
+                    continue;
+
+                // Parse scoring breakdown to extract signals
+                ScoringBreakdown? breakdown = null;
+                if (!string.IsNullOrEmpty(pred.ScoreDebugJson))
+                {
+                    try
+                    {
+                        breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(pred.ScoreDebugJson,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    }
+                    catch { continue; }
+                }
+                if (breakdown is null) continue;
+
+                // Reconstruct the setup fingerprint from the scoring breakdown
+                var evidence = ReconstructEvidence(breakdown);
+                var fingerprint = TradeSetupEngine.GenerateFingerprint(
+                    evidence, breakdown.WinningDirection);
+
+                if (string.IsNullOrEmpty(fingerprint.Fingerprint)) continue;
+
+                if (!setupGroups.ContainsKey(fingerprint.Fingerprint))
+                    setupGroups[fingerprint.Fingerprint] = [];
+
+                setupGroups[fingerprint.Fingerprint].Add((pred, outcome, breakdown));
+            }
+
+            var statsUpdated = 0;
+            foreach (var (fingerprint, group) in setupGroups)
+            {
+                if (group.Count < 3) continue; // Need meaningful sample
+
+                var wins = group.Count(g => g.Outcome.DirectionCorrect == true);
+                var losses = group.Count - wins;
+                var winRate = (double)wins / group.Count;
+
+                var winReturns = group
+                    .Where(g => g.Outcome.DirectionCorrect == true && g.Outcome.PercentMove.HasValue)
+                    .Select(g => Math.Abs(g.Outcome.PercentMove!.Value))
+                    .ToList();
+                var lossReturns = group
+                    .Where(g => g.Outcome.DirectionCorrect == false && g.Outcome.PercentMove.HasValue)
+                    .Select(g => -Math.Abs(g.Outcome.PercentMove!.Value))
+                    .ToList();
+
+                var avgWin = winReturns.Count > 0 ? winReturns.Average() : 0;
+                var avgLoss = lossReturns.Count > 0 ? lossReturns.Average() : 0;
+                var ev = (winRate * avgWin) + ((1 - winRate) * avgLoss);
+
+                // Confidence based on sample size (asymptotic to 1.0)
+                var confidence = Math.Min((double)group.Count / 50.0, 1.0);
+
+                // Risk rating based on return variance
+                var allReturns = group
+                    .Where(g => g.Outcome.PercentMove.HasValue)
+                    .Select(g => g.Outcome.PercentMove!.Value)
+                    .ToList();
+                var variance = allReturns.Count > 1
+                    ? allReturns.Select(r => Math.Pow(r - allReturns.Average(), 2)).Average()
+                    : 0;
+                var riskRating = (int)Math.Clamp(Math.Sqrt(variance) * 20, 0, 100);
+
+                // Regime breakdown
+                var regimeBreakdown = new Dictionary<string, RegimePerformance>();
+                var byRegime = group
+                    .Where(g => g.Breakdown is not null)
+                    .GroupBy(g => TradeSetupEngine.DetectMarketRegime(g.Breakdown!) ?? "unknown");
+                foreach (var regimeGroup in byRegime)
+                {
+                    if (regimeGroup.Count() < 2) continue;
+                    var rWins = regimeGroup.Count(g => g.Outcome.DirectionCorrect == true);
+                    var rWinRate = (double)rWins / regimeGroup.Count();
+                    var rWinReturns = regimeGroup.Where(g => g.Outcome.DirectionCorrect == true && g.Outcome.PercentMove.HasValue)
+                        .Select(g => Math.Abs(g.Outcome.PercentMove!.Value)).ToList();
+                    var rLossReturns = regimeGroup.Where(g => g.Outcome.DirectionCorrect == false && g.Outcome.PercentMove.HasValue)
+                        .Select(g => -Math.Abs(g.Outcome.PercentMove!.Value)).ToList();
+                    var rAvgWin = rWinReturns.Count > 0 ? rWinReturns.Average() : 0;
+                    var rAvgLoss = rLossReturns.Count > 0 ? rLossReturns.Average() : 0;
+                    var rEv = (rWinRate * rAvgWin) + ((1 - rWinRate) * rAvgLoss);
+
+                    regimeBreakdown[regimeGroup.Key] = new RegimePerformance
+                    {
+                        SampleSize = regimeGroup.Count(),
+                        WinRate = Math.Round(rWinRate, 4),
+                        ExpectedValuePercent = Math.Round(rEv, 4),
+                    };
+                }
+
+                // Get the first group item's fingerprint description for the stat
+                var firstBreakdown = group.First().Breakdown!;
+                var sampleEvidence = ReconstructEvidence(firstBreakdown);
+                var sampleFp = TradeSetupEngine.GenerateFingerprint(sampleEvidence, firstBreakdown.WinningDirection);
+
+                // Determine trust: is the setup degrading recently?
+                var isTrusted = true;
+                var recentCutoff = DateTimeOffset.UtcNow.AddDays(-30);
+                var recentGroup = group.Where(g => g.Pred.CreatedAt >= recentCutoff).ToList();
+                if (recentGroup.Count >= 3)
+                {
+                    var recentWinRate = (double)recentGroup.Count(g => g.Outcome.DirectionCorrect == true) / recentGroup.Count;
+                    if (winRate - recentWinRate > 0.15) isTrusted = false; // degrading
+                }
+
+                var avgConfirmation = group
+                    .Select(g => ReconstructEvidence(g.Breakdown!).Count(e => e.Value.IsActive))
+                    .Average();
+
+                await _repo.UpsertSetupLearningStatAsync(new
+                {
+                    setup_fingerprint = fingerprint,
+                    description = sampleFp.Description,
+                    direction = sampleFp.Direction,
+                    total_occurrences = group.Count,
+                    wins,
+                    losses,
+                    win_rate = Math.Round(winRate, 4),
+                    average_win_percent = Math.Round(avgWin, 4),
+                    average_loss_percent = Math.Round(avgLoss, 4),
+                    expected_value_percent = Math.Round(ev, 4),
+                    average_holding_days = 1.0, // TODO: track actual holding days once multi-day tracking is live
+                    average_confirmation_count = (int)Math.Round(avgConfirmation),
+                    confidence = Math.Round(confidence, 4),
+                    risk_rating = riskRating,
+                    is_trusted = isTrusted,
+                    market_regime_breakdown_json = JsonSerializer.Serialize(regimeBreakdown),
+                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+
+                statsUpdated++;
+            }
+
+            _logger.LogInformation("[learning-engine] Setup analytics: updated {Count} setup performance stats from {Groups} unique fingerprints",
+                statsUpdated, setupGroups.Count);
+
+            return statsUpdated;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Setup performance computation failed");
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Reconstruct BucketEvidence from a ScoringBreakdown (for historical predictions
+    /// that were scored before the setup engine existed).
+    /// </summary>
+    private static Dictionary<string, BucketEvidence> ReconstructEvidence(ScoringBreakdown b)
+    {
+        var evidence = new Dictionary<string, BucketEvidence>();
+        const double threshold = 3.0;
+
+        void Add(string name, double bull, double bear)
+        {
+            var net = bull - bear;
+            evidence[name] = new BucketEvidence
+            {
+                BucketName = name,
+                BullishScore = bull,
+                BearishScore = bear,
+                NetScore = net,
+                DominantDirection = Math.Abs(net) < threshold ? "neutral" : net > 0 ? "bullish" : "bearish",
+                IsActive = Math.Abs(net) >= threshold,
+            };
+        }
+
+        Add("trend", b.TrendBullish, b.TrendBearish);
+        Add("momentum", b.MomentumBullish, b.MomentumBearish);
+        Add("volume", b.VolumeBullish, b.VolumeBearish);
+        Add("volatility", b.VolatilityBullish, b.VolatilityBearish);
+        Add("market_context", b.MarketContextBullish, b.MarketContextBearish);
+        Add("catalyst", b.CatalystBullish, b.CatalystBearish);
+        Add("research_signal", b.ResearchSignalBullish, b.ResearchSignalBearish);
+
+        return evidence;
     }
 
     // -----------------------------------------------------------------------
@@ -801,6 +1092,51 @@ INSTRUCTIONS:
                     action_recommendation = $"{ticker} is a reliable prediction target.",
                     confidence = Math.Min((double)total / 10, 1),
                 });
+        }
+
+        // 5. Setup-level insights — which combinations of signals work?
+        try
+        {
+            var setupStats = await _repo.GetAllSetupLearningStatsAsync();
+            var topSetups = setupStats
+                .Where(s => s.TotalOccurrences >= 8 && s.ExpectedValuePercent > 0.5)
+                .OrderByDescending(s => s.ExpectedValuePercent)
+                .Take(5)
+                .ToList();
+
+            foreach (var s in topSetups)
+            {
+                insights.Add(new
+                {
+                    insight_type = "setup",
+                    summary = $"Setup [{s.Description}] has {s.WinRate * 100:F0}% win rate with {(s.ExpectedValuePercent >= 0 ? "+" : "")}{s.ExpectedValuePercent:F2}% EV over {s.TotalOccurrences} occurrences.",
+                    evidence = $"Avg win: +{s.AverageWinPercent:F2}%, avg loss: {s.AverageLossPercent:F2}%. Confidence: {s.Confidence:F2}. Risk rating: {s.RiskRating}/100.",
+                    action_recommendation = s.IsTrusted
+                        ? "This setup is trusted and historically favorable. Boost confidence when detected."
+                        : "This setup shows historical promise but recent degradation. Monitor closely.",
+                    confidence = s.Confidence,
+                });
+            }
+
+            var degradedSetups = setupStats
+                .Where(s => s.TotalOccurrences >= 8 && !s.IsTrusted)
+                .ToList();
+
+            if (degradedSetups.Count > 0)
+            {
+                insights.Add(new
+                {
+                    insight_type = "setup_degradation",
+                    summary = $"{degradedSetups.Count} setup(s) showing recent degradation: {string.Join(", ", degradedSetups.Select(s => $"[{s.Description}]"))}.",
+                    evidence = $"Recent win rates have dropped >15% below all-time averages.",
+                    action_recommendation = "These setups should no longer boost confidence until performance recovers.",
+                    confidence = 0.8,
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate setup insights");
         }
 
         if (insights.Count > 0)

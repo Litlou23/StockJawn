@@ -43,7 +43,7 @@ export default function PipelineHealthPage() {
     return () => clearInterval(interval);
   }, [fetchHealth]);
 
-  const cfg = health ? STATUS_CONFIG[health.status] : null;
+  const cfg = health && health.status in STATUS_CONFIG ? STATUS_CONFIG[health.status] : null;
 
   return (
     <div className="mx-auto max-w-4xl space-y-6 p-6">
@@ -72,26 +72,26 @@ export default function PipelineHealthPage() {
       )}
 
       {/* Status Banner */}
-      {health && cfg && (
+      {health && cfg ? (
         <div className={`flex items-center gap-4 rounded-xl border ${cfg.border} ${cfg.bg} p-5`}>
           <span className={`text-4xl ${cfg.color}`}>{cfg.icon}</span>
           <div>
             <div className={`text-xl font-bold ${cfg.color}`}>{cfg.label}</div>
             <div className="text-sm text-zinc-400">
               Checked at {new Date(health.checkedAt).toLocaleTimeString()}
-              {lastRefresh && <span> · Refreshed {lastRefresh.toLocaleTimeString()}</span>}
+              {lastRefresh ? <span> · Refreshed {lastRefresh.toLocaleTimeString()}</span> : null}
             </div>
           </div>
-          {health.warnings.length > 0 && (
+          {health.warnings.length > 0 ? (
             <div className="ml-auto rounded-lg bg-zinc-800 px-3 py-1 text-sm font-medium text-zinc-300">
               {health.warnings.length} warning{health.warnings.length !== 1 ? 's' : ''}
             </div>
-          )}
+          ) : null}
         </div>
-      )}
+      ) : null}
 
       {/* Warnings */}
-      {health && health.warnings.length > 0 && (
+      {health && health.warnings.length > 0 ? (
         <div className="space-y-2">
           <h2 className="text-lg font-semibold text-zinc-200">Warnings</h2>
           {health.warnings.map((w, i) => {
@@ -116,10 +116,10 @@ export default function PipelineHealthPage() {
             );
           })}
         </div>
-      )}
+      ) : null}
 
       {/* Pipeline Checks Grid */}
-      {health && (
+      {health ? (
         <div className="space-y-2">
           <h2 className="text-lg font-semibold text-zinc-200">Pipeline Checks</h2>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -164,10 +164,10 @@ export default function PipelineHealthPage() {
             />
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* Latest Run Info */}
-      {health?.checks.latestRunAt && (
+      {health?.checks.latestRunAt ? (
         <div className="space-y-2">
           <h2 className="text-lg font-semibold text-zinc-200">Latest Run</h2>
           <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-300">
@@ -181,14 +181,14 @@ export default function PipelineHealthPage() {
             </div>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* No data */}
-      {!loading && !health && !error && (
+      {!loading && !health && !error ? (
         <div className="text-center text-zinc-500 py-12">
           No pipeline health data available. Make sure the .NET API is running.
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

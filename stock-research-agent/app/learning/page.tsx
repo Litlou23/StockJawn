@@ -131,12 +131,16 @@ interface IntakeAnalysis {
 async function fetchFromApi<T>(path: string): Promise<T | null> {
   const base = process.env.AGENT_API_BASE_URL;
   if (!base) return null;
+  const isLocal = base.startsWith('https://localhost');
+  if (isLocal) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try {
     const res = await fetch(`${base}${path}`, { next: { revalidate: 60 } });
     if (!res.ok) return null;
     return (await res.json()) as T;
   } catch {
     return null;
+  } finally {
+    if (isLocal) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   }
 }
 

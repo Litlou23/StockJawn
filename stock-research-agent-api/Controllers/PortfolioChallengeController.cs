@@ -136,6 +136,31 @@ public class PortfolioChallengeController : ControllerBase
     }
 
     // -----------------------------------------------------------------------
+    // Decision log — full audit trail
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns the full decision audit trail for every trade: entry reasoning,
+    /// exit reasoning, candidate scores, and prediction outcomes.
+    /// Backed by the portfolio_decision_log view.
+    /// </summary>
+    [HttpGet("decision-log")]
+    public async Task<IActionResult> GetDecisionLog(
+        [FromQuery] string? challengeId = null,
+        [FromQuery] int limit = 50)
+    {
+        var challenge = challengeId is not null
+            ? await _repo.GetChallengeAsync(challengeId)
+            : await _repo.GetActiveChallengeAsync();
+
+        if (challenge is null)
+            return NotFound(new { error = "No active portfolio challenge found" });
+
+        var rows = await _repo.GetDecisionLogAsync(challenge.Id, limit);
+        return Ok(rows);
+    }
+
+    // -----------------------------------------------------------------------
     // Position management
     // -----------------------------------------------------------------------
 

@@ -571,6 +571,91 @@ public class ResearchRepository
     }
 
     // -----------------------------------------------------------------------
+    // Trade Setups — setup detection engine persistence
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> SaveTradeSetupAsync(object setup)
+    {
+        if (!_db.IsConfigured) return false;
+        try
+        {
+            await _db.InsertAsync("trade_setups", new[] { setup }, returnRows: false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[repo] Failed to save trade setup");
+            return false;
+        }
+    }
+
+    public async Task<List<JsonObject>> GetActiveTradeSetupsAsync()
+    {
+        if (!_db.IsConfigured) return [];
+        return await _db.SelectAsync("trade_setups", filter: "status=eq.active", order: "created_at.desc", limit: 200);
+    }
+
+    public async Task<bool> UpdateTradeSetupStatusAsync(string id, string status, object? outcomeData = null)
+    {
+        if (!_db.IsConfigured) return false;
+        var data = new Dictionary<string, object?> { ["status"] = status };
+        if (outcomeData is not null) data["outcome_json"] = System.Text.Json.JsonSerializer.Serialize(outcomeData);
+        return await _db.UpdateAsync("trade_setups", $"id=eq.{id}", data);
+    }
+
+    public async Task<SetupLearningStat?> GetSetupLearningStatAsync(string fingerprint)
+    {
+        if (!_db.IsConfigured) return null;
+        var row = await _db.SelectSingleAsync("setup_learning_stats",
+            $"setup_fingerprint=eq.{Uri.EscapeDataString(fingerprint)}");
+        return row is not null ? MapSetupLearningStat(row) : null;
+    }
+
+    public async Task<List<SetupLearningStat>> GetAllSetupLearningStatsAsync()
+    {
+        if (!_db.IsConfigured) return [];
+        var rows = await _db.SelectAsync("setup_learning_stats", order: "expected_value_percent.desc", limit: 200);
+        return rows.Select(MapSetupLearningStat).ToList();
+    }
+
+    public async Task<bool> UpsertSetupLearningStatAsync(object stat)
+    {
+        if (!_db.IsConfigured) return false;
+        try
+        {
+            await _db.UpsertAsync("setup_learning_stats", stat, "setup_fingerprint");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[repo] Failed to upsert setup learning stat");
+            return false;
+        }
+    }
+
+    private static SetupLearningStat MapSetupLearningStat(JsonObject r) => new()
+    {
+        Id = r["id"]?.ToString() ?? "",
+        SetupFingerprint = r["setup_fingerprint"]?.ToString() ?? "",
+        Description = r["description"]?.ToString() ?? "",
+        Direction = r["direction"]?.ToString() ?? "",
+        TotalOccurrences = GetInt(r, "total_occurrences"),
+        Wins = GetInt(r, "wins"),
+        Losses = GetInt(r, "losses"),
+        WinRate = GetDouble(r, "win_rate"),
+        AverageWinPercent = GetDouble(r, "average_win_percent"),
+        AverageLossPercent = GetDouble(r, "average_loss_percent"),
+        ExpectedValuePercent = GetDouble(r, "expected_value_percent"),
+        AverageHoldingDays = GetDouble(r, "average_holding_days"),
+        AverageConfirmationCount = GetInt(r, "average_confirmation_count"),
+        Confidence = GetDouble(r, "confidence"),
+        RiskRating = GetInt(r, "risk_rating"),
+        IsTrusted = r["is_trusted"]?.GetValue<bool>() ?? true,
+        MarketRegimeBreakdownJson = r["market_regime_breakdown_json"]?.ToString(),
+        LastUpdatedAt = GetDateTimeOffset(r, "last_updated_at"),
+    };
+
+    // -----------------------------------------------------------------------
     // Generic insert (for options lab and future tables)
     // -----------------------------------------------------------------------
 

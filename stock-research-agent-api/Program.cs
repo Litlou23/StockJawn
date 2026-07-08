@@ -81,6 +81,7 @@ try
     builder.Services.AddSingleton<MarketDataService>();
     builder.Services.AddSingleton<PredictionGenerator>();
     builder.Services.AddSingleton<OutcomeEvaluator>();
+    builder.Services.AddSingleton<TradeSetupEngine>();
     builder.Services.AddSingleton<LearningEngine>();
     builder.Services.AddSingleton<DailyReportService>();
     builder.Services.AddSingleton<PatternDetectionService>();

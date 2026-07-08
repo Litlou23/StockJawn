@@ -247,6 +247,18 @@ public class PortfolioChallengeRepository
     }
 
     // -----------------------------------------------------------------------
+    // Decision log (view: portfolio_decision_log)
+    // -----------------------------------------------------------------------
+
+    public async Task<List<JsonObject>> GetDecisionLogAsync(string portfolioId, int limit = 50)
+    {
+        return await _db.SelectAsync("portfolio_decision_log",
+            filter: $"portfolio_id=eq.{portfolioId}",
+            order: "created_at.desc",
+            limit: limit);
+    }
+
+    // -----------------------------------------------------------------------
     // Mappers
     // -----------------------------------------------------------------------
 

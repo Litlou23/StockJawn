@@ -19,6 +19,8 @@ public class ChatToolsController : ControllerBase
     private readonly OptionsDataRepository _optionsRepo;
     private readonly CandidateGenerationAuditRepository _auditRepo;
     private readonly DynamicPickOrchestrator _orchestrator;
+    private readonly LearningEngine _learning;
+    private readonly TradeSetupEngine _setupEngine;
     private readonly ILogger<ChatToolsController> _logger;
 
     public ChatToolsController(
@@ -27,6 +29,8 @@ public class ChatToolsController : ControllerBase
         OptionsDataRepository optionsRepo,
         CandidateGenerationAuditRepository auditRepo,
         DynamicPickOrchestrator orchestrator,
+        LearningEngine learning,
+        TradeSetupEngine setupEngine,
         ILogger<ChatToolsController> logger)
     {
         _researchRepo = researchRepo;
@@ -34,6 +38,8 @@ public class ChatToolsController : ControllerBase
         _optionsRepo = optionsRepo;
         _auditRepo = auditRepo;
         _orchestrator = orchestrator;
+        _learning = learning;
+        _setupEngine = setupEngine;
         _logger = logger;
     }
 
@@ -482,6 +488,487 @@ public class ChatToolsController : ControllerBase
                 },
             },
             warnings,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. get_setup_performance — top/degraded trade setups
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_setup_performance")]
+    public async Task<IActionResult> GetSetupPerformance(
+        [FromQuery] string? filter = null,
+        [FromQuery] int limit = 10)
+    {
+        var stats = await _researchRepo.GetAllSetupLearningStatsAsync();
+        var warnings = new List<string>();
+
+        if (stats.Count == 0)
+        {
+            return Ok(new
+            {
+                tool_name = "get_setup_performance",
+                as_of = Now(),
+                summary = "No setup performance data yet. The system needs more evaluated predictions to build setup statistics.",
+                data = new { count = 0 },
+                warnings,
+            });
+        }
+
+        var filtered = filter switch
+        {
+            "top" => stats.Where(s => s.TotalOccurrences >= 8 && s.ExpectedValuePercent > 0).OrderByDescending(s => s.ExpectedValuePercent).ToList(),
+            "degraded" => stats.Where(s => !s.IsTrusted && s.TotalOccurrences >= 5).ToList(),
+            "negative" => stats.Where(s => s.ExpectedValuePercent < 0 && s.TotalOccurrences >= 5).OrderBy(s => s.ExpectedValuePercent).ToList(),
+            _ => stats.OrderByDescending(s => s.ExpectedValuePercent).ToList(),
+        };
+
+        var summaryText = $"{stats.Count} setup fingerprints tracked. " +
+                          $"{stats.Count(s => s.ExpectedValuePercent > 0 && s.TotalOccurrences >= 8)} with positive EV, " +
+                          $"{stats.Count(s => !s.IsTrusted)} degraded.";
+
+        var items = filtered.Take(limit).Select(s => new
+        {
+            fingerprint = s.SetupFingerprint,
+            description = s.Description,
+            direction = s.Direction,
+            occurrences = s.TotalOccurrences,
+            win_rate = $"{s.WinRate * 100:F1}%",
+            avg_win = $"+{s.AverageWinPercent:F2}%",
+            avg_loss = $"{s.AverageLossPercent:F2}%",
+            expected_value = $"{(s.ExpectedValuePercent >= 0 ? "+" : "")}{s.ExpectedValuePercent:F2}%",
+            confidence = s.Confidence,
+            risk_rating = s.RiskRating,
+            is_trusted = s.IsTrusted,
+        });
+
+        return Ok(new
+        {
+            tool_name = "get_setup_performance",
+            as_of = Now(),
+            summary = summaryText,
+            data = new { total_setups = stats.Count, filter = filter ?? "all", items },
+            warnings,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. get_learning_stats — signal performance + calibration + weights
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_learning_stats")]
+    public async Task<IActionResult> GetLearningStats()
+    {
+        var warnings = new List<string>();
+        var signalPerf = await _researchRepo.GetAllSignalPerformanceAsync();
+        var calibration = await _learning.ComputeConfidenceCalibrationAsync();
+        var weightOverrides = await _researchRepo.GetActiveWeightOverridesAsync();
+
+        var calFactor = weightOverrides
+            .FirstOrDefault(o => o.SignalName == "calibration_factor");
+
+        var summaryParts = new List<string>
+        {
+            $"{signalPerf.Count} signal performance records",
+            $"Calibration: {calibration.Summary}",
+        };
+        if (calFactor is not null)
+            summaryParts.Add($"Active calibration factor: {calFactor.EffectiveWeight:F4}");
+
+        var topSignals = signalPerf
+            .Where(s => s.Direction == "all" && s.TotalPredictions >= 10)
+            .OrderByDescending(s => s.Accuracy)
+            .Take(5)
+            .Select(s => new { signal = s.SignalName, accuracy = $"{s.Accuracy * 100:F1}%", n = s.TotalPredictions });
+
+        var worstSignals = signalPerf
+            .Where(s => s.Direction == "all" && s.TotalPredictions >= 10)
+            .OrderBy(s => s.Accuracy)
+            .Take(5)
+            .Select(s => new { signal = s.SignalName, accuracy = $"{s.Accuracy * 100:F1}%", n = s.TotalPredictions });
+
+        var activeOverrides = weightOverrides
+            .Where(o => o.SignalName != "calibration_factor")
+            .Select(o => new { signal = o.SignalName, effective_weight = o.EffectiveWeight, adjustment = $"{o.AdjustmentPercent * 100:F1}%", reason = Truncate(o.Reason, 80) });
+
+        return Ok(new
+        {
+            tool_name = "get_learning_stats",
+            as_of = Now(),
+            summary = string.Join(". ", summaryParts) + ".",
+            data = new
+            {
+                calibration = new
+                {
+                    is_overconfident = calibration.IsOverconfident,
+                    calibration_factor = calFactor?.EffectiveWeight,
+                    buckets = calibration.Buckets.Select(b => new
+                    {
+                        range = b.Range,
+                        count = b.Count,
+                        actual_accuracy = $"{b.ActualAccuracy * 100:F1}%",
+                        expected_accuracy = $"{b.ExpectedAccuracy * 100:F1}%",
+                        error = $"{b.CalibrationError * 100:F1}%",
+                    }),
+                },
+                top_signals = topSignals,
+                worst_signals = worstSignals,
+                weight_overrides = activeOverrides,
+            },
+            warnings,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. run_learning_update — trigger a full learning cycle
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run_learning_update")]
+    public async Task<IActionResult> RunLearningUpdate()
+    {
+        _logger.LogInformation("[chat-tools] Learning update triggered via chat");
+        var result = await _orchestrator.RunDynamicLearningUpdateAsync();
+
+        return Ok(new
+        {
+            tool_name = "run_learning_update",
+            as_of = Now(),
+            summary = result.Report,
+            data = new
+            {
+                stock_stats = result.StockStatsUpdated,
+                option_stats = result.OptionStatsUpdated,
+                weights_adjusted = result.WeightsAdjusted,
+                insights = result.InsightsGenerated,
+            },
+            warnings = result.Errors,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. run_morning_scan — trigger morning picks
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run_morning_scan")]
+    public async Task<IActionResult> RunMorningScan()
+    {
+        _logger.LogInformation("[chat-tools] Morning scan triggered via chat");
+        var result = await _orchestrator.RunDynamicMorningPicksAsync();
+
+        return Ok(new
+        {
+            tool_name = "run_morning_scan",
+            as_of = Now(),
+            summary = result.Report,
+            data = new
+            {
+                run_id = result.RunId,
+                predictions = result.PredictionsGenerated,
+                stock_candidates = result.StockCandidatesCreated,
+                option_candidates = result.OptionCandidatesCreated,
+            },
+            warnings = result.Errors,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. run_eod_review — trigger end-of-day evaluation
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run_eod_review")]
+    public async Task<IActionResult> RunEodReview()
+    {
+        _logger.LogInformation("[chat-tools] EOD review triggered via chat");
+        var result = await _orchestrator.RunDynamicEodReviewAsync();
+
+        return Ok(new
+        {
+            tool_name = "run_eod_review",
+            as_of = Now(),
+            summary = result.Report,
+            data = new
+            {
+                stock_outcomes = result.StockOutcomesEvaluated,
+                option_outcomes = result.OptionOutcomesEvaluated,
+            },
+            warnings = result.Errors,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. explain_scoring — break down why a ticker got its score
+    // -----------------------------------------------------------------------
+
+    [HttpGet("explain_scoring")]
+    public async Task<IActionResult> ExplainScoring([FromQuery] string ticker)
+    {
+        if (string.IsNullOrWhiteSpace(ticker))
+            return BadRequest(new { error = "ticker is required" });
+
+        ticker = ticker.Trim().ToUpperInvariant();
+        var warnings = new List<string>();
+
+        var predictions = await _researchRepo.GetRecentPredictionsAsync(50);
+        var pred = predictions.FirstOrDefault(p => p.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase));
+
+        if (pred is null)
+        {
+            return Ok(new
+            {
+                tool_name = "explain_scoring",
+                as_of = Now(),
+                summary = $"No recent prediction found for {ticker}.",
+                data = new { ticker, found = false },
+                warnings,
+            });
+        }
+
+        // Parse the score debug JSON for full breakdown
+        ScoringBreakdown? breakdown = null;
+        if (!string.IsNullOrEmpty(pred.ScoreDebugJson))
+        {
+            try
+            {
+                breakdown = System.Text.Json.JsonSerializer.Deserialize<ScoringBreakdown>(
+                    pred.ScoreDebugJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch { warnings.Add("Could not parse scoring breakdown"); }
+        }
+
+        // Get setup fingerprint if available
+        string? fingerprint = null;
+        SetupPerformance? setupPerf = null;
+        if (breakdown is not null)
+        {
+            var evidence = TradeSetupEngine.BuildSignalEvidenceFromBreakdown(breakdown);
+            var fp = TradeSetupEngine.GenerateFingerprint(evidence, pred.WinningDirection ?? "neutral");
+            fingerprint = fp.Fingerprint;
+            if (!string.IsNullOrEmpty(fingerprint))
+                setupPerf = await _setupEngine.LookupSetupPerformanceAsync(fingerprint);
+        }
+
+        var summaryParts = new List<string>
+        {
+            $"{ticker}: {pred.PredictionType} (conf={pred.ConfidenceScore}, risk={pred.RiskScore})",
+        };
+        if (fingerprint is not null)
+            summaryParts.Add($"Setup: {fingerprint}");
+        if (setupPerf is not null)
+            summaryParts.Add($"Historical: {setupPerf.WinRate * 100:F0}% WR, {setupPerf.ExpectedValuePercent:F2}% EV over {setupPerf.SampleSize} occurrences");
+
+        return Ok(new
+        {
+            tool_name = "explain_scoring",
+            as_of = Now(),
+            summary = string.Join(". ", summaryParts) + ".",
+            data = new
+            {
+                ticker,
+                found = true,
+                prediction_type = pred.PredictionType.ToString(),
+                confidence = pred.ConfidenceScore,
+                risk = pred.RiskScore,
+                bullish_score = pred.BullishScore,
+                bearish_score = pred.BearishScore,
+                winning_direction = pred.WinningDirection,
+                rr_ratio = pred.RiskRewardRatio,
+                actionability_tier = pred.ActionabilityTier.ToString(),
+                downgrade_reasons = pred.DowngradeReasons,
+                breakdown = breakdown is null ? null : new
+                {
+                    trend = new { bull = breakdown.TrendBullish, bear = breakdown.TrendBearish, net = breakdown.TrendScore },
+                    momentum = new { bull = breakdown.MomentumBullish, bear = breakdown.MomentumBearish, net = breakdown.MomentumScore },
+                    volume = new { bull = breakdown.VolumeBullish, bear = breakdown.VolumeBearish, net = breakdown.VolumeScore },
+                    volatility = new { bull = breakdown.VolatilityBullish, bear = breakdown.VolatilityBearish, net = breakdown.VolatilitySetupScore },
+                    market_context = new { bull = breakdown.MarketContextBullish, bear = breakdown.MarketContextBearish, net = breakdown.MarketContextScore },
+                    catalyst = new { bull = breakdown.CatalystBullish, bear = breakdown.CatalystBearish, net = breakdown.CatalystScore },
+                    research_signal = new { bull = breakdown.ResearchSignalBullish, bear = breakdown.ResearchSignalBearish, net = breakdown.ResearchSignalScore },
+                    confirmation_multiplier = breakdown.ConfirmationMultiplier,
+                    data_quality = breakdown.DataQualityFactor,
+                    calibration = breakdown.CalibrationFactor,
+                    confidence_cap = breakdown.ConfidenceCap,
+                },
+                setup = fingerprint is null ? null : new
+                {
+                    fingerprint,
+                    historical_win_rate = setupPerf?.WinRate,
+                    historical_ev = setupPerf?.ExpectedValuePercent,
+                    historical_sample = setupPerf?.SampleSize,
+                    is_favorable = setupPerf is not null && TradeSetupEngine.IsHistoricallyFavorable(setupPerf, null),
+                    is_trusted = setupPerf?.IsTrusted,
+                },
+            },
+            warnings,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. get_ticker_accuracy — per-ticker historical win/loss record
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_ticker_accuracy")]
+    public async Task<IActionResult> GetTickerAccuracy(
+        [FromQuery] string? ticker = null,
+        [FromQuery] int limit = 10)
+    {
+        var warnings = new List<string>();
+        var allStats = await _stockRepo.GetAllLearningStatsAsync();
+        var tickerStats = allStats
+            .Where(s => s.StatType == "ticker")
+            .OrderByDescending(s => s.TotalCandidates)
+            .ToList();
+
+        if (!string.IsNullOrWhiteSpace(ticker))
+        {
+            var match = tickerStats.FirstOrDefault(s =>
+                s.StatKey.Equals(ticker.Trim(), StringComparison.OrdinalIgnoreCase));
+
+            if (match is null)
+            {
+                return Ok(new
+                {
+                    tool_name = "get_ticker_accuracy",
+                    as_of = Now(),
+                    summary = $"No historical accuracy data for {ticker.Trim().ToUpperInvariant()}.",
+                    data = new { ticker = ticker.Trim().ToUpperInvariant(), found = false },
+                    warnings,
+                });
+            }
+
+            var correct = (int)Math.Round(match.Accuracy * match.TotalCandidates);
+            var wrong = match.TotalCandidates - correct;
+
+            return Ok(new
+            {
+                tool_name = "get_ticker_accuracy",
+                as_of = Now(),
+                summary = $"{match.StatKey}: {correct}/{match.TotalCandidates} correct ({match.Accuracy * 100:F1}% accuracy). Avg outcome score: {match.AverageOutcomeScore:F1}.",
+                data = new
+                {
+                    ticker = match.StatKey,
+                    found = true,
+                    total_predictions = match.TotalCandidates,
+                    correct,
+                    wrong,
+                    accuracy = $"{match.Accuracy * 100:F1}%",
+                    avg_outcome_score = match.AverageOutcomeScore,
+                },
+                warnings = match.Accuracy < 0.4 && match.TotalCandidates >= 5
+                    ? new List<string> { $"WARNING: {match.StatKey} accuracy is critically low ({match.Accuracy * 100:F0}%). The system should reduce confidence on this ticker." }
+                    : warnings,
+            });
+        }
+
+        // No ticker specified — return all ticker stats
+        var items = tickerStats.Take(limit).Select(s =>
+        {
+            var correct = (int)Math.Round(s.Accuracy * s.TotalCandidates);
+            return new
+            {
+                ticker = s.StatKey,
+                total = s.TotalCandidates,
+                correct,
+                wrong = s.TotalCandidates - correct,
+                accuracy = $"{s.Accuracy * 100:F1}%",
+                avg_score = s.AverageOutcomeScore,
+            };
+        });
+
+        var worst = tickerStats.Where(s => s.TotalCandidates >= 3).OrderBy(s => s.Accuracy).Take(3)
+            .Select(s => $"{s.StatKey} ({s.Accuracy * 100:F0}%)");
+        var best = tickerStats.Where(s => s.TotalCandidates >= 3).OrderByDescending(s => s.Accuracy).Take(3)
+            .Select(s => $"{s.StatKey} ({s.Accuracy * 100:F0}%)");
+
+        return Ok(new
+        {
+            tool_name = "get_ticker_accuracy",
+            as_of = Now(),
+            summary = $"{tickerStats.Count} tickers tracked. Best: {string.Join(", ", best)}. Worst: {string.Join(", ", worst)}.",
+            data = new { count = tickerStats.Count, items },
+            warnings,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. get_config — view current system configuration
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_config")]
+    public async Task<IActionResult> GetConfig()
+    {
+        var weights = await _researchRepo.GetActiveWeightOverridesAsync();
+        var calFactor = weights.FirstOrDefault(o => o.SignalName == "calibration_factor");
+
+        return Ok(new
+        {
+            tool_name = "get_config",
+            as_of = Now(),
+            summary = "Current system configuration and thresholds.",
+            data = new
+            {
+                calibration_factor = calFactor?.EffectiveWeight ?? 1.0,
+                weight_overrides = weights.Where(o => o.SignalName != "calibration_factor")
+                    .Select(o => new { signal = o.SignalName, weight = o.EffectiveWeight, adjustment = $"{o.AdjustmentPercent * 100:F1}%" }),
+                thresholds = new
+                {
+                    min_observations_for_weight_adjustment = 50,
+                    max_daily_weight_movement = "1%",
+                    max_weight_adjustment = "±20%",
+                    calibration_factor_range = "0.85 - 1.15",
+                    setup_min_sample_for_trust = 8,
+                    setup_min_sample_for_favorable = 12,
+                    setup_min_ev_for_favorable = "0.5%",
+                    setup_degradation_threshold = "15% drop",
+                },
+            },
+            warnings = new List<string>(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. update_config — change system configuration
+    // -----------------------------------------------------------------------
+
+    [HttpPost("update_config")]
+    public async Task<IActionResult> UpdateConfig(
+        [FromQuery] string setting,
+        [FromQuery] double value)
+    {
+        var warnings = new List<string>();
+
+        if (setting == "calibration_factor")
+        {
+            value = Math.Clamp(value, 0.85, 1.15);
+            await _researchRepo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+            {
+                SignalName = "calibration_factor",
+                BaseWeight = 1.0,
+                AdjustmentPercent = value - 1.0,
+                EffectiveWeight = value,
+                Confidence = 1.0,
+                SampleSize = 0,
+                Status = "active",
+                Reason = "Manually set via chat",
+            });
+
+            return Ok(new
+            {
+                tool_name = "update_config",
+                as_of = Now(),
+                summary = $"Calibration factor set to {value:F4}. This will affect all future confidence scores.",
+                data = new { setting, value, applied = true },
+                warnings,
+            });
+        }
+
+        return Ok(new
+        {
+            tool_name = "update_config",
+            as_of = Now(),
+            summary = $"Unknown setting: {setting}. Available: calibration_factor.",
+            data = new { setting, applied = false },
+            warnings = new List<string> { "Setting not recognized" },
         });
     }
 

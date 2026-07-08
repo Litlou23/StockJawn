@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.OptionsData;
@@ -42,6 +43,7 @@ public class DynamicPickOrchestrator
     private readonly MarketDataOptionsProvider _optionsProvider;
     private readonly MarketDataService _marketData;
     private readonly LearningEngine _learning;
+    private readonly TradeSetupEngine _setupEngine;
     private readonly PortfolioBalanceEngine _portfolio;
     private readonly PortfolioChallengeRepository _portfolioRepo;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
@@ -56,6 +58,7 @@ public class DynamicPickOrchestrator
         MarketDataOptionsProvider optionsProvider,
         MarketDataService marketData,
         LearningEngine learning,
+        TradeSetupEngine setupEngine,
         PortfolioBalanceEngine portfolio,
         PortfolioChallengeRepository portfolioRepo,
         ILogger<DynamicPickOrchestrator> logger)
@@ -69,6 +72,7 @@ public class DynamicPickOrchestrator
         _optionsProvider = optionsProvider;
         _marketData = marketData;
         _learning = learning;
+        _setupEngine = setupEngine;
         _portfolio = portfolio;
         _portfolioRepo = portfolioRepo;
         _logger = logger;
@@ -120,6 +124,18 @@ public class DynamicPickOrchestrator
                     "This likely means the database schema is out of sync with the code. Check for missing columns.",
                     pred.Ticker, pred.Id);
             }
+            // Classify as a trade setup (non-blocking — failures don't break the pipeline)
+            try
+            {
+                var setup = await _setupEngine.ClassifySetupAsync(pred, saved?.Id);
+                if (setup is not null)
+                    await _setupEngine.SaveSetupAsync(setup);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[dynamic] Setup classification failed for {Ticker}", pred.Ticker);
+            }
+
             stockBuilds.Add(new StockCandidateBuild(pred, candidate, saved, ranking));
         }
 
@@ -339,11 +355,70 @@ public class DynamicPickOrchestrator
             }
         }
 
-        // 2. Evaluate open paper option candidates (existing service)
+        // 2. Evaluate active trade setups
+        var setupsEvaluated = 0;
+        try
+        {
+            var activeSetups = await _researchRepo.GetActiveTradeSetupsAsync();
+            foreach (var setupRow in activeSetups)
+            {
+                try
+                {
+                    var ticker = setupRow["ticker"]?.ToString();
+                    if (string.IsNullOrEmpty(ticker)) continue;
+
+                    var quote = await _marketData.GetQuoteAsync(ticker);
+                    if (quote is null || quote.Price <= 0) continue;
+
+                    var setupId = setupRow["id"]?.ToString() ?? "";
+                    var createdStr = setupRow["created_at"]?.ToString();
+                    var createdAt = DateTimeOffset.TryParse(createdStr, out var ca) ? ca : DateTimeOffset.UtcNow;
+                    var daysHeld = (int)(DateTimeOffset.UtcNow - createdAt).TotalDays;
+
+                    // Reconstruct a minimal TradeSetup for evaluation
+                    var setup = new TradeSetup
+                    {
+                        Id = setupId,
+                        Ticker = ticker,
+                        Direction = setupRow["direction"]?.ToString() ?? "neutral",
+                        EntryPrice = setupRow["entry_price"] is JsonNode ep ? ep.GetValue<double>() : null,
+                        TargetPrice = setupRow["target_price"] is JsonNode tp ? tp.GetValue<double>() : null,
+                        StopPrice = setupRow["stop_price"] is JsonNode sp ? sp.GetValue<double>() : null,
+                        InvalidationPrice = setupRow["invalidation_price"] is JsonNode ip ? ip.GetValue<double>() : null,
+                        MaxHoldingDays = setupRow["max_holding_days"] is JsonNode mh ? mh.GetValue<int>() : 5,
+                    };
+
+                    // For now, use current price as both high and low since entry
+                    // (we don't track intraday high/low yet)
+                    var outcome = TradeSetupEngine.EvaluateSetup(
+                        setup, quote.Price, quote.Price, quote.Price, daysHeld);
+
+                    if (outcome is not null)
+                    {
+                        var status = outcome.Resolution.ToString();
+                        await _researchRepo.UpdateTradeSetupStatusAsync(setupId, status, outcome);
+                        setupsEvaluated++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[dynamic] Setup evaluation failed for one setup");
+                }
+            }
+            if (setupsEvaluated > 0)
+                _logger.LogInformation("[dynamic] Evaluated {Count} trade setups", setupsEvaluated);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Trade setup evaluation batch failed");
+            errors.Add($"setup-eval: {ex.Message}");
+        }
+
+        // 3. Evaluate open paper option candidates (existing service)
         var optionOutcomes = await _paperOptions.EvaluateAllOpenAsync();
 
-        // 3. Also run the original prediction outcome evaluator so the
-        // existing learning loop keeps producing prediction_outcomes rows.
+        // 4. Also run the original prediction outcome evaluator so the
+        //    existing learning loop keeps producing prediction_outcomes rows.
         var eod = await _dailyService.RunEndOfDayReviewAsync();
         errors.AddRange(eod.Errors);
 
@@ -383,7 +458,8 @@ public class DynamicPickOrchestrator
         }
 
         var report = $"Evaluated {stockEvaluated} paper stock candidates, " +
-                     $"{optionOutcomes.Count} paper option candidates. " +
+                     $"{optionOutcomes.Count} paper option candidates, " +
+                     $"{setupsEvaluated} trade setups. " +
                      $"Existing predictions: {eod.PredictionsEvaluated}." +
                      (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "");
 

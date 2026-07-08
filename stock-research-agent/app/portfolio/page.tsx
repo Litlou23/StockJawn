@@ -1,7 +1,7 @@
 'use client';
 
 import AppShell from '@/components/AppShell';
-import { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,6 +60,55 @@ interface PortfolioChallenge {
   portfolioMode: string;
   notes: string | null;
   createdAt: string;
+}
+
+interface DecisionLogEntry {
+  position_id: string;
+  ticker: string;
+  asset_type: string;
+  position_status: string;
+  entry_date: string;
+  exit_date: string | null;
+  entry_price: number;
+  exit_price: number | null;
+  quantity: number;
+  dollars_invested: number;
+  dollars_returned: number | null;
+  profit_loss: number | null;
+  percent_gain: number | null;
+  reason_entered: string | null;
+  reason_exited: string | null;
+  prediction_id: string | null;
+  // Candidate analysis
+  prediction_type: string | null;
+  timeframe: string | null;
+  confidence_score: number | null;
+  risk_score: number | null;
+  candidate_mode: string | null;
+  quality_tier: string | null;
+  is_actionable: boolean | null;
+  total_score: number | null;
+  catalyst_type: string | null;
+  selection_reason: string | null;
+  inclusion_reason: string | null;
+  bullish_score: number | null;
+  bearish_score: number | null;
+  winning_direction: string | null;
+  target_price: number | null;
+  stop_price: number | null;
+  candidate_status: string | null;
+  // Outcome evaluation
+  direction_correct: boolean | null;
+  percent_move: number | null;
+  outcome_score: number | null;
+  outcome_summary: string | null;
+  lesson: string | null;
+  target_hit: boolean | null;
+  stop_hit: boolean | null;
+  invalidation_hit: boolean | null;
+  max_favorable_percent: number | null;
+  max_adverse_percent: number | null;
+  created_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,6 +200,12 @@ async function createChallenge(data: {
   });
 }
 
+async function fetchDecisionLog(): Promise<DecisionLogEntry[]> {
+  const res = await fetch('/api/portfolio/decision-log?limit=50');
+  if (!res.ok) return [];
+  return res.json();
+}
+
 async function closePosition(positionId: string, exitPrice: number, reason: string) {
   return fetch('/api/portfolio/positions', {
     method: 'POST',
@@ -177,11 +232,14 @@ export default function PortfolioPage() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   // UI state
+  const [activeTab, setActiveTab] = useState<'portfolio' | 'decisions'>('portfolio');
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [showAllChallenges, setShowAllChallenges] = useState(false);
   const [closeModal, setCloseModal] = useState<PortfolioPosition | null>(null);
   const [closePrice, setClosePrice] = useState('');
   const [closeReason, setCloseReason] = useState('Manual close');
+  const [decisionLog, setDecisionLog] = useState<DecisionLogEntry[]>([]);
+  const [decisionLogLoading, setDecisionLogLoading] = useState(false);
 
   const showToast = useCallback((message: string, type: 'success' | 'error') => {
     setToast({ message, type });
@@ -199,6 +257,15 @@ export default function PortfolioPage() {
     }
   }, []);
 
+  const loadDecisionLog = useCallback(async () => {
+    setDecisionLogLoading(true);
+    try {
+      const entries = await fetchDecisionLog();
+      setDecisionLog(entries);
+    } catch { /* ignore */ }
+    setDecisionLogLoading(false);
+  }, []);
+
   useEffect(() => {
     (async () => {
       setLoading(true);
@@ -206,6 +273,13 @@ export default function PortfolioPage() {
       setLoading(false);
     })();
   }, [reload]);
+
+  // Load decision log when tab is switched to decisions
+  useEffect(() => {
+    if (activeTab === 'decisions' && decisionLog.length === 0) {
+      loadDecisionLog();
+    }
+  }, [activeTab, decisionLog.length, loadDecisionLog]);
 
   // --- Action handlers ---
 
@@ -491,16 +565,42 @@ export default function PortfolioPage() {
           </div>
         </div>
 
+        {/* ── Tab Bar ──────────────────────────────────────────────── */}
+        <div className="flex gap-1 border-b border-zinc-800">
+          <button
+            onClick={() => setActiveTab('portfolio')}
+            className={`px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'portfolio'
+                ? 'border-b-2 border-violet-500 text-violet-300'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            Portfolio
+          </button>
+          <button
+            onClick={() => setActiveTab('decisions')}
+            className={`px-4 py-2 text-sm font-medium transition ${
+              activeTab === 'decisions'
+                ? 'border-b-2 border-violet-500 text-violet-300'
+                : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            Decision Log
+          </button>
+        </div>
+
         {/* ── Key Stats ───────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+        {activeTab === 'portfolio' ? <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
           <StatCard label="Cash Available" value={usd(summary.cashAvailable)} />
           <StatCard label="Open Positions" value={summary.openPositions} accent={summary.openPositions > 0 ? 'yellow' : undefined} />
           <StatCard label="Closed Trades" value={summary.closedPositions} />
           <StatCard label="Total Trades" value={summary.trades} />
           <StatCard label="Win Rate" value={summary.winRate > 0 ? `${summary.winRate.toFixed(0)}%` : '—'} accent={summary.winRate >= 50 ? 'green' : summary.winRate > 0 ? 'red' : undefined} />
           <StatCard label="Position Size" value={SIZING_MAP[summary.riskProfile] ?? '10%'} />
-        </div>
+        </div> : null}
 
+        {activeTab === 'portfolio' ? (
+        <React.Fragment>
         {/* ── Settings ────────────────────────────────────────────── */}
         <Section title="Challenge Settings" subtitle="Click to change">
           <div className="flex flex-wrap gap-4">
@@ -655,6 +755,17 @@ export default function PortfolioPage() {
             </div>
           )}
         </Section>
+        </React.Fragment>
+        ) : null}
+
+        {/* ── Decision Log Tab ───────────────────────────────────── */}
+        {activeTab === 'decisions' ? (
+          <DecisionLogPanel
+            entries={decisionLog}
+            loading={decisionLogLoading}
+            onRefresh={loadDecisionLog}
+          />
+        ) : null}
 
       </div>
     </AppShell>
@@ -778,6 +889,222 @@ function PositionRow({ position: p, onClose }: { position: PortfolioPosition; on
           </span>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Decision Log
+// ---------------------------------------------------------------------------
+
+function DecisionLogPanel({ entries, loading, onRefresh }: {
+  entries: DecisionLogEntry[];
+  loading: boolean;
+  onRefresh: () => void;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  if (loading) {
+    return (
+      <div className="animate-pulse rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center">
+        <p className="text-sm text-zinc-500">Loading decision log…</p>
+      </div>
+    );
+  }
+
+  if (entries.length === 0) {
+    return (
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-6 text-center">
+        <p className="text-sm text-zinc-500">No trades recorded yet.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-zinc-500">{entries.length} decision{entries.length !== 1 ? 's' : ''} recorded</p>
+        <button onClick={onRefresh} className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-[11px] font-medium text-zinc-300 transition hover:bg-zinc-700">
+          Refresh
+        </button>
+      </div>
+      {entries.map((e) => (
+        <DecisionCard key={e.position_id} entry={e} expanded={expanded === e.position_id} onToggle={() => setExpanded(expanded === e.position_id ? null : e.position_id)} />
+      ))}
+    </div>
+  );
+}
+
+function DecisionCard({ entry: e, expanded, onToggle }: {
+  entry: DecisionLogEntry;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const isClosed = e.position_status === 'closed';
+  const pl = e.profit_loss;
+  const plColorClass = pl === null ? 'text-zinc-400' : pl >= 0 ? 'text-green-400' : 'text-red-400';
+  const dirIcon = e.winning_direction === 'bullish' ? '▲' : e.winning_direction === 'bearish' ? '▼' : '●';
+  const dirColor = e.winning_direction === 'bullish' ? 'text-green-400' : e.winning_direction === 'bearish' ? 'text-red-400' : 'text-zinc-400';
+
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900 overflow-hidden">
+      {/* Summary row — always visible */}
+      <button onClick={onToggle} className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-zinc-800/50">
+        {/* Direction indicator */}
+        <span className={`text-lg ${dirColor}`}>{dirIcon}</span>
+
+        {/* Ticker + type */}
+        <div className="min-w-[80px]">
+          <div className="text-sm font-semibold text-zinc-100">{e.ticker}</div>
+          <div className="text-[10px] text-zinc-500">{e.prediction_type ?? 'unknown'} · {e.timeframe?.replace(/_/g, ' ') ?? ''}</div>
+        </div>
+
+        {/* Scores */}
+        <div className="hidden sm:flex items-center gap-2">
+          {e.confidence_score !== null ? <ScorePill label="Conf" value={e.confidence_score} /> : null}
+          {e.risk_score !== null ? <ScorePill label="Risk" value={e.risk_score} variant="risk" /> : null}
+          {e.total_score !== null ? <ScorePill label="Score" value={Math.round(e.total_score)} /> : null}
+        </div>
+
+        {/* Mode / Tier badges */}
+        <div className="hidden md:flex items-center gap-1">
+          {e.candidate_mode ? <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+            e.candidate_mode === 'live_eligible' ? 'bg-green-500/10 text-green-400' : 'bg-violet-500/10 text-violet-400'
+          }`}>{e.candidate_mode.replace(/_/g, ' ')}</span> : null}
+          {e.quality_tier ? <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[9px] text-zinc-500">{e.quality_tier.replace(/_/g, ' ')}</span> : null}
+        </div>
+
+        {/* P&L */}
+        <div className="ml-auto text-right">
+          {isClosed && pl !== null ? (
+            <div className={`text-sm font-bold ${plColorClass}`}>{pl >= 0 ? '+' : ''}{usd(pl)}</div>
+          ) : (
+            <div className="text-sm text-yellow-400">open</div>
+          )}
+          {isClosed && e.percent_gain !== null ? (
+            <div className={`text-[10px] ${plColorClass}`}>{pct(e.percent_gain)}</div>
+          ) : null}
+        </div>
+
+        {/* Chevron */}
+        <svg viewBox="0 0 24 24" fill="none" strokeWidth={2} stroke="currentColor" className={`h-4 w-4 text-zinc-500 transition-transform ${expanded ? 'rotate-180' : ''}`}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Expanded detail */}
+      {expanded ? (
+        <div className="border-t border-zinc-800 px-4 py-3 space-y-3">
+          {/* Entry Decision */}
+          <DetailSection title="Entry Decision" icon="📥">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+              <DetailRow label="Entry Price" value={`$${e.entry_price.toFixed(2)}`} />
+              <DetailRow label="Quantity" value={e.quantity.toFixed(e.quantity % 1 === 0 ? 0 : 4)} />
+              <DetailRow label="Invested" value={usd(e.dollars_invested)} />
+              <DetailRow label="Entry Date" value={new Date(e.entry_date).toLocaleString()} />
+              {e.catalyst_type ? <DetailRow label="Catalyst" value={e.catalyst_type.replace(/_/g, ' ')} /> : null}
+              {e.target_price ? <DetailRow label="Target" value={`$${e.target_price.toFixed(2)}`} /> : null}
+              {e.stop_price ? <DetailRow label="Stop" value={`$${e.stop_price.toFixed(2)}`} /> : null}
+            </div>
+            {e.bullish_score !== null && e.bearish_score !== null ? (
+              <div className="mt-2">
+                <SentimentBar bullish={e.bullish_score} bearish={e.bearish_score} />
+              </div>
+            ) : null}
+            {e.selection_reason ? (
+              <p className="mt-2 text-[10px] text-zinc-400 leading-relaxed">{e.selection_reason}</p>
+            ) : null}
+            {e.reason_entered ? (
+              <p className="mt-1 text-[10px] text-zinc-500">{e.reason_entered}</p>
+            ) : null}
+          </DetailSection>
+
+          {/* Exit Decision */}
+          {isClosed ? (
+            <DetailSection title="Exit Decision" icon="📤">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+                <DetailRow label="Exit Price" value={e.exit_price !== null ? `$${e.exit_price.toFixed(2)}` : '—'} />
+                <DetailRow label="Returned" value={e.dollars_returned !== null ? usd(e.dollars_returned) : '—'} />
+                <DetailRow label="P&L" value={pl !== null ? `${pl >= 0 ? '+' : ''}${usd(pl)} (${pct(e.percent_gain ?? 0)})` : '—'} color={plColorClass} />
+                <DetailRow label="Exit Date" value={e.exit_date ? new Date(e.exit_date).toLocaleString() : '—'} />
+              </div>
+              {e.reason_exited ? (
+                <p className="mt-2 text-[10px] text-zinc-400">{e.reason_exited}</p>
+              ) : null}
+            </DetailSection>
+          ) : null}
+
+          {/* Outcome Evaluation */}
+          {e.outcome_summary ? (
+            <DetailSection title="Outcome Evaluation" icon="📊">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-[11px]">
+                <DetailRow label="Direction" value={e.direction_correct === true ? '✓ Correct' : e.direction_correct === false ? '✗ Wrong' : '—'} color={e.direction_correct === true ? 'text-green-400' : e.direction_correct === false ? 'text-red-400' : undefined} />
+                <DetailRow label="Price Move" value={e.percent_move !== null ? `${e.percent_move > 0 ? '+' : ''}${e.percent_move.toFixed(2)}%` : '—'} />
+                <DetailRow label="Outcome Score" value={e.outcome_score !== null ? `${e.outcome_score.toFixed(0)}/100` : '—'} />
+                {e.max_favorable_percent !== null ? <DetailRow label="Max Favorable" value={`${e.max_favorable_percent.toFixed(2)}%`} color="text-green-400" /> : null}
+                {e.max_adverse_percent !== null ? <DetailRow label="Max Adverse" value={`${e.max_adverse_percent.toFixed(2)}%`} color="text-red-400" /> : null}
+                {e.target_hit !== null ? <DetailRow label="Target Hit" value={e.target_hit ? '✓ Yes' : '✗ No'} color={e.target_hit ? 'text-green-400' : 'text-zinc-500'} /> : null}
+                {e.stop_hit !== null ? <DetailRow label="Stop Hit" value={e.stop_hit ? '✗ Yes' : '✓ No'} color={e.stop_hit ? 'text-red-400' : 'text-zinc-500'} /> : null}
+              </div>
+              <p className="mt-2 text-[10px] text-zinc-400 leading-relaxed">{e.outcome_summary}</p>
+            </DetailSection>
+          ) : null}
+
+          {/* Lesson Learned */}
+          {e.lesson ? (
+            <DetailSection title="Lesson Learned" icon="💡">
+              <p className="text-[11px] text-zinc-300 leading-relaxed">{e.lesson}</p>
+            </DetailSection>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ScorePill({ label, value, variant }: { label: string; value: number; variant?: 'risk' }) {
+  const color = variant === 'risk'
+    ? value > 60 ? 'text-red-400 bg-red-500/10' : value > 40 ? 'text-yellow-400 bg-yellow-500/10' : 'text-green-400 bg-green-500/10'
+    : value > 60 ? 'text-green-400 bg-green-500/10' : value > 40 ? 'text-yellow-400 bg-yellow-500/10' : 'text-zinc-400 bg-zinc-800';
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${color}`}>{label}: {value}</span>
+  );
+}
+
+function SentimentBar({ bullish, bearish }: { bullish: number; bearish: number }) {
+  const total = bullish + bearish || 1;
+  const bullPct = (bullish / total) * 100;
+  return (
+    <div>
+      <div className="flex justify-between text-[9px]">
+        <span className="text-green-400">Bull: {bullish.toFixed(1)}</span>
+        <span className="text-red-400">Bear: {bearish.toFixed(1)}</span>
+      </div>
+      <div className="mt-0.5 flex h-1.5 overflow-hidden rounded-full bg-zinc-800">
+        <div className="bg-green-500/60" style={{ width: `${bullPct}%` }} />
+        <div className="bg-red-500/60 flex-1" />
+      </div>
+    </div>
+  );
+}
+
+function DetailSection({ title, icon, children }: { title: string; icon: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <span className="text-xs">{icon}</span>
+        <span className="text-[11px] font-semibold text-zinc-200">{title}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function DetailRow({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="flex justify-between py-0.5">
+      <span className="text-zinc-500">{label}</span>
+      <span className={color ?? 'text-zinc-200'}>{value}</span>
     </div>
   );
 }

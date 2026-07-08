@@ -466,11 +466,43 @@ public class PaperOptionsService
             Warnings = warnings,
         };
 
-        await _repo.SavePaperOutcomeEnhancedAsync(outcome);
-        await _repo.UpdatePaperCandidateStatusAsync(candidate.Id, "evaluated");
-        await UpdateLearningStatsFromOutcomeAsync(candidate, outcome);
+        // Determine whether the candidate should be closed or left open.
+        // Only close when: (a) contract expired, (b) hit profit target (+50%),
+        // (c) hit stop loss (-50%), or (d) 1 DTE remaining (close before expiry).
+        var dteRemaining = (candidate.Expiration - DateTimeOffset.UtcNow).TotalDays;
+        var isExpired = dteRemaining <= 0;
+        var hitProfitTarget = pnlPct >= 50;
+        var hitStopLoss = pnlPct <= -50;
+        var lastDayBeforeExpiry = dteRemaining <= 1 && dteRemaining > 0;
+        var shouldClose = isExpired || hitProfitTarget || hitStopLoss || lastDayBeforeExpiry;
 
-        return outcome;
+        if (shouldClose)
+        {
+            var closeReason = isExpired ? "expired"
+                : hitProfitTarget ? "profit_target"
+                : hitStopLoss ? "stop_loss"
+                : "pre_expiry_close";
+
+            outcome = outcome with
+            {
+                OutcomeSummary = outcome.OutcomeSummary + $" Closed: {closeReason}.",
+            };
+
+            await _repo.SavePaperOutcomeEnhancedAsync(outcome);
+            await _repo.UpdatePaperCandidateStatusAsync(candidate.Id, isExpired ? "expired" : "evaluated");
+            await UpdateLearningStatsFromOutcomeAsync(candidate, outcome);
+        }
+        else
+        {
+            // Snapshot only — save the outcome data but leave the candidate open
+            // so it gets re-evaluated on the next EOD run.
+            // Don't save an outcome row or update learning stats yet.
+            _logger.LogInformation(
+                "[paper-options] {Ticker} {Symbol}: snapshot P&L {PnL:F1}%, {DTE:F0} DTE remaining — leaving open",
+                candidate.Ticker, candidate.OptionSymbol, pnlPct, dteRemaining);
+        }
+
+        return shouldClose ? outcome : null;
     }
 
     // -----------------------------------------------------------------------

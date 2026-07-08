@@ -62,6 +62,13 @@ function persistenceWarning(label: string, result: PersistenceResult): string | 
 // Execute a single tool call against the .NET chat-tools endpoints
 // ---------------------------------------------------------------------------
 
+const POST_TOOLS = new Set([
+  'run_learning_update',
+  'run_morning_scan',
+  'run_eod_review',
+  'update_config',
+]);
+
 async function executeToolCall(toolCall: AiToolCall): Promise<string> {
   const baseUrl = process.env.AGENT_API_BASE_URL;
   if (!baseUrl) return JSON.stringify({ error: 'AGENT_API_BASE_URL not set' });
@@ -74,6 +81,7 @@ async function executeToolCall(toolCall: AiToolCall): Promise<string> {
   }
 
   const url = buildToolCallUrl(baseUrl, toolCall.name, args);
+  const method = POST_TOOLS.has(toolCall.name) ? 'POST' : 'GET';
 
   const isLocalhostHttps = baseUrl.startsWith('https://localhost');
   if (isLocalhostHttps) {
@@ -82,7 +90,7 @@ async function executeToolCall(toolCall: AiToolCall): Promise<string> {
 
   try {
     const response = await fetch(url, {
-      method: 'GET',
+      method,
       headers: { 'Content-Type': 'application/json' },
     });
 

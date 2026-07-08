@@ -26,6 +26,10 @@ RULES:
 7. Options: be extra strict on IV, liquidity, bid-ask spread, theta decay, breakeven distance. A good stock idea can still be a bad options trade.
 8. Never give trade instructions, position sizing, or recommend automatic trading.
 9. This system is in LEARNING MODE — all candidates are paper-only, not actionable.
+10. You can trigger actions: run morning scans, EOD reviews, learning updates, and recalibration. When the user asks you to run something, use the appropriate tool — don't just describe what they should do.
+11. You can explain scoring breakdowns for any ticker and show which signal buckets (trend, momentum, volume, volatility, market context, catalyst, research signals) drove a prediction.
+12. You can show trade setup performance — which combinations of signals historically produce positive expected value. Use get_setup_performance for this.
+13. You can view and adjust system configuration like the calibration factor.
 
 RESPONSE FORMAT — JSON only, no markdown fences:
 {"message": string, "dataConfidence": "high"|"medium"|"low", "suggestedPrompts": string[], "riskWarnings": string[], "thesis"?: {"ticker": string, "setupType"?: string, "thesisSummary": string, "bullishCase"?: string, "bearishCase"?: string, "invalidationPoint"?: string, "expectedTimeframe"?: "1d"|"5d"|"20d"|"60d"}}
@@ -138,6 +142,118 @@ export const CHAT_TOOL_DEFINITIONS: ChatToolDefinition[] = [
           ticker: { type: 'string', description: 'Ticker symbol (e.g. AAPL)' },
         },
         required: ['ticker'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_setup_performance',
+      description:
+        'Get trade setup performance statistics — which combinations of signals have historically worked. Filter by "top" (positive EV), "degraded" (recently declining), or "negative" (losing setups). Use for questions about which setups work, setup win rates, expected value.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filter: {
+            type: 'string',
+            enum: ['top', 'degraded', 'negative'],
+            description: 'Filter setups: top (positive EV), degraded (declining), negative (losing)',
+          },
+          limit: { type: 'integer', description: 'Max items (default 10)' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_learning_stats',
+      description:
+        'Get learning engine statistics: signal performance, confidence calibration analysis, weight overrides, and calibration factor. Use for questions about system accuracy, overconfidence, signal reliability, or weight adjustments.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_learning_update',
+      description:
+        'Trigger a full learning cycle: compute signal performance, recalibrate confidence, optimize weights, compute setup analytics, generate insights. Use when asked to "run learning", "update weights", "recalibrate", or "learn from recent data".',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_morning_scan',
+      description:
+        'Trigger the morning scan pipeline: generate predictions, create stock/option candidates, classify trade setups. Use when asked to "run the scan", "generate predictions", or "start morning picks".',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_eod_review',
+      description:
+        'Trigger end-of-day evaluation: evaluate stock/option outcomes, resolve trade setups, close portfolio positions. Use when asked to "run EOD", "evaluate outcomes", or "check results".',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'explain_scoring',
+      description:
+        'Get a detailed scoring breakdown for a specific ticker: every bucket score (trend, momentum, volume, volatility, market context, catalyst, research signals), confirmation multiplier, data quality, calibration, confidence caps, setup fingerprint and historical performance. Use when asked "why did X get this score?" or "explain the prediction for X".',
+      parameters: {
+        type: 'object',
+        properties: {
+          ticker: { type: 'string', description: 'Ticker symbol (e.g. AAPL)' },
+        },
+        required: ['ticker'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_ticker_accuracy',
+      description:
+        'Get per-ticker historical prediction accuracy from stock learning stats. Shows win/loss record, accuracy percentage, and average outcome score. Use for questions like "how accurate are we on UBER?" or "which tickers do we predict worst?" Without a ticker, returns all tracked tickers ranked by volume.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ticker: { type: 'string', description: 'Ticker symbol to look up (e.g. UBER). Omit for all tickers.' },
+          limit: { type: 'integer', description: 'Max items to return (default 10)' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_config',
+      description:
+        'View current system configuration: calibration factor, weight overrides, thresholds for weight adjustment, setup detection parameters. Use when asked about system settings or "what are the current thresholds?".',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_config',
+      description:
+        'Change a system configuration value. Currently supports: calibration_factor (0.85-1.15). Use when asked to "set calibration to X" or "adjust the confidence dampening".',
+      parameters: {
+        type: 'object',
+        properties: {
+          setting: { type: 'string', description: 'Config setting name (e.g. calibration_factor)' },
+          value: { type: 'number', description: 'New value for the setting' },
+        },
+        required: ['setting', 'value'],
       },
     },
   },

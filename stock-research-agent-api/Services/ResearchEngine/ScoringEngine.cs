@@ -258,6 +258,92 @@ public static class ScoringEngine
     }
 
     // -----------------------------------------------------------------------
+    // Setup-aware confidence adjustment
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Adjusts confidence based on the historical performance of the detected
+    /// trade setup. Positive EV + trusted setup → boost; degraded or negative
+    /// EV → penalize. Called after ClassifySetupAsync provides the setup's
+    /// historical performance.
+    /// </summary>
+    public static ScoringResult AdjustForSetupHistory(
+        ScoringResult initial,
+        SetupPerformance? setupPerformance,
+        bool isHistoricallyFavorable)
+    {
+        if (setupPerformance is null || setupPerformance.SampleSize < 5)
+            return initial; // Not enough history to adjust
+
+        var breakdown = initial.Breakdown;
+        var reasons = new List<string>(breakdown.ActionabilityReasons);
+        int confidence = initial.Confidence;
+        string? capReason = breakdown.ConfidenceCap;
+
+        var ev = setupPerformance.ExpectedValuePercent;
+        var wr = setupPerformance.WinRate;
+        var trusted = setupPerformance.IsTrusted;
+
+        if (isHistoricallyFavorable && trusted)
+        {
+            // Boost confidence for proven setups: +5 to +15 based on EV strength
+            var boost = ev switch
+            {
+                >= 2.0 => 15,
+                >= 1.0 => 10,
+                >= 0.5 => 5,
+                _ => 0,
+            };
+
+            if (boost > 0)
+            {
+                confidence = Math.Min(confidence + boost, 95);
+                reasons.Add($"Setup boost +{boost}: EV={ev:F2}%, WR={wr * 100:F0}%, n={setupPerformance.SampleSize}");
+            }
+        }
+        else if (!trusted && setupPerformance.SampleSize >= 8)
+        {
+            // Degrading setup — cap confidence
+            var penalty = 10;
+            confidence = Math.Max(confidence - penalty, 20);
+            capReason = $"Degraded setup (recent WR dropped >15% from all-time)";
+            reasons.Add($"Setup penalty -{penalty}: setup degrading, EV={ev:F2}%");
+        }
+        else if (ev < -0.5 && setupPerformance.SampleSize >= 8)
+        {
+            // Negative EV setup — strong penalty
+            var penalty = 15;
+            confidence = Math.Max(confidence - penalty, 15);
+            capReason = $"Negative EV setup ({ev:F2}%)";
+            reasons.Add($"Setup penalty -{penalty}: negative EV={ev:F2}%, WR={wr * 100:F0}%");
+        }
+
+        // Recompute actionability with adjusted confidence
+        var catalystNet = breakdown.CatalystBullish - breakdown.CatalystBearish;
+        var marketNet = breakdown.MarketContextBullish - breakdown.MarketContextBearish;
+        var (actionScore, actionTier, tierReasons) = ComputeActionability(
+            confidence, riskReward: null,
+            catalystScore: catalystNet,
+            marketContextScore: marketNet,
+            dataQualityFactor: breakdown.DataQualityFactor,
+            confidenceCap: capReason);
+        reasons.AddRange(tierReasons.Where(r => !reasons.Contains(r)));
+
+        return initial with
+        {
+            Confidence = confidence,
+            Breakdown = breakdown with
+            {
+                Confidence = confidence,
+                ActionabilityScore = actionScore,
+                ActionabilityTier = actionTier,
+                ConfidenceCap = capReason,
+                ActionabilityReasons = reasons,
+            },
+        };
+    }
+
+    // -----------------------------------------------------------------------
     // Actionability tier (unchanged)
     // -----------------------------------------------------------------------
 
