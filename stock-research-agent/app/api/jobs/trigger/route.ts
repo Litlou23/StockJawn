@@ -20,6 +20,7 @@ const ALLOWED_JOBS = new Set([
   'run-end-of-day-review',
   'run-learning-update',
   'run-weekly-research',
+  'run-data-hygiene',
   // Dynamic orchestrator entry points — auto-generate stock + option picks.
   'run-dynamic-morning-picks',
   'run-dynamic-eod-review',
@@ -29,6 +30,7 @@ const ALLOWED_JOBS = new Set([
 /** Jobs that take too long to wait for synchronously */
 const FIRE_AND_FORGET_JOBS = new Set([
   'run-weekly-research',
+  'run-data-hygiene',
   // Dynamic orchestrator — all three loop over the watchlist + external APIs.
   'run-dynamic-morning-picks',
   'run-dynamic-eod-review',

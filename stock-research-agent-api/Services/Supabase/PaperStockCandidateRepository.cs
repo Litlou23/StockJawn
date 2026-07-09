@@ -137,6 +137,7 @@ public class PaperStockCandidateRepository
                 outcome_score = o.OutcomeScore,
                 outcome_summary = o.OutcomeSummary,
                 lesson = o.Lesson,
+                failure_reason = o.FailureReason,
                 warnings_json = JsonSerializer.SerializeToNode(o.Warnings),
             }
         }, returnRows: false);
@@ -283,6 +284,7 @@ public class PaperStockCandidateRepository
         OutcomeScore = GetDouble(r, "outcome_score"),
         OutcomeSummary = r["outcome_summary"]?.ToString() ?? "",
         Lesson = r["lesson"]?.ToString(),
+        FailureReason = r["failure_reason"]?.ToString(),
         Warnings = GetWarnings(r, "warnings_json"),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };

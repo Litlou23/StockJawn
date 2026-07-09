@@ -94,6 +94,7 @@ public record PaperStockOutcome
 
     public string OutcomeSummary { get; init; } = "";
     public string? Lesson { get; init; }
+    public string? FailureReason { get; init; }
     public List<string> Warnings { get; init; } = [];
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

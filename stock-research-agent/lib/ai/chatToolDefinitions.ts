@@ -221,7 +221,7 @@ export const CHAT_TOOL_DEFINITIONS: ChatToolDefinition[] = [
     function: {
       name: 'get_ticker_accuracy',
       description:
-        'Get per-ticker historical prediction accuracy from stock learning stats. Shows win/loss record, accuracy percentage, and average outcome score. Use for questions like "how accurate are we on UBER?" or "which tickers do we predict worst?" Without a ticker, returns all tracked tickers ranked by volume.',
+        'Get per-ticker historical prediction accuracy with per-bucket breakdown and reliability factor. Shows win/loss record, which signal buckets (trend, momentum, volume, etc.) are weakest for that ticker, and the Bayesian-smoothed reliability factor that adjusts confidence. Use for questions like "how accurate are we on UBER?", "why do we keep getting UBER wrong?", or "which tickers do we predict worst?"',
       parameters: {
         type: 'object',
         properties: {

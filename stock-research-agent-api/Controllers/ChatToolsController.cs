@@ -664,8 +664,8 @@ public class ChatToolsController : ControllerBase
             {
                 run_id = result.RunId,
                 predictions = result.PredictionsGenerated,
-                stock_candidates = result.StockCandidatesCreated,
-                option_candidates = result.OptionCandidatesCreated,
+                stock_candidates = result.StockCandidatesGenerated,
+                option_candidates = result.OptionCandidatesGenerated,
             },
             warnings = result.Errors,
         });
@@ -839,11 +839,51 @@ public class ChatToolsController : ControllerBase
             var correct = (int)Math.Round(match.Accuracy * match.TotalCandidates);
             var wrong = match.TotalCandidates - correct;
 
+            // Per-bucket accuracy for this ticker
+            var bucketStats = allStats
+                .Where(s => s.StatType == "ticker_bucket"
+                    && s.StatKey.StartsWith(ticker.Trim().ToUpperInvariant() + "|", StringComparison.OrdinalIgnoreCase))
+                .Select(s =>
+                {
+                    var bucketName = s.StatKey.Split('|').Last();
+                    var bCorrect = (int)Math.Round(s.Accuracy * s.TotalCandidates);
+                    return new
+                    {
+                        bucket = bucketName,
+                        total = s.TotalCandidates,
+                        correct = bCorrect,
+                        accuracy = $"{s.Accuracy * 100:F1}%",
+                    };
+                })
+                .OrderBy(b => b.accuracy)
+                .ToList();
+
+            // Compute reliability factor (same formula as PredictionGenerator)
+            double? reliabilityFactor = null;
+            if (match.TotalCandidates >= 5)
+            {
+                var globalStats = allStats
+                    .Where(s => s.StatType == "prediction_type"
+                        && (s.StatKey == "bullish" || s.StatKey == "bearish"))
+                    .ToList();
+                double globalAccuracy = globalStats.Count > 0
+                    ? globalStats.Average(s => s.Accuracy) : 0.55;
+                double tickerAcc = match.Accuracy;
+                int n = match.TotalCandidates;
+                double sampleWeight = (double)n / (n + 10);
+                double effectiveAcc = sampleWeight * tickerAcc + (1 - sampleWeight) * globalAccuracy;
+                reliabilityFactor = Math.Round(0.6 + 0.4 * Math.Clamp(effectiveAcc / 0.8, 0, 1), 3);
+            }
+
             return Ok(new
             {
                 tool_name = "get_ticker_accuracy",
                 as_of = Now(),
-                summary = $"{match.StatKey}: {correct}/{match.TotalCandidates} correct ({match.Accuracy * 100:F1}% accuracy). Avg outcome score: {match.AverageOutcomeScore:F1}.",
+                summary = $"{match.StatKey}: {correct}/{match.TotalCandidates} correct ({match.Accuracy * 100:F1}% accuracy). "
+                    + $"Reliability factor: {(reliabilityFactor.HasValue ? $"{reliabilityFactor:F2}" : "n/a (< 5 samples)")}. "
+                    + (bucketStats.Count > 0
+                        ? $"Weakest bucket: {bucketStats.First().bucket} ({bucketStats.First().accuracy})."
+                        : "No per-bucket data yet."),
                 data = new
                 {
                     ticker = match.StatKey,
@@ -853,9 +893,11 @@ public class ChatToolsController : ControllerBase
                     wrong,
                     accuracy = $"{match.Accuracy * 100:F1}%",
                     avg_outcome_score = match.AverageOutcomeScore,
+                    reliability_factor = reliabilityFactor,
+                    bucket_accuracy = bucketStats,
                 },
                 warnings = match.Accuracy < 0.4 && match.TotalCandidates >= 5
-                    ? new List<string> { $"WARNING: {match.StatKey} accuracy is critically low ({match.Accuracy * 100:F0}%). The system should reduce confidence on this ticker." }
+                    ? new List<string> { $"WARNING: {match.StatKey} accuracy is critically low ({match.Accuracy * 100:F0}%). Confidence is being reduced via reliability factor {reliabilityFactor:F2}." }
                     : warnings,
             });
         }

@@ -365,15 +365,42 @@ public class PaperOptionsService
             return null;
         }
 
-        var chain = await _provider.GetOptionsChainAsync(candidate.Ticker);
+        // Fetch chain with targeted DTE range around the candidate's expiration
+        var dteRemaining = Math.Max(0, (int)(candidate.Expiration - DateTimeOffset.UtcNow).TotalDays);
+        var chain = await _provider.GetOptionsChainAsync(
+            candidate.Ticker,
+            minDte: Math.Max(0, dteRemaining - 2),
+            maxDte: dteRemaining + 2,
+            side: candidate.Side.ToString());
         warnings.AddRange(chain.Warnings);
 
         var current = chain.Contracts.FirstOrDefault(c => c.OptionSymbol == candidate.OptionSymbol);
 
-        // If the contract isn't in the chain — likely expired/delisted
+        // If chain returned empty, this is a data availability problem — not a trade loss.
+        // Don't record a fake LOSS outcome; just skip and retry next evaluation cycle.
+        if (chain.Contracts.Count == 0 && candidate.Expiration > DateTimeOffset.UtcNow)
+        {
+            _logger.LogWarning(
+                "[paper-options] {Ticker} {Symbol}: chain returned empty (market closed or API issue) — skipping, will retry",
+                candidate.Ticker, candidate.OptionSymbol);
+            return null;
+        }
+
+        // If the contract isn't in the chain — check if it's actually expired
         if (current is null)
         {
-            warnings.Add("Contract no longer in chain — may have expired or been delisted.");
+            // If not yet expired, this might be a symbol mismatch or temporary API gap.
+            // Only record as a terminal outcome if the contract is past expiration.
+            if (candidate.Expiration > DateTimeOffset.UtcNow.AddDays(1))
+            {
+                _logger.LogWarning(
+                    "[paper-options] {Ticker} {Symbol}: contract not in chain but {DTE} DTE remaining — skipping, will retry",
+                    candidate.Ticker, candidate.OptionSymbol, dteRemaining);
+                warnings.Add($"Contract not found in chain ({dteRemaining} DTE remaining) — will retry next cycle.");
+                return null;
+            }
+
+            warnings.Add("Contract expired or delisted — recording final outcome.");
             var missingOutcome = new PaperOutcomeEnhanced
             {
                 PaperCandidateId = candidate.Id,
@@ -382,22 +409,20 @@ public class PaperOptionsService
                 OptionSymbol = candidate.OptionSymbol,
                 EvaluationTime = DateTimeOffset.UtcNow,
                 CurrentUnderlyingPrice = chain.UnderlyingPrice,
-                OutcomeSummary = "Contract no longer in chain — may have expired or been delisted.",
+                OutcomeSummary = "Contract expired — recording as total loss of premium.",
                 DirectionCorrect = false,
                 ContractProfitable = false,
+                PaperPnlPercent = -100,
+                PaperPnlPerContract = -Math.Round(candidate.EntryMid * EstContractMultiplier, 2),
                 SpreadStillAcceptable = false,
                 VolumeStillAcceptable = false,
                 OutcomeScore = 0,
-                Lesson = "Contract disappeared from the chain before evaluation. Use longer DTE or check liquidity earlier.",
+                Lesson = "Contract expired worthless. Full premium lost. Consider earlier exit or longer DTE.",
                 Warnings = warnings,
             };
 
             await _repo.SavePaperOutcomeEnhancedAsync(missingOutcome);
-            if (candidate.Expiration <= DateTimeOffset.UtcNow)
-                await _repo.UpdatePaperCandidateStatusAsync(candidate.Id, "expired");
-            else
-                await _repo.UpdatePaperCandidateStatusAsync(candidate.Id, "evaluated");
-
+            await _repo.UpdatePaperCandidateStatusAsync(candidate.Id, "expired");
             await UpdateLearningStatsFromOutcomeAsync(candidate, missingOutcome);
 
             return missingOutcome;
@@ -469,11 +494,11 @@ public class PaperOptionsService
         // Determine whether the candidate should be closed or left open.
         // Only close when: (a) contract expired, (b) hit profit target (+50%),
         // (c) hit stop loss (-50%), or (d) 1 DTE remaining (close before expiry).
-        var dteRemaining = (candidate.Expiration - DateTimeOffset.UtcNow).TotalDays;
-        var isExpired = dteRemaining <= 0;
+        var dteRemainingDays = (candidate.Expiration - DateTimeOffset.UtcNow).TotalDays;
+        var isExpired = dteRemainingDays <= 0;
         var hitProfitTarget = pnlPct >= 50;
         var hitStopLoss = pnlPct <= -50;
-        var lastDayBeforeExpiry = dteRemaining <= 1 && dteRemaining > 0;
+        var lastDayBeforeExpiry = dteRemainingDays <= 1 && dteRemainingDays > 0;
         var shouldClose = isExpired || hitProfitTarget || hitStopLoss || lastDayBeforeExpiry;
 
         if (shouldClose)
@@ -499,7 +524,7 @@ public class PaperOptionsService
             // Don't save an outcome row or update learning stats yet.
             _logger.LogInformation(
                 "[paper-options] {Ticker} {Symbol}: snapshot P&L {PnL:F1}%, {DTE:F0} DTE remaining — leaving open",
-                candidate.Ticker, candidate.OptionSymbol, pnlPct, dteRemaining);
+                candidate.Ticker, candidate.OptionSymbol, pnlPct, dteRemainingDays);
         }
 
         return shouldClose ? outcome : null;

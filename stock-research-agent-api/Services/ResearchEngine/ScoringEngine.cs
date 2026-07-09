@@ -139,10 +139,32 @@ public static class ScoringEngine
             capReason = "Strong market context conflict";
         }
 
-        int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, 95));
+        int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, 85));
 
         // --- Risk score ---
         int risk = ComputeRisk(snapshot, indicators, benchmark, predType, riskPenalty);
+
+        // --- Risk-confidence coherence ---
+        // High risk must cap confidence. A 95-confidence / 60-risk prediction
+        // is internally contradictory — if risk is real, confidence should reflect it.
+        if (risk >= 75) { confidence = Math.Min(confidence, 35); capReason ??= $"Risk {risk} ≥ 75"; }
+        else if (risk >= 60) { confidence = Math.Min(confidence, 50); capReason ??= $"Risk {risk} ≥ 60"; }
+        else if (risk >= 50) { confidence = Math.Min(confidence, 65); capReason ??= $"Risk {risk} ≥ 50"; }
+
+        // --- Earnings proximity risk ---
+        // Earnings within 3 days make any directional prediction unreliable.
+        // The binary event dominates all technical/catalyst signals.
+        var earningsNear = snapshot.NewsContext.Any(n =>
+            n.CatalystType == "earnings"
+            && n.Title.Contains("Earnings in", StringComparison.OrdinalIgnoreCase)
+            && (n.Title.Contains("0d") || n.Title.Contains("1d") || n.Title.Contains("2d") || n.Title.Contains("3d")));
+        if (earningsNear)
+        {
+            risk = Math.Max(risk, 70);
+            confidence = Math.Min(confidence, 45);
+            capReason = "Earnings within 3 days — binary event";
+            signals.Add("Risk: earnings imminent — directional prediction unreliable");
+        }
 
         // --- Actionability ---
         var (actionScore, actionTier, actionReasons) = ComputeActionability(
@@ -224,11 +246,26 @@ public static class ScoringEngine
         int confidence = initial.Confidence;
         string? capReason = breakdown.ConfidenceCap;
 
-        if (riskReward is double rr and > 0 && rr < 1.2 && confidence > 55)
+        if (riskReward is double rr and > 0)
         {
-            confidence = 55;
-            capReason = $"R/R {rr:F2} < 1.2";
-            reasons.Add($"Confidence capped at 55 — risk/reward {rr:F2} below 1.2");
+            if (rr < 0.8)
+            {
+                confidence = Math.Min(confidence, 35);
+                capReason = $"R/R {rr:F2} < 0.8 — poor risk/reward";
+                reasons.Add($"Confidence capped at 35 — risk/reward {rr:F2} unacceptable");
+            }
+            else if (rr < 1.2 && confidence > 55)
+            {
+                confidence = 55;
+                capReason = $"R/R {rr:F2} < 1.2";
+                reasons.Add($"Confidence capped at 55 — risk/reward {rr:F2} below 1.2");
+            }
+            else if (rr < 1.5 && confidence > 70)
+            {
+                confidence = 70;
+                capReason = $"R/R {rr:F2} < 1.5";
+                reasons.Add($"Confidence capped at 70 — risk/reward {rr:F2} mediocre");
+            }
         }
 
         var catalystNet = breakdown.CatalystBullish - breakdown.CatalystBearish;

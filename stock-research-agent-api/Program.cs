@@ -113,6 +113,9 @@ builder.Services.AddSingleton<OptionsDataService>();
     // Paper Options — enhanced flow for /paper-options page
     builder.Services.AddSingleton<PaperOptionsService>();
 
+    // Data hygiene — scheduled cleanup of bad/stale data
+    builder.Services.AddSingleton<DataHygieneService>();
+
     // StockFit — fundamentals, filings, insider, institutional. Never used
     // for live quotes / bars / technicals / options chains (those stay with
     // Twelve Data + MarketData.app). Marked unavailable if key missing.

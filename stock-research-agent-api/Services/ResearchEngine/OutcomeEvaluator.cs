@@ -1,3 +1,4 @@
+using System.Text.Json;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Supabase;
@@ -134,7 +135,9 @@ public class OutcomeEvaluator
         if (invalidationHit || invalidationHitCheck == true) outcomeScore -= 10;
         outcomeScore = Math.Clamp(outcomeScore, 0, 100);
 
-        var lesson = GenerateLesson(prediction, percentMove, directionCorrect, invalidationHit);
+        var lesson = GenerateLesson(prediction, percentMove, directionCorrect, invalidationHit,
+            targetHit, stopHit, Math.Round(maxFavorable, 2), Math.Round(maxAdverse, 2),
+            prediction.RiskRewardRatio);
 
         var summaryParts = new List<string>
         {
@@ -512,31 +515,158 @@ public class OutcomeEvaluator
     // -----------------------------------------------------------------------
 
     private static string GenerateLesson(
-        PredictionCandidate prediction, double percentMove, bool? directionCorrect, bool invalidationHit)
+        PredictionCandidate prediction, double percentMove, bool? directionCorrect, bool invalidationHit,
+        bool? targetHit, bool? stopHit, double maxFavorable, double maxAdverse,
+        double? riskRewardRatio)
     {
         var parts = new List<string>();
         var sign = percentMove > 0 ? "+" : "";
+        var absMove = Math.Abs(percentMove);
 
+        // Header: outcome
         if (directionCorrect == true)
-        {
-            parts.Add($"{prediction.PredictionType} prediction on {prediction.Ticker} was correct ({sign}{percentMove:F2}%).");
-            if (Math.Abs(percentMove) > 3)
-                parts.Add("Strong move -- signals used were reliable for this setup.");
-        }
+            parts.Add($"{prediction.PredictionType} on {prediction.Ticker} was correct ({sign}{percentMove:F2}%).");
         else if (directionCorrect == false)
+            parts.Add($"{prediction.PredictionType} on {prediction.Ticker} was wrong ({sign}{percentMove:F2}%).");
+        else
+            parts.Add($"Neutral/watch on {prediction.Ticker}: {sign}{percentMove:F2}%.");
+
+        if (invalidationHit)
+            parts.Add("Invalidation triggered — thesis broke down.");
+
+        // Decompose scoring buckets from ScoreDebugJson
+        ScoringBreakdown? breakdown = null;
+        if (!string.IsNullOrEmpty(prediction.ScoreDebugJson))
         {
-            parts.Add($"{prediction.PredictionType} prediction on {prediction.Ticker} was wrong ({sign}{percentMove:F2}%).");
-            if (invalidationHit) parts.Add("Invalidation rule was triggered -- the thesis broke down.");
-            if (prediction.MissingDataWarnings.Count > 0)
-                parts.Add($"Missing data may have contributed: {string.Join(", ", prediction.MissingDataWarnings)}.");
+            try
+            {
+                breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(
+                    prediction.ScoreDebugJson,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch { /* fall through to generic lesson */ }
+        }
+
+        if (breakdown is not null)
+        {
+            var dir = prediction.PredictionType == PredictionType.bullish ? "bullish" : "bearish";
+            var buckets = new (string Name, double Bull, double Bear)[]
+            {
+                ("Trend",          breakdown.TrendBullish,          breakdown.TrendBearish),
+                ("Momentum",       breakdown.MomentumBullish,       breakdown.MomentumBearish),
+                ("Volume",         breakdown.VolumeBullish,         breakdown.VolumeBearish),
+                ("Volatility",     breakdown.VolatilityBullish,     breakdown.VolatilityBearish),
+                ("MarketContext",  breakdown.MarketContextBullish,  breakdown.MarketContextBearish),
+                ("Catalyst",       breakdown.CatalystBullish,       breakdown.CatalystBearish),
+                ("Learning",       breakdown.LearningBullish,       breakdown.LearningBearish),
+                ("ResearchSignal", breakdown.ResearchSignalBullish, breakdown.ResearchSignalBearish),
+            };
+
+            // Which buckets supported vs opposed the predicted direction?
+            var supporting = new List<(string Name, double Strength)>();
+            var opposing = new List<(string Name, double Strength)>();
+            foreach (var (name, bull, bear) in buckets)
+            {
+                var diff = bull - bear;
+                if (Math.Abs(diff) < 1) continue; // negligible
+                var supportsPrediction = dir == "bullish" ? diff > 0 : diff < 0;
+                if (supportsPrediction)
+                    supporting.Add((name, Math.Abs(diff)));
+                else
+                    opposing.Add((name, Math.Abs(diff)));
+            }
+
+            supporting.Sort((a, b) => b.Strength.CompareTo(a.Strength));
+            opposing.Sort((a, b) => b.Strength.CompareTo(a.Strength));
+
+            if (directionCorrect == false)
+            {
+                // Wrong prediction — identify what misled and what warned us
+                if (supporting.Count > 0)
+                    parts.Add($"Misleading signals: {string.Join(", ", supporting.Select(s => $"{s.Name}(+{s.Strength:F0})")).TrimEnd()}.");
+                if (opposing.Count > 0)
+                    parts.Add($"Ignored warnings: {string.Join(", ", opposing.Select(s => $"{s.Name}(-{s.Strength:F0})")).TrimEnd()}.");
+                else
+                    parts.Add("No opposing signals fired — all buckets agreed on the wrong direction.");
+
+                // Overconfidence check
+                if (prediction.ConfidenceScore >= 80 && absMove > 1)
+                    parts.Add($"Overconfident: {prediction.ConfidenceScore} confidence on a {absMove:F1}% adverse move.");
+                else if (prediction.ConfidenceScore >= 60 && absMove > 2)
+                    parts.Add($"Confidence {prediction.ConfidenceScore} was too high for a {absMove:F1}% miss.");
+
+                // Direction margin analysis
+                if (breakdown.DirectionMargin < 10)
+                    parts.Add($"Direction margin was only {breakdown.DirectionMargin:F0} — close call that went wrong.");
+
+                // Conflicting buckets
+                if (breakdown.ConflictingBuckets >= 3)
+                    parts.Add($"{breakdown.ConflictingBuckets} buckets conflicted — mixed signals should lower confidence.");
+            }
+            else if (directionCorrect == true)
+            {
+                // Correct — highlight what worked
+                if (supporting.Count > 0)
+                    parts.Add($"Key drivers: {string.Join(", ", supporting.Take(3).Select(s => $"{s.Name}(+{s.Strength:F0})")).TrimEnd()}.");
+
+                if (absMove > 3 && prediction.ConfidenceScore >= 70)
+                    parts.Add("High-confidence call with strong follow-through — reinforce these signals.");
+                else if (absMove < 0.5)
+                    parts.Add("Direction right but move was negligible — not a meaningful signal.");
+
+                // Underconfidence check
+                if (prediction.ConfidenceScore < 50 && absMove > 3)
+                    parts.Add($"Underconfident: only {prediction.ConfidenceScore} confidence on a {absMove:F1}% move — trust these signals more.");
+            }
+
+            // Aligned vs conflicting summary
+            parts.Add($"Buckets: {breakdown.AlignedBuckets} aligned, {breakdown.ConflictingBuckets} conflicting. Confirmation: {breakdown.ConfirmationMultiplier:F2}x.");
+
+            // Data quality factor
+            if (breakdown.DataQualityFactor < 0.8)
+                parts.Add($"Low data quality ({breakdown.DataQualityFactor:F2}) — fill missing data sources to improve accuracy.");
+
+            // Confidence cap
+            if (!string.IsNullOrEmpty(breakdown.ConfidenceCap))
+                parts.Add($"Confidence was capped: {breakdown.ConfidenceCap}.");
         }
         else
         {
-            parts.Add($"Neutral/watch prediction on {prediction.Ticker}: {sign}{percentMove:F2}% move.");
+            // No breakdown available — fall back to basic info
+            if (prediction.MissingDataWarnings.Count > 0)
+                parts.Add($"Missing data: {string.Join(", ", prediction.MissingDataWarnings)}.");
+            parts.Add($"Sources: {(prediction.DataSourcesUsed.Count > 0 ? string.Join(", ", prediction.DataSourcesUsed) : "none")}.");
+            parts.Add($"Confidence {prediction.ConfidenceScore}, risk {prediction.RiskScore}.");
         }
 
-        parts.Add($"Data sources: {(prediction.DataSourcesUsed.Count > 0 ? string.Join(", ", prediction.DataSourcesUsed) : "none")}.");
-        parts.Add($"Confidence was {prediction.ConfidenceScore}, risk was {prediction.RiskScore}.");
+        // --- Risk management analysis (always runs, independent of breakdown) ---
+
+        // Stop/target discipline
+        if (stopHit == true)
+            parts.Add($"Stop was triggered — max adverse {maxAdverse:F1}% exceeded stop level.");
+        if (targetHit == true)
+            parts.Add($"Target was hit — max favorable reached {maxFavorable:F1}%.");
+        else if (directionCorrect == true && maxFavorable > absMove * 2)
+            parts.Add($"Intraday high was {maxFavorable:F1}% favorable but closed at only {absMove:F1}% — consider trailing stops.");
+
+        // R:R outcome analysis
+        if (riskRewardRatio is double rrActual)
+        {
+            if (rrActual < 1.0 && directionCorrect == false)
+                parts.Add($"R:R was {rrActual:F2} — risked more than potential reward on a losing trade.");
+            else if (rrActual >= 2.0 && directionCorrect == true)
+                parts.Add($"R:R {rrActual:F2} with correct direction — good risk-managed win.");
+        }
+
+        // Max adverse vs max favorable — was this a whipsaw?
+        if (maxAdverse > 2 && maxFavorable > 2)
+            parts.Add($"Whipsaw: {maxFavorable:F1}% favorable and {maxAdverse:F1}% adverse — high intraday volatility.");
+
+        // Risk score sanity check
+        if (prediction.RiskScore <= 30 && absMove > 3 && directionCorrect == false)
+            parts.Add($"Risk was scored only {prediction.RiskScore} but move was {absMove:F1}% adverse — risk model underestimated.");
+        if (prediction.RiskScore >= 60 && prediction.ConfidenceScore >= 70)
+            parts.Add($"Contradictory: confidence {prediction.ConfidenceScore} with risk {prediction.RiskScore} — these should be inversely related.");
 
         return string.Join(" ", parts);
     }

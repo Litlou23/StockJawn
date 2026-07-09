@@ -1,5 +1,7 @@
 import AppShell from '@/components/AppShell';
 
+export const dynamic = 'force-dynamic';
+
 interface SignalPerf {
   signalName: string;
   direction: string;

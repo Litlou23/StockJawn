@@ -29,6 +29,7 @@ public class PredictionGenerator
 {
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
+    private readonly PaperStockCandidateRepository _stockRepo;
     private readonly ResearchSignalService _signalService;
     private readonly EnsembleScoringService _ensemble;
     private readonly TradeSetupEngine _setupEngine;
@@ -41,6 +42,7 @@ public class PredictionGenerator
     public PredictionGenerator(
         MarketDataService marketData,
         ResearchRepository repo,
+        PaperStockCandidateRepository stockRepo,
         ResearchSignalService signalService,
         EnsembleScoringService ensemble,
         TradeSetupEngine setupEngine,
@@ -51,6 +53,7 @@ public class PredictionGenerator
     {
         _marketData = marketData;
         _repo = repo;
+        _stockRepo = stockRepo;
         _signalService = signalService;
         _ensemble = ensemble;
         _setupEngine = setupEngine;
@@ -344,10 +347,11 @@ public class PredictionGenerator
                     ? "Invalidate if price rises >2% from entry or bullish catalyst emerges"
                     : "Invalidate if major catalyst changes thesis direction");
 
-        // ── Step 4: ATR-based price prediction engine ──
+        // ── Step 4: Dynamic time window + ATR-based price prediction engine ──
+        var timeWindow = DetermineTimeWindow(scoring.Breakdown);
         var entryPrice = snapshot.Quote?.Price;
         var priceCalc = ComputeAtrPriceForecast(
-            entryPrice, predType, "1_day", snapshot, confidence, risk);
+            entryPrice, predType, timeWindow, snapshot, confidence, risk);
 
         // Second-pass finalization: apply R/R-aware caps + actionability tier
         // now that we know the risk/reward ratio.
@@ -373,6 +377,58 @@ public class PredictionGenerator
 
         confidence = scoring.Confidence;
 
+        // ── Per-ticker confidence reliability factor (Bayesian-smoothed) ──
+        // Uses prediction_outcomes for real accuracy (not stock_learning_stats which only tracks paper candidates)
+        try
+        {
+            var tickerOutcomes = await _repo.GetTickerAccuracyFromOutcomesAsync(ticker);
+
+            if (tickerOutcomes is not null && tickerOutcomes.Value.Total >= 5)
+            {
+                int n = tickerOutcomes.Value.Total;
+                double tickerAccuracy = (double)tickerOutcomes.Value.Correct / n;
+
+                // Global accuracy from prediction stats
+                var globalStats = await _repo.GetPredictionStatsAsync();
+                double globalAccuracy = globalStats.EvaluatedPredictions > 0
+                    ? (double)globalStats.CorrectPredictions / globalStats.EvaluatedPredictions
+                    : 0.50;
+
+                // Bayesian smoothing: weight = n / (n + prior_strength)
+                const int priorStrength = 10;
+                double sampleWeight = (double)n / (n + priorStrength);
+                double effectiveAccuracy = sampleWeight * tickerAccuracy + (1 - sampleWeight) * globalAccuracy;
+
+                // Hard cutoff: if we're terrible at this ticker, downgrade to watch_only
+                if (effectiveAccuracy < 0.25 && n >= 10)
+                {
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: downgrading to watch_only — effective accuracy {Acc:F0}% over {N} predictions is below 25% threshold",
+                        ticker, effectiveAccuracy * 100, n);
+                    predType = "watch_only";
+                    confidence = Math.Min(confidence, 20);
+                }
+                else
+                {
+                    double reliabilityFactor = 0.6 + 0.4 * Math.Clamp(effectiveAccuracy / 0.8, 0, 1);
+
+                    if (reliabilityFactor < 0.95)
+                    {
+                        var prevConfidence = confidence;
+                        confidence = (int)Math.Round(confidence * reliabilityFactor);
+                        confidence = Math.Clamp(confidence, 10, 85);
+                        _logger.LogInformation(
+                            "[prediction] {Ticker}: ticker reliability {Factor:F2} (accuracy={Acc:F0}%, n={N}, effective={Eff:F0}%) — confidence {Prev}→{New}",
+                            ticker, reliabilityFactor, tickerAccuracy * 100, n, effectiveAccuracy * 100, prevConfidence, confidence);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[prediction] Ticker reliability lookup skipped for {Ticker}", ticker);
+        }
+
         // Track downgrade reasons for watch_only calibration learning.
         // Start with ScoringEngine's actionability reasons, then add R:R downgrade if applicable.
         var downgradeReasons = new List<string>();
@@ -382,14 +438,14 @@ public class PredictionGenerator
                 downgradeReasons.Add(reason);
         }
 
-        // If R:R ratio is extremely poor, downgrade to watch_only.
-        // Threshold is 0.5 (not 1.5) — in learning mode we want to observe
-        // predictions with marginal R:R so the learning engine can calibrate.
-        if (priceCalc.RiskRewardRatio is double rr and < 0.5
+        // If R:R ratio is poor, downgrade to watch_only.
+        // Threshold is 0.8 — below this the trade doesn't make sense from a
+        // risk management perspective regardless of directional conviction.
+        if (priceCalc.RiskRewardRatio is double rr and < 0.8
             && (predType == "bullish" || predType == "bearish"))
         {
             predType = "watch_only";
-            var rrReason = $"Downgraded to watch_only: R:R ratio {rr:F2} < 0.5 minimum";
+            var rrReason = $"Downgraded to watch_only: R:R ratio {rr:F2} < 0.8 — risk exceeds potential reward";
             priceCalc.Warnings.Add(rrReason);
             downgradeReasons.Add(rrReason);
         }
@@ -401,7 +457,7 @@ public class PredictionGenerator
             Ticker = ticker,
             PredictionType = Enum.TryParse<PredictionType>(predType, out var pt) ? pt : PredictionType.neutral_no_edge,
             AssetType = PredictionAssetType.stock,
-            TimeWindow = "1_day",
+            TimeWindow = timeWindow,
             ConfidenceScore = confidence,
             ImportanceScore = Math.Min(Math.Abs((int)totalScore), 100),
             RiskScore = risk,
@@ -541,11 +597,13 @@ public class PredictionGenerator
     private static string BuildExplanationSystemPrompt()
     {
         return """
-            You are a stock market analyst writing prediction explanations.
+            You are a stock market analyst writing prediction explanations with
+            strong risk management discipline.
 
             IMPORTANT: You do NOT decide the prediction direction, confidence, or risk.
             Those have already been computed by the scoring engine from real market signals.
-            Your job is to EXPLAIN WHY those signals led to this prediction.
+            Your job is to EXPLAIN WHY those signals led to this prediction AND to
+            frame the trade in terms of risk management.
 
             You MUST respond with valid JSON matching this schema:
             {
@@ -566,6 +624,18 @@ public class PredictionGenerator
             - Invalidation rule should reference specific price levels when possible.
             - predicted_price must be a realistic price based on the current price, signals, and key levels.
             - predicted_move_percent should match the direction (positive for bullish, negative for bearish).
+
+            Risk management principles — apply these when writing explanations:
+            - A high-confidence call with a poor risk/reward ratio is NOT a good trade.
+            - Earnings within 3 days dominate all other signals — acknowledge binary event risk.
+            - If most signals agree but one major bucket (trend or market context) opposes,
+              call out the conflict explicitly in the bearish/bullish case.
+            - Reference the stop level and invalidation price in context of ATR — a stop
+              that's less than 1 ATR away will likely get triggered by normal volatility.
+            - If data quality is low (few indicators computed), say so in the thesis.
+              High confidence on sparse data is reckless.
+            - Never present a prediction as a certainty. Use language that reflects the
+              probability: "signals favor", "setup suggests", "weight of evidence leans".
             """;
     }
 
@@ -702,6 +772,42 @@ public class PredictionGenerator
 
     // Old ScoreTechnicalSignals, ScoreCatalystSignals, DeterminePredictionType,
     // CalculateConfidence, CalculateRisk removed — replaced by ScoringEngine.Score()
+
+    // -----------------------------------------------------------------------
+    // Dynamic time window assignment based on signal velocity
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Determines the evaluation time window based on the signal profile.
+    /// Uses a "move velocity" score: high momentum + volume + catalyst = fast move (short window),
+    /// high trend + research = slow move (longer window).
+    /// </summary>
+    private static string DetermineTimeWindow(ScoringBreakdown b)
+    {
+        // Velocity components: signals that suggest price moves quickly
+        double momentumSpeed = Math.Max(Math.Abs(b.MomentumScore), 0);
+        double volumeSpeed = Math.Max(Math.Abs(b.VolumeScore), 0);
+        double catalystSpeed = Math.Max(Math.Abs(b.CatalystScore), 0);
+
+        // Persistence components: signals that suggest price moves slowly
+        double trendPersistence = Math.Max(Math.Abs(b.TrendScore), 0);
+        double researchPersistence = Math.Max(Math.Abs(b.ResearchSignalScore), 0);
+
+        // Velocity score: 0-100 range
+        // High velocity = fast-moving setup, low velocity = slow-moving setup
+        double velocity = (momentumSpeed * 1.2 + volumeSpeed * 1.0 + catalystSpeed * 1.5)
+                        - (trendPersistence * 0.3 + researchPersistence * 0.5);
+        velocity = Math.Clamp(velocity, 0, 100);
+
+        return velocity switch
+        {
+            >= 90 => PredictionTimeWindows.OneDay,      // Extreme only: major catalyst + momentum spike
+            >= 55 => PredictionTimeWindows.ThreeDay,     // Fast: strong momentum/catalyst
+            >= 30 => PredictionTimeWindows.OneWeek,      // Normal: trend-driven
+            >= 15 => PredictionTimeWindows.OneMonth,     // Slow: research/fundamental
+            _     => PredictionTimeWindows.OneWeek,      // Default
+        };
+    }
 
     // -----------------------------------------------------------------------
     // ATR-based price prediction engine

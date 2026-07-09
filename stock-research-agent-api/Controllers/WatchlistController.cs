@@ -88,6 +88,7 @@ public class WatchlistJobController : ControllerBase
     private readonly UniverseDiscoveryService _universeDiscovery;
     private readonly ResearchSignalService _signalService;
     private readonly JobStatusTracker _jobStatus;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _config;
     private readonly ILogger<WatchlistJobController> _logger;
 
@@ -96,6 +97,7 @@ public class WatchlistJobController : ControllerBase
         UniverseDiscoveryService universeDiscovery,
         ResearchSignalService signalService,
         JobStatusTracker jobStatus,
+        IServiceScopeFactory scopeFactory,
         IConfiguration config,
         ILogger<WatchlistJobController> logger)
     {
@@ -103,6 +105,7 @@ public class WatchlistJobController : ControllerBase
         _universeDiscovery = universeDiscovery;
         _signalService = signalService;
         _jobStatus = jobStatus;
+        _scopeFactory = scopeFactory;
         _config = config;
         _logger = logger;
     }
@@ -135,83 +138,70 @@ public class WatchlistJobController : ControllerBase
     /// <summary>
     /// POST /api/jobs/run-weekly-research
     /// Scans the universe, scores candidates, builds the dynamic watchlist.
+    /// Now runs in background (fire-and-forget) to avoid HTTP timeouts.
     /// </summary>
     [HttpPost("run-weekly-research")]
-    public async Task<IActionResult> RunWeeklyResearch([FromBody] JobTriggerRequest? trigger)
+    public IActionResult RunWeeklyResearch([FromBody] JobTriggerRequest? trigger)
     {
         if (!ValidateJobSecret())
             return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
-        _logger.LogInformation("[jobs] Weekly research triggered by {Trigger}", trigger?.Trigger ?? "unknown");
+        _logger.LogInformation("[jobs] Weekly research triggered by {Trigger} — running in background", trigger?.Trigger ?? "unknown");
         _jobStatus.MarkStarted("run-weekly-research");
 
-        try
+        _ = Task.Run(async () =>
         {
-            // Discover universe from news + earnings + market data
-            var discovery = await _universeDiscovery.DiscoverUniverseAsync();
-            var universe = discovery.Universe.Select(t => t.Ticker).ToArray();
-            _logger.LogInformation("[jobs] Discovered {Count} tickers: [{Tickers}]", universe.Length, string.Join(", ", universe));
-
-            if (universe.Length == 0)
+            try
             {
-                _jobStatus.MarkCompleted("run-weekly-research", "0 tickers discovered");
-                return Ok(new
+                using var scope = _scopeFactory.CreateScope();
+                var universeDiscovery = scope.ServiceProvider.GetRequiredService<UniverseDiscoveryService>();
+                var signalService = scope.ServiceProvider.GetRequiredService<ResearchSignalService>();
+                var watchlistService = scope.ServiceProvider.GetRequiredService<DynamicWatchlistService>();
+
+                // Discover universe from news + earnings + market data
+                var discovery = await universeDiscovery.DiscoverUniverseAsync();
+                var universe = discovery.Universe.Select(t => t.Ticker).ToArray();
+                _logger.LogInformation("[jobs] Discovered {Count} tickers: [{Tickers}]", universe.Length, string.Join(", ", universe));
+
+                if (universe.Length == 0)
                 {
-                    runId = (string?)null,
-                    activeWatchlistCount = 0,
-                    added = Array.Empty<object>(),
-                    warnings = new[] { "Universe discovery returned 0 tickers. Check RSS feeds and Finnhub API key." },
-                    discovery = new
-                    {
-                        tickersDiscovered = 0,
-                        rssArticlesScanned = discovery.RssArticlesScanned,
-                        earningsFound = discovery.EarningsFound,
-                        errors = discovery.Errors,
-                    },
-                });
+                    _jobStatus.MarkCompleted("run-weekly-research", "0 tickers discovered");
+                    return;
+                }
+
+                // Collect research signals (congress, etc.) before scoring
+                var signalResult = await signalService.CollectAllSignalsAsync();
+                _logger.LogInformation("[jobs] Research signals: {Persisted} persisted, {Expired} expired, {Errors} errors",
+                    signalResult.Persisted, signalResult.Expired, signalResult.Errors.Count);
+
+                // Pass discovery context so scoring can use news/earnings data
+                var discoveryContext = discovery.Universe.Select(t =>
+                    new DynamicWatchlistService.TickerDiscoveryContext(
+                        t.Ticker, t.DiscoveryScore, t.HasUpcomingEarnings, t.EarningsDate,
+                        t.RssMentions, t.FinnhubMentions, t.TopReason)).ToList();
+
+                var result = await watchlistService.BuildDynamicWatchlistAsync(universe, discoveryContext: discoveryContext);
+
+                _jobStatus.MarkCompleted("run-weekly-research",
+                    $"{result.ActiveWatchlistCount} active, {result.Added.Count} added, {result.ArchivedItems.Count} archived");
+
+                _logger.LogInformation("[jobs] Weekly research completed: {Active} active, {Added} added, {Archived} archived",
+                    result.ActiveWatchlistCount, result.Added.Count, result.ArchivedItems.Count);
             }
-
-            // Collect research signals (congress, etc.) before scoring
-            var signalResult = await _signalService.CollectAllSignalsAsync();
-            _logger.LogInformation("[jobs] Research signals: {Persisted} persisted, {Expired} expired, {Errors} errors",
-                signalResult.Persisted, signalResult.Expired, signalResult.Errors.Count);
-
-            // Pass discovery context so scoring can use news/earnings data
-            var discoveryContext = discovery.Universe.Select(t =>
-                new DynamicWatchlistService.TickerDiscoveryContext(
-                    t.Ticker, t.DiscoveryScore, t.HasUpcomingEarnings, t.EarningsDate,
-                    t.RssMentions, t.FinnhubMentions, t.TopReason)).ToList();
-
-            var result = await _watchlistService.BuildDynamicWatchlistAsync(universe, discoveryContext: discoveryContext);
-
-            _jobStatus.MarkCompleted("run-weekly-research",
-                $"{result.ActiveWatchlistCount} active, {result.Added.Count} added, {result.ArchivedItems.Count} archived");
-
-            return Ok(new
+            catch (Exception ex)
             {
-                runId = result.RunId,
-                activeWatchlistCount = result.ActiveWatchlistCount,
-                added = result.Added.Select(i => new { i.Ticker, i.TotalScore, i.WatchReason }),
-                kept = result.Kept.Select(i => new { i.Ticker, i.TotalScore }),
-                reviewNeeded = result.ReviewNeeded.Select(i => new { i.Ticker, i.TotalScore, i.SwapReason }),
-                swapCandidates = result.SwapCandidates.Select(i => new { i.Ticker, i.TotalScore, i.SwapReason }),
-                archived = result.ArchivedItems.Select(i => new { i.Ticker, i.SwapReason }),
-                warnings = result.Warnings,
-                dataQualitySummary = result.DataQuality,
-                discovery = new
-                {
-                    tickersDiscovered = discovery.Universe.Count,
-                    rssArticlesScanned = discovery.RssArticlesScanned,
-                    earningsFound = discovery.EarningsFound,
-                    topTickers = discovery.Universe.Take(10).Select(t => new { t.Ticker, t.DiscoveryScore, t.TopReason }),
-                    errors = discovery.Errors,
-                },
-                persisted = result.Persisted,
-            });
-        }
-        catch (Exception ex)
+                _logger.LogError(ex, "[jobs] Weekly research failed");
+                _jobStatus.MarkFailed("run-weekly-research", ex.Message);
+            }
+        });
+
+        return Accepted(new
         {
-            _jobStatus.MarkFailed("run-weekly-research", ex.Message);
-            throw;
-        }
-    }}
+            ok = true,
+            accepted = true,
+            runType = "weekly_research",
+            status = "running",
+            message = "Weekly research accepted — running in background. Poll /api/jobs/status for progress.",
+        });
+    }
+}

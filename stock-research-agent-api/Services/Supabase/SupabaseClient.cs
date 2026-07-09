@@ -274,6 +274,35 @@ public class SupabaseClient
     }
 
     // -----------------------------------------------------------------------
+    // DELETE
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> DeleteAsync(string table, string filter)
+    {
+        if (!_configured) return false;
+
+        var url = $"{_baseUrl}/{table}?{filter}";
+        var req = new HttpRequestMessage(HttpMethod.Delete, url);
+        req.Headers.Add("Prefer", "return=minimal");
+
+        try
+        {
+            var resp = await _http.SendAsync(req);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var body = await resp.Content.ReadAsStringAsync();
+                _logger.LogWarning("[supabase] DELETE {Table} failed: {Status} {Body}", table, resp.StatusCode, body);
+            }
+            return resp.IsSuccessStatusCode;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[supabase] DELETE {Table} error", table);
+            return false;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // UPSERT
     // -----------------------------------------------------------------------
 

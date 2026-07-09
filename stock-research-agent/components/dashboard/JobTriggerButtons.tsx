@@ -66,6 +66,20 @@ const JOBS: JobDef[] = [
       'Saving results...',
     ],
   },
+  {
+    id: 'run-data-hygiene',
+    label: 'Data Hygiene',
+    description: 'Clean bad data: false losses, stale predictions, impossible values',
+    fireAndForget: true,
+    steps: [
+      'Checking for false option losses...',
+      'Reopening bad evaluations...',
+      'Expiring stale predictions...',
+      'Fixing impossible values...',
+      'Cleaning orphaned records...',
+      'Pruning low-sample stats...',
+    ],
+  },
 ];
 
 type JobState = 'idle' | 'running' | 'background' | 'done' | 'error';

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
@@ -1029,6 +1030,35 @@ public class DynamicPickOrchestrator
     // Helpers: evaluate one paper stock candidate
     // -----------------------------------------------------------------------
 
+    /// <summary>
+    /// Minimum hours before a paper stock candidate should be evaluated,
+    /// based on its timeframe. Matches the prediction evaluator's logic.
+    /// </summary>
+    private static readonly Dictionary<StockTimeframe, int> MinEvalHours = new()
+    {
+        [StockTimeframe.one_day] = 6,
+        [StockTimeframe.two_day] = 30,
+        [StockTimeframe.one_week] = 120,      // 5 trading days
+        [StockTimeframe.one_month] = 504,      // 21 trading days
+        [StockTimeframe.three_month] = 1512,   // 63 trading days
+        [StockTimeframe.six_month] = 3024,     // 126 trading days
+        [StockTimeframe.one_year] = 6048,      // 252 trading days
+    };
+
+    /// <summary>
+    /// Maximum hours before a candidate expires (not evaluated, just closed).
+    /// </summary>
+    private static readonly Dictionary<StockTimeframe, int> MaxEvalHours = new()
+    {
+        [StockTimeframe.one_day] = 48,
+        [StockTimeframe.two_day] = 96,
+        [StockTimeframe.one_week] = 240,
+        [StockTimeframe.one_month] = 1008,
+        [StockTimeframe.three_month] = 3024,
+        [StockTimeframe.six_month] = 6048,
+        [StockTimeframe.one_year] = 12096,
+    };
+
     private async Task<bool> EvaluateStockCandidateAsync(PaperStockCandidate c)
     {
         if (c.Status == PaperStockStatus.watch_only || c.Status == PaperStockStatus.unavailable)
@@ -1036,6 +1066,26 @@ public class DynamicPickOrchestrator
 
         if (!PredictionCategoryHelper.IsDirectional(c.PredictionType))
             return false;
+
+        // ── Timeframe gate: don't evaluate too early ──
+        var ageHours = (DateTimeOffset.UtcNow - c.CreatedAt).TotalHours;
+        var minHours = MinEvalHours.GetValueOrDefault(c.Timeframe, 6);
+        var maxHours = MaxEvalHours.GetValueOrDefault(c.Timeframe, 240);
+
+        if (ageHours < minHours)
+        {
+            _logger.LogDebug("[dynamic] {Ticker}: too early to evaluate ({Age:F1}h < {Min}h for {Tf})",
+                c.Ticker, ageHours, minHours, c.Timeframe);
+            return false;
+        }
+
+        if (ageHours > maxHours)
+        {
+            _logger.LogInformation("[dynamic] {Ticker}: expired ({Age:F0}h > {Max}h for {Tf})",
+                c.Ticker, ageHours, maxHours, c.Timeframe);
+            await _stockRepo.UpdateCandidateStatusAsync(c.Id, PaperStockStatus.expired);
+            return false;
+        }
 
         if (c.EntryPrice is null or 0)
         {
@@ -1105,6 +1155,8 @@ public class DynamicPickOrchestrator
             : ((quote.High - entry) / entry) * 100;
 
         var lesson = BuildStockLesson(c, move, directionCorrect, targetHit, stopHit);
+        var failureReason = directionCorrect == false
+            ? BuildFailureReason(c) : null;
 
         var outcome = new PaperStockOutcome
         {
@@ -1125,12 +1177,59 @@ public class DynamicPickOrchestrator
                              $"Target hit: {targetHit}. Stop hit: {stopHit}. " +
                              $"Max favorable: {maxFavorable:F2}%, max adverse: {maxAdverse:F2}%.",
             Lesson = lesson,
+            FailureReason = failureReason,
         };
 
         await _stockRepo.SaveOutcomeAsync(outcome);
         await _stockRepo.UpdateCandidateStatusAsync(c.Id, PaperStockStatus.evaluated);
         await UpdateStockLearningStatsAsync(c, outcome);
         return true;
+    }
+
+    /// <summary>
+    /// Identifies which signal buckets were the likely culprits for a wrong prediction.
+    /// Uses responsibility-weighted attribution: buckets that contributed more to the
+    /// wrong prediction get more blame.
+    /// </summary>
+    private static string BuildFailureReason(PaperStockCandidate c)
+    {
+        bool predBullish = c.PredictionType == PredictionType.bullish;
+        var buckets = new (string Name, double NetScore)[]
+        {
+            ("Trend", c.TrendScore),
+            ("Volume", c.VolumeScore),
+            ("Market context", c.MarketContextScore),
+            ("Catalyst", c.CatalystScore),
+        };
+
+        // Buckets that agreed with the wrong prediction (culprits)
+        var culprits = buckets
+            .Where(b => Math.Abs(b.NetScore) >= 3
+                && (predBullish ? b.NetScore > 0 : b.NetScore < 0))
+            .OrderByDescending(b => Math.Abs(b.NetScore))
+            .ToList();
+
+        // Buckets that correctly disagreed (they were right)
+        var correctDissenters = buckets
+            .Where(b => Math.Abs(b.NetScore) >= 3
+                && (predBullish ? b.NetScore < 0 : b.NetScore > 0))
+            .OrderByDescending(b => Math.Abs(b.NetScore))
+            .ToList();
+
+        var parts = new List<string>();
+
+        if (culprits.Count > 0)
+        {
+            var topCulprit = culprits[0];
+            parts.Add($"Biggest culprit: {topCulprit.Name} ({topCulprit.NetScore:+0;-0})");
+            if (culprits.Count > 1)
+                parts.Add($"Also contributed: {string.Join(", ", culprits.Skip(1).Select(b => $"{b.Name} ({b.NetScore:+0;-0})"))}");
+        }
+
+        if (correctDissenters.Count > 0)
+            parts.Add($"Correctly disagreed: {string.Join(", ", correctDissenters.Select(b => $"{b.Name} ({b.NetScore:+0;-0})"))}");
+
+        return parts.Count > 0 ? string.Join(". ", parts) + "." : "No clear signal culprit identified.";
     }
 
     private async Task UpdateStockLearningStatsAsync(PaperStockCandidate c, PaperStockOutcome o)
@@ -1152,6 +1251,93 @@ public class DynamicPickOrchestrator
         {
             if (string.IsNullOrWhiteSpace(k)) continue;
             await _stockRepo.UpsertLearningStatAsync(t, k, direction, move, o.OutcomeScore);
+        }
+
+        // ── Per-ticker per-bucket accuracy with responsibility-weighted attribution ──
+        await UpdateTickerBucketStatsAsync(c, o);
+    }
+
+    private async Task UpdateTickerBucketStatsAsync(PaperStockCandidate c, PaperStockOutcome o)
+    {
+        var direction = o.DirectionCorrect == true;
+        var move = o.PercentMove ?? 0;
+
+        // Net scores per bucket (positive = bullish contribution, negative = bearish)
+        var bucketScores = new (string Name, double NetScore)[]
+        {
+            ("trend", c.TrendScore),
+            ("momentum", 0), // not stored on candidate — skip for now
+            ("volume", c.VolumeScore),
+            ("volatility", 0), // not stored on candidate — skip for now
+            ("market_context", c.MarketContextScore),
+            ("catalyst", c.CatalystScore),
+        };
+
+        // Try to extract full breakdown from prediction's ScoreDebugJson if available
+        ScoringBreakdown? breakdown = null;
+        if (c.PredictionId is not null)
+        {
+            try
+            {
+                var prediction = await _researchRepo.GetPredictionByIdAsync(c.PredictionId);
+                if (prediction?.ScoreDebugJson is not null)
+                {
+                    breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(prediction.ScoreDebugJson,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+            }
+            catch { /* best effort */ }
+        }
+
+        if (breakdown is not null)
+        {
+            bucketScores =
+            [
+                ("trend", breakdown.TrendScore),
+                ("momentum", breakdown.MomentumScore),
+                ("volume", breakdown.VolumeScore),
+                ("volatility", breakdown.VolatilitySetupScore),
+                ("market_context", breakdown.MarketContextScore),
+                ("catalyst", breakdown.CatalystScore),
+                ("research_signal", breakdown.ResearchSignalScore),
+            ];
+        }
+
+        // Determine which buckets supported the prediction direction
+        bool predBullish = c.PredictionType == PredictionType.bullish;
+
+        // Calculate total positive evidence (buckets that agreed with the prediction)
+        double totalPositiveEvidence = 0;
+        foreach (var (_, net) in bucketScores)
+        {
+            bool bucketAgreed = predBullish ? net > 0 : net < 0;
+            if (bucketAgreed) totalPositiveEvidence += Math.Abs(net);
+        }
+
+        if (totalPositiveEvidence < 1) return; // no buckets meaningfully contributed
+
+        foreach (var (name, net) in bucketScores)
+        {
+            if (Math.Abs(net) < 3) continue; // ignore near-neutral buckets
+
+            bool bucketAgreed = predBullish ? net > 0 : net < 0;
+            string tickerBucketKey = $"{c.Ticker}|{name}";
+
+            if (bucketAgreed)
+            {
+                // Bucket supported the prediction — it shares responsibility for the outcome
+                // Weight by contribution: responsibility = |net| / totalPositiveEvidence
+                await _stockRepo.UpsertLearningStatAsync(
+                    "ticker_bucket", tickerBucketKey, direction, move, o.OutcomeScore);
+            }
+            else
+            {
+                // Bucket disagreed with prediction direction
+                // If prediction was wrong, this bucket was RIGHT — credit it
+                // If prediction was right, this bucket was wrong — penalize it
+                await _stockRepo.UpsertLearningStatAsync(
+                    "ticker_bucket", tickerBucketKey, !direction, move, o.OutcomeScore);
+            }
         }
     }
 

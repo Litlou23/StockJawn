@@ -264,6 +264,54 @@ public class ResearchRepository
         return rows.Select(MapOutcome).ToList();
     }
 
+    /// <summary>
+    /// Get ticker accuracy from both prediction_outcomes and paper_stock_outcomes,
+    /// deduplicated by prediction_id. Returns (total, correct) or null if no outcomes.
+    /// </summary>
+    public async Task<(int Total, int Correct)?> GetTickerAccuracyFromOutcomesAsync(string ticker)
+    {
+        // Collect outcomes from both sources, keyed by prediction_id to deduplicate
+        var seen = new Dictionary<string, bool>(); // prediction_id → direction_correct
+
+        // 1. prediction_outcomes (joined via prediction_candidates for ticker)
+        var predictions = await _db.SelectAsync("prediction_candidates",
+            filter: $"ticker=eq.{ticker}", select: "id", limit: 500);
+        if (predictions.Count > 0)
+        {
+            var predIds = predictions.Select(p => p["id"]?.ToString()).Where(id => id is not null).ToList();
+            if (predIds.Count > 0)
+            {
+                var idsFilter = $"prediction_id=in.({string.Join(",", predIds!)})";
+                var outcomeRows = await _db.SelectAsync("prediction_outcomes",
+                    filter: idsFilter, select: "prediction_id,direction_correct", limit: 500);
+                foreach (var row in outcomeRows)
+                {
+                    var pid = row["prediction_id"]?.ToString();
+                    if (pid is null) continue;
+                    var dc = row["direction_correct"];
+                    if (dc is null || dc.GetValueKind() == System.Text.Json.JsonValueKind.Null) continue;
+                    seen[pid] = row["direction_correct"]?.GetValue<bool>() == true;
+                }
+            }
+        }
+
+        // 2. paper_stock_outcomes (has ticker column directly)
+        var paperRows = await _db.SelectAsync("paper_stock_outcomes",
+            filter: $"ticker=eq.{ticker}", select: "prediction_id,direction_correct", limit: 500);
+        foreach (var row in paperRows)
+        {
+            var pid = row["prediction_id"]?.ToString();
+            if (pid is null) continue;
+            if (seen.ContainsKey(pid)) continue; // already counted from prediction_outcomes
+            var dc = row["direction_correct"];
+            if (dc is null || dc.GetValueKind() == System.Text.Json.JsonValueKind.Null) continue;
+            seen[pid] = dc.GetValue<bool>();
+        }
+
+        if (seen.Count == 0) return null;
+        return (seen.Count, seen.Values.Count(v => v));
+    }
+
     // -----------------------------------------------------------------------
     // Signal Performance
     // -----------------------------------------------------------------------
