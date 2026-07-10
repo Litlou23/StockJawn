@@ -393,23 +393,12 @@ public class DataHygieneService
             if (lowSample.Count > 0)
                 actions.Add($"Deleted {lowSample.Count} option learning stats with < 3 trades (noise)");
 
-            // research_signal_performance with total < 3
-            var lowSignal = await _db.SelectAsync("research_signal_performance",
-                filter: "total_predictions=lt.3",
-                select: "id",
-                limit: 200);
+            // NOTE: removed research_signal_performance cleanup — the learning engine
+            // now upserts aggregated stats. Deleting low-count rows was causing the
+            // signal performance table to stay permanently empty (hygiene runs after
+            // learning, deleting what was just created before enough data accumulates).
 
-            foreach (var row in lowSignal)
-            {
-                var id = row["id"]?.ToString();
-                if (id is null) continue;
-                await _db.DeleteAsync("research_signal_performance", $"id=eq.{id}");
-            }
-
-            if (lowSignal.Count > 0)
-                actions.Add($"Deleted {lowSignal.Count} signal performance stats with < 3 predictions (noise)");
-
-            return lowSample.Count + lowSignal.Count;
+            return lowSample.Count;
         }
         catch (Exception ex)
         {

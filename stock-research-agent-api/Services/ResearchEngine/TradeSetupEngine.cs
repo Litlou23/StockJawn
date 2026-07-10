@@ -143,15 +143,7 @@ public class TradeSetupEngine
         if (string.IsNullOrEmpty(prediction.ScoreDebugJson))
             return null;
 
-        ScoringBreakdown? breakdown;
-        try
-        {
-            breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(
-                prediction.ScoreDebugJson,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        }
-        catch { return null; }
-
+        var breakdown = ScoringBreakdownEnvelope.Parse(prediction.ScoreDebugJson);
         if (breakdown is null) return null;
 
         var reconstructed = new ScoringEngine.ScoringResult

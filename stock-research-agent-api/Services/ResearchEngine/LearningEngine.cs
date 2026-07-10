@@ -151,25 +151,22 @@ public class LearningEngine
             if (await _repo.HasObservationsForPredictionAsync(pred.Id))
                 continue;
 
-            // Parse score_debug_json
-            ScoringBreakdown? breakdown = null;
-            if (!string.IsNullOrEmpty(pred.ScoreDebugJson))
+            // Parse score_debug_json (handles both {"Breakdown":{...}} envelope and direct format)
+            var breakdown = ScoringBreakdownEnvelope.Parse(pred.ScoreDebugJson);
+
+            if (breakdown is null)
             {
-                try
-                {
-                    breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(pred.ScoreDebugJson,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning("[learning-engine] Failed to parse score_debug_json for {PredId}: {Error}",
-                        pred.Id, ex.Message);
-                    errors?.Add($"Parse error for {pred.Id}: {ex.Message}");
-                    continue;
-                }
+                _logger.LogWarning("[learning-engine] Failed to parse score_debug_json for prediction {Id}, json starts with: {Start}",
+                    pred.Id, pred.ScoreDebugJson?[..Math.Min(pred.ScoreDebugJson?.Length ?? 0, 100)]);
+                continue;
             }
 
-            if (breakdown is null) continue;
+            // Debug: log first parsed breakdown to verify envelope unwrapping
+            if (processedCount == 0)
+            {
+                _logger.LogInformation("[learning-engine] First breakdown parsed — TrendBull={TB}, TrendBear={TBr}, MomBull={MB}, VolBull={VB}",
+                    breakdown.TrendBullish, breakdown.TrendBearish, breakdown.MomentumBullish, breakdown.VolumeBullish);
+            }
 
             var direction = pred.PredictionType == PredictionType.bearish ? "bearish" : "bullish";
             var correct = outcome.DirectionCorrect == true;
@@ -197,24 +194,24 @@ public class LearningEngine
                 var contributionPct = totalContribution > 0
                     ? Math.Round(contribution / totalContribution * 100, 2) : 0;
 
-                observations.Add(new
+                observations.Add(new Dictionary<string, object?>
                 {
-                    prediction_id = pred.Id,
-                    outcome_id = outcome.Id,
-                    signal_name = bucket,
-                    bull_score = bull,
-                    bear_score = bear,
-                    predicted_direction = direction,
-                    correct,
-                    raw_weight = weight,
-                    effective_weight = weight,
-                    weighted_contribution = contribution,
-                    contribution_percent = contributionPct,
-                    actual_return_percent = outcome.PercentMove,
-                    confidence = (double?)pred.ConfidenceScore,
-                    outcome_score = outcome.OutcomeScore,
-                    market_regime = DetectMarketRegime(breakdown),
-                    created_at = DateTimeOffset.UtcNow.ToString("o"),
+                    ["prediction_id"] = pred.Id,
+                    ["outcome_id"] = outcome.Id,
+                    ["signal_name"] = bucket,
+                    ["bull_score"] = bull,
+                    ["bear_score"] = bear,
+                    ["predicted_direction"] = direction,
+                    ["correct"] = correct,
+                    ["raw_weight"] = weight,
+                    ["effective_weight"] = weight,
+                    ["weighted_contribution"] = contribution,
+                    ["contribution_percent"] = contributionPct,
+                    ["actual_return_percent"] = outcome.PercentMove ?? (object?)null,
+                    ["confidence"] = (double?)pred.ConfidenceScore,
+                    ["outcome_score"] = outcome.OutcomeScore ?? (object?)null,
+                    ["market_regime"] = DetectMarketRegime(breakdown),
+                    ["created_at"] = DateTimeOffset.UtcNow.ToString("o"),
                 });
             }
 
@@ -248,25 +245,57 @@ public class LearningEngine
         if (observations.Count == 0)
             return (0, []);
 
-        var stats = new Dictionary<(string Signal, string Direction), (int Total, int Correct, double TotalScore, double WeightedSum)>();
+        // Signal-specific accuracy: weight each observation by how strongly
+        // the signal contributed. A signal scoring 0 on a correct prediction
+        // gets no credit; a signal scoring 20 on a correct prediction gets full credit.
+        // This produces differentiated accuracy per signal instead of the old
+        // binary correct/incorrect which was identical across all signals.
+        var stats = new Dictionary<(string Signal, string Direction),
+            (int Total, double WeightedCorrect, double TotalWeight, double TotalScore, double DecayWeightedSum)>();
 
         foreach (var obs in observations)
         {
             if (obs.Correct is null) continue;
 
-            // Time-decay weight: recent observations count more
+            // Time-decay: recent observations count more
             var ageInDays = (DateTimeOffset.UtcNow - obs.CreatedAt).TotalDays;
             var decayWeight = Math.Exp(-ageInDays * Math.Log(2) / TimeDecayHalfLifeDays);
+
+            // Signal strength = dominant score (how strongly this signal fired)
+            var dominantScore = Math.Max(obs.BullScore, obs.BearScore);
+            // Was the signal aligned with the predicted direction?
+            var alignedScore = obs.PredictedDirection == "bullish" ? obs.BullScore : obs.BearScore;
+            var opposedScore = obs.PredictedDirection == "bullish" ? obs.BearScore : obs.BullScore;
+            // Contribution weight: how much this signal pushed toward the predicted direction
+            // Positive = aligned, negative = opposed. Clamp to [0, 1] range for weighting.
+            var signalWeight = Math.Max(0.1, dominantScore); // min 0.1 so silent signals still count a bit
 
             void Tally(string direction)
             {
                 var key = (obs.SignalName, direction);
-                var (total, correct, totalScore, weightedSum) = stats.GetValueOrDefault(key);
+                var (total, weightedCorrect, totalWt, totalScore, decaySum) = stats.GetValueOrDefault(key);
                 total++;
-                weightedSum += decayWeight;
-                if (obs.Correct == true) correct++;
+                totalWt += signalWeight;
+                decaySum += decayWeight;
                 totalScore += obs.OutcomeScore ?? 50;
-                stats[key] = (total, correct, totalScore, weightedSum);
+
+                if (obs.Correct == true)
+                {
+                    // Credit proportional to alignment: signal that pushed right direction gets full credit
+                    var alignmentCredit = alignedScore > opposedScore ? signalWeight
+                        : alignedScore == opposedScore ? signalWeight * 0.5 // neutral signal
+                        : signalWeight * 0.2; // signal pushed wrong way but prediction was still correct
+                    weightedCorrect += alignmentCredit;
+                }
+                else
+                {
+                    // Wrong prediction: signal that pushed toward the wrong direction gets penalized
+                    // Signal that opposed the (wrong) prediction actually showed good judgment
+                    if (opposedScore > alignedScore)
+                        weightedCorrect += signalWeight * 0.3; // partial credit for opposing a bad call
+                }
+
+                stats[key] = (total, weightedCorrect, totalWt, totalScore, decaySum);
             }
 
             Tally(obs.PredictedDirection);
@@ -274,16 +303,20 @@ public class LearningEngine
         }
 
         var results = new List<ResearchSignalPerformance>();
-        foreach (var ((signal, direction), (total, correct, totalScore, _)) in stats)
+        foreach (var ((signal, direction), (total, weightedCorrect, totalWeight, totalScore, _)) in stats)
         {
+            var accuracy = totalWeight > 0 ? weightedCorrect / totalWeight : 0;
+            // Clamp to [0, 1]
+            accuracy = Math.Clamp(accuracy, 0, 1);
+
             var perf = new ResearchSignalPerformance
             {
                 SignalName = signal,
                 SignalType = signal.StartsWith("research") ? "research" : "scoring_bucket",
                 Direction = direction,
                 TotalPredictions = total,
-                CorrectPredictions = correct,
-                Accuracy = total > 0 ? (double)correct / total : 0,
+                CorrectPredictions = (int)Math.Round(accuracy * total), // approximate for display
+                Accuracy = accuracy,
                 AverageOutcomeScore = total > 0 ? totalScore / total : 0,
                 LastUpdatedAt = DateTimeOffset.UtcNow,
             };
@@ -294,9 +327,9 @@ public class LearningEngine
                 signal_type = perf.SignalType,
                 direction,
                 total_predictions = total,
-                correct_predictions = correct,
-                accuracy = perf.Accuracy,
-                average_outcome_score = perf.AverageOutcomeScore,
+                correct_predictions = perf.CorrectPredictions,
+                accuracy = Math.Round(perf.Accuracy, 4),
+                average_outcome_score = Math.Round(perf.AverageOutcomeScore, 2),
                 last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
             });
 
@@ -866,16 +899,7 @@ public class LearningEngine
                     continue;
 
                 // Parse scoring breakdown to extract signals
-                ScoringBreakdown? breakdown = null;
-                if (!string.IsNullOrEmpty(pred.ScoreDebugJson))
-                {
-                    try
-                    {
-                        breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(pred.ScoreDebugJson,
-                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    }
-                    catch { continue; }
-                }
+                var breakdown = ScoringBreakdownEnvelope.Parse(pred.ScoreDebugJson);
                 if (breakdown is null) continue;
 
                 // Reconstruct the setup fingerprint from the scoring breakdown

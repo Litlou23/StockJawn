@@ -64,16 +64,7 @@ public class PatternDetectionService
         // Cluster by market regime
         var regimeGroups = failures
             .Where(p => !string.IsNullOrEmpty(p.ScoreDebugJson))
-            .Select(p =>
-            {
-                try
-                {
-                    var bd = JsonSerializer.Deserialize<ScoringBreakdown>(p.ScoreDebugJson!,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    return (Pred: p, Breakdown: bd);
-                }
-                catch { return (Pred: p, Breakdown: (ScoringBreakdown?)null); }
-            })
+            .Select(p => (Pred: p, Breakdown: ScoringBreakdownEnvelope.Parse(p.ScoreDebugJson)))
             .Where(x => x.Breakdown is not null)
             .GroupBy(x =>
             {

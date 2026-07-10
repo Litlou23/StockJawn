@@ -575,15 +575,15 @@ export default async function DashboardPage() {
 
           {(watchlist.reviewNeeded.length > 0 || watchlist.swapCandidates.length > 0) && (
             <div className="mt-3 flex flex-wrap gap-2">
-              {watchlist.reviewNeeded.map((r) => (
-                <div key={r.ticker} className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-2.5 py-1.5">
+              {watchlist.reviewNeeded.map((r, idx) => (
+                <div key={`${r.ticker}-review-${idx}`} className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-2.5 py-1.5">
                   <span className="text-xs font-semibold text-yellow-400">{r.ticker}</span>
                   <span className="ml-1.5 text-[10px] text-yellow-500/70">needs review</span>
                   {r.swapReason && <p className="mt-0.5 text-[10px] text-zinc-500">{r.swapReason}</p>}
                 </div>
               ))}
-              {watchlist.swapCandidates.map((s) => (
-                <div key={s.ticker} className="rounded-lg border border-red-500/20 bg-red-500/5 px-2.5 py-1.5">
+              {watchlist.swapCandidates.map((s, idx) => (
+                <div key={`${s.ticker}-swap-${idx}`} className="rounded-lg border border-red-500/20 bg-red-500/5 px-2.5 py-1.5">
                   <span className="text-xs font-semibold text-red-400">{s.ticker}</span>
                   <span className="ml-1.5 text-[10px] text-red-500/70">might replace</span>
                   {s.swapReason && <p className="mt-0.5 text-[10px] text-zinc-500">{s.swapReason}</p>}
@@ -639,8 +639,8 @@ export default async function DashboardPage() {
             </div>
             {dataQuality.missingDataByTicker.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-2">
-                {dataQuality.missingDataByTicker.map((t) => (
-                  <div key={t.ticker} className="rounded border border-yellow-500/20 bg-yellow-500/5 px-2 py-1">
+                {dataQuality.missingDataByTicker.map((t, idx) => (
+                  <div key={`${t.ticker}-dq-${idx}`} className="rounded border border-yellow-500/20 bg-yellow-500/5 px-2 py-1">
                     <span className="text-[10px] font-semibold text-yellow-400">{t.ticker}:</span>
                     <span className="ml-1 text-[10px] text-zinc-500">{t.warnings.join(', ')}</span>
                   </div>

@@ -144,10 +144,10 @@ public class ResearchJobsController : ControllerBase
     /// created predictions — the paper stock candidate step never ran.
     /// </summary>
     [HttpPost("run-morning-scan")]
-    public async Task<IActionResult> RunMorningScan([FromBody] JobTriggerRequest? trigger)
+    public Task<IActionResult> RunMorningScan([FromBody] JobTriggerRequest? trigger)
     {
         if (!ValidateJobSecret())
-            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
 
         var traceId = GetTraceId();
         _logger.LogInformation("[jobs] Morning scan triggered by {Trigger} traceId={TraceId} — routing through DynamicPickOrchestrator",
@@ -177,14 +177,14 @@ public class ResearchJobsController : ControllerBase
             }
         });
 
-        return Accepted(new
+        return Task.FromResult<IActionResult>(Accepted(new
         {
             ok = true,
             accepted = true,
             runType = "morning_scan",
             status = "running",
             message = "Morning scan accepted — running via DynamicPickOrchestrator (predictions + paper stock candidates).",
-        });
+        }));
     }
 
     // -----------------------------------------------------------------------
@@ -196,10 +196,10 @@ public class ResearchJobsController : ControllerBase
     /// paper stock candidate outcomes are evaluated alongside predictions.
     /// </summary>
     [HttpPost("run-end-of-day-review")]
-    public async Task<IActionResult> RunEndOfDayReview([FromBody] JobTriggerRequest? trigger)
+    public Task<IActionResult> RunEndOfDayReview([FromBody] JobTriggerRequest? trigger)
     {
         if (!ValidateJobSecret())
-            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
 
         var traceId = GetTraceId();
         _logger.LogInformation("[jobs] EOD review triggered by {Trigger} traceId={TraceId} — routing through DynamicPickOrchestrator",
@@ -227,14 +227,14 @@ public class ResearchJobsController : ControllerBase
             }
         });
 
-        return Accepted(new
+        return Task.FromResult<IActionResult>(Accepted(new
         {
             ok = true,
             accepted = true,
             runType = "end_of_day_review",
             status = "running",
             message = "EOD review accepted — running via DynamicPickOrchestrator.",
-        });
+        }));
     }
 
     // -----------------------------------------------------------------------
@@ -245,10 +245,10 @@ public class ResearchJobsController : ControllerBase
     /// Learning update now delegates to the DynamicPickOrchestrator.
     /// </summary>
     [HttpPost("run-learning-update")]
-    public async Task<IActionResult> RunLearningUpdate([FromBody] JobTriggerRequest? trigger)
+    public Task<IActionResult> RunLearningUpdate([FromBody] JobTriggerRequest? trigger)
     {
         if (!ValidateJobSecret())
-            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
 
         var traceId = GetTraceId();
         _logger.LogInformation("[jobs] Learning update triggered by {Trigger} traceId={TraceId} — routing through DynamicPickOrchestrator",
@@ -276,14 +276,14 @@ public class ResearchJobsController : ControllerBase
             }
         });
 
-        return Accepted(new
+        return Task.FromResult<IActionResult>(Accepted(new
         {
             ok = true,
             accepted = true,
             runType = "learning_update",
             status = "running",
             message = "Learning update accepted — running via DynamicPickOrchestrator.",
-        });
+        }));
     }
 
     // -----------------------------------------------------------------------

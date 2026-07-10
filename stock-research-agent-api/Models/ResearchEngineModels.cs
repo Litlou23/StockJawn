@@ -162,6 +162,31 @@ public enum ActionabilityTier
     strongest,     // 85+ (rare)
 }
 
+/// <summary>
+/// Wrapper for score_debug_json which stores {"Breakdown": {...}}.
+/// Use ScoringBreakdownEnvelope.Parse() to safely deserialize.
+/// </summary>
+public record ScoringBreakdownEnvelope
+{
+    public ScoringBreakdown? Breakdown { get; init; }
+
+    public static ScoringBreakdown? Parse(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return null;
+        var opts = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        // Try envelope format first: {"Breakdown": {...}}
+        try
+        {
+            var envelope = System.Text.Json.JsonSerializer.Deserialize<ScoringBreakdownEnvelope>(json, opts);
+            if (envelope?.Breakdown is not null) return envelope.Breakdown;
+        }
+        catch { /* fall through */ }
+        // Fallback: direct ScoringBreakdown
+        try { return System.Text.Json.JsonSerializer.Deserialize<ScoringBreakdown>(json, opts); }
+        catch { return null; }
+    }
+}
+
 public record ScoringBreakdown
 {
     public double DirectionalScore { get; init; }

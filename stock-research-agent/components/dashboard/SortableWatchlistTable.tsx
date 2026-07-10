@@ -62,8 +62,8 @@ export default function SortableWatchlistTable({ items }: { items: WatchlistItem
           </tr>
         </thead>
         <tbody>
-          {sorted.map((item) => (
-            <tr key={item.ticker} className="border-b border-zinc-800/50">
+          {sorted.map((item, idx) => (
+            <tr key={`${item.ticker}-${idx}`} className="border-b border-zinc-800/50">
               <td className="py-2 pr-3">
                 <span className="font-semibold text-zinc-100">{item.ticker}</span>
                 {item.companyName && <span className="ml-1.5 text-[10px] text-zinc-500">{item.companyName}</span>}

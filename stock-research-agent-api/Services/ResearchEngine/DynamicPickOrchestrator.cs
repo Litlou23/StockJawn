@@ -1296,8 +1296,7 @@ public class DynamicPickOrchestrator
                 var prediction = await _researchRepo.GetPredictionByIdAsync(c.PredictionId);
                 if (prediction?.ScoreDebugJson is not null)
                 {
-                    breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(prediction.ScoreDebugJson,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    breakdown = ScoringBreakdownEnvelope.Parse(prediction.ScoreDebugJson);
                 }
             }
             catch { /* best effort */ }

@@ -377,8 +377,8 @@ export default async function LearningPage() {
               <div className="mt-3">
                 <h3 className="text-xs font-medium text-zinc-400">Trending Tickers</h3>
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {intake.intake.trendingTickers.slice(0, 8).map((t) => (
-                    <span key={t.ticker} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                  {intake.intake.trendingTickers.slice(0, 8).map((t, idx) => (
+                    <span key={`${t.ticker}-trend-${idx}`} className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
                       t.netSentiment === 'bullish' ? 'bg-green-900/50 text-green-400' :
                       t.netSentiment === 'bearish' ? 'bg-red-900/50 text-red-400' :
                       'bg-zinc-800 text-zinc-400'
@@ -400,8 +400,8 @@ export default async function LearningPage() {
               {intake.autoPicks.length} candidates from RSS analysis. Not manually researched.
             </p>
             <div className="mt-3 space-y-2">
-              {intake.autoPicks.slice(0, 5).map((p) => (
-                <div key={p.ticker} className="flex items-center justify-between rounded-lg bg-zinc-800/50 p-2.5">
+              {intake.autoPicks.slice(0, 5).map((p, idx) => (
+                <div key={`${p.ticker}-pick-${idx}`} className="flex items-center justify-between rounded-lg bg-zinc-800/50 p-2.5">
                   <div>
                     <span className="text-xs font-medium text-zinc-200">{p.ticker}</span>
                     <span className="ml-2 text-[11px] text-zinc-500">{p.companyName}</span>

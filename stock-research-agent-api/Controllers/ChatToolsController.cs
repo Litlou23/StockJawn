@@ -724,17 +724,7 @@ public class ChatToolsController : ControllerBase
         }
 
         // Parse the score debug JSON for full breakdown
-        ScoringBreakdown? breakdown = null;
-        if (!string.IsNullOrEmpty(pred.ScoreDebugJson))
-        {
-            try
-            {
-                breakdown = System.Text.Json.JsonSerializer.Deserialize<ScoringBreakdown>(
-                    pred.ScoreDebugJson,
-                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            }
-            catch { warnings.Add("Could not parse scoring breakdown"); }
-        }
+        var breakdown = ScoringBreakdownEnvelope.Parse(pred.ScoreDebugJson);
 
         // Get setup fingerprint if available
         string? fingerprint = null;

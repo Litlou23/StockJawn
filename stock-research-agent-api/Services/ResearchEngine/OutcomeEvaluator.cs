@@ -538,13 +538,7 @@ public class OutcomeEvaluator
         ScoringBreakdown? breakdown = null;
         if (!string.IsNullOrEmpty(prediction.ScoreDebugJson))
         {
-            try
-            {
-                breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(
-                    prediction.ScoreDebugJson,
-                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            }
-            catch { /* fall through to generic lesson */ }
+            breakdown = ScoringBreakdownEnvelope.Parse(prediction.ScoreDebugJson);
         }
 
         if (breakdown is not null)
