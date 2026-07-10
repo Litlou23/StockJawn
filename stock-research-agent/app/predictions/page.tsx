@@ -287,7 +287,7 @@ export default function PredictionsPage() {
   const [datePreset, setDatePreset] = useState<DatePreset>('all');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
-  const [sortBy, setSortBy] = useState<SortKey>('confidence_desc');
+  const [sortBy, setSortBy] = useState<SortKey>('newest');
 
   const fetchData = useCallback(async (preset: DatePreset, cFrom: string, cTo: string, cat: CategoryTab) => {
     if (cat === 'options') {

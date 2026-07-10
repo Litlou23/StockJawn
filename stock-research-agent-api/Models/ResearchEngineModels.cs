@@ -541,6 +541,8 @@ public record SignalObservation
     public double RawWeight { get; init; } = 1.0;
     public double EffectiveWeight { get; init; } = 1.0;
     public double WeightedContribution { get; init; }
+    public double? ContributionPercent { get; init; }
+    public double? ActualReturnPercent { get; init; }
     public double? Confidence { get; init; }
     public double? OutcomeScore { get; init; }
     public string? MarketRegime { get; init; }

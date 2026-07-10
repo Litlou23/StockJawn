@@ -80,8 +80,14 @@ public class LearningEngine
         // Stage 1: Extract signal observations from evaluated predictions
         var obsCreated = await ExtractSignalObservationsAsync(errors);
 
-        // Stage 2: Compute signal performance stats
+        // Stage 2: Compute signal performance stats (legacy binary tracking)
         var (perfUpdated, signalStats) = await ComputeSignalPerformanceAsync();
+
+        // Stage 2b-2e: Layered signal analytics (ChatGPT-recommended approach)
+        var calibrationCount = await ComputeSignalCalibrationAsync();
+        var correlationCount = await ComputeSignalCorrelationsAsync();
+        var influenceCount = await ComputeSignalInfluenceAsync();
+        var interactionCount = await ComputeSignalInteractionsAsync();
 
         // Stage 3: Confidence calibration — detect AND correct overconfidence
         var calibration = await ComputeConfidenceCalibrationAsync();
@@ -106,6 +112,8 @@ public class LearningEngine
         var insights = await GenerateLearningInsightsAsync();
 
         var report = $"Learning cycle complete: {obsCreated} observations, {perfUpdated} signal stats, " +
+                     $"{calibrationCount} calibration buckets, {correlationCount} correlations, " +
+                     $"{influenceCount} influence stats, {interactionCount} interaction pairs, " +
                      $"{weightsAdjusted} weight adjustments, {setupStatsUpdated} setup stats, {insights.Count} insights.";
 
         _logger.LogInformation("[learning-engine] {Report}", report);
@@ -166,13 +174,28 @@ public class LearningEngine
             var direction = pred.PredictionType == PredictionType.bearish ? "bearish" : "bullish";
             var correct = outcome.DirectionCorrect == true;
 
-            // Extract per-bucket observations
+            // Pre-compute total weighted contribution for contribution_percent
+            double totalContribution = 0;
+            var bucketContributions = new Dictionary<string, double>();
             foreach (var bucket in BucketNames)
             {
                 var (bull, bear) = GetBucketScores(breakdown, bucket);
                 var dominantScore = direction == "bullish" ? bull : bear;
                 var weight = DefaultBaseWeights.GetValueOrDefault(bucket, 1.0);
                 var contribution = dominantScore * weight;
+                bucketContributions[bucket] = contribution;
+                totalContribution += contribution;
+            }
+
+            // Extract per-bucket observations
+            foreach (var bucket in BucketNames)
+            {
+                var (bull, bear) = GetBucketScores(breakdown, bucket);
+                var dominantScore = direction == "bullish" ? bull : bear;
+                var weight = DefaultBaseWeights.GetValueOrDefault(bucket, 1.0);
+                var contribution = bucketContributions[bucket];
+                var contributionPct = totalContribution > 0
+                    ? Math.Round(contribution / totalContribution * 100, 2) : 0;
 
                 observations.Add(new
                 {
@@ -186,6 +209,8 @@ public class LearningEngine
                     raw_weight = weight,
                     effective_weight = weight,
                     weighted_contribution = contribution,
+                    contribution_percent = contributionPct,
+                    actual_return_percent = outcome.PercentMove,
                     confidence = (double?)pred.ConfidenceScore,
                     outcome_score = outcome.OutcomeScore,
                     market_regime = DetectMarketRegime(breakdown),
@@ -279,6 +304,336 @@ public class LearningEngine
         }
 
         return (results.Count, results);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 2b: Score-Bucket Calibration
+    // Instead of binary correct/incorrect per signal, analyze performance
+    // by signal strength ranges to learn which scores are predictive.
+    // -----------------------------------------------------------------------
+
+    public async Task<int> ComputeSignalCalibrationAsync()
+    {
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        if (observations.Count == 0) return 0;
+
+        // Group by signal → score bucket → tally
+        var bucketRanges = new[] { (Label: "0-5", Min: 0.0, Max: 5.0), (Label: "6-10", Min: 6.0, Max: 10.0),
+            (Label: "11-15", Min: 11.0, Max: 15.0), (Label: "16-20", Min: 16.0, Max: 20.0),
+            (Label: "21-25", Min: 21.0, Max: 25.0) };
+
+        var stats = new Dictionary<(string Signal, string Direction, string Bucket),
+            (int Total, int Correct, double ReturnSum, double ScoreSum)>();
+
+        foreach (var obs in observations)
+        {
+            if (obs.Correct is null) continue;
+            var netScore = Math.Abs(obs.BullScore - obs.BearScore);
+            var dominantScore = Math.Max(obs.BullScore, obs.BearScore);
+            var bucketLabel = bucketRanges.FirstOrDefault(b => dominantScore >= b.Min && dominantScore <= b.Max).Label
+                ?? "0-5";
+            var returnPct = obs.ActualReturnPercent ?? 0;
+
+            void Tally(string direction)
+            {
+                var key = (obs.SignalName, direction, bucketLabel);
+                var (total, correct, retSum, sSum) = stats.GetValueOrDefault(key);
+                total++;
+                if (obs.Correct == true) correct++;
+                retSum += returnPct;
+                sSum += obs.OutcomeScore ?? 50;
+                stats[key] = (total, correct, retSum, sSum);
+            }
+            Tally(obs.PredictedDirection);
+            Tally("all");
+        }
+
+        var upserted = 0;
+        foreach (var ((signal, direction, bucket), (total, correct, retSum, scoreSum)) in stats)
+        {
+            await _repo.UpsertCalibrationBucketAsync(new
+            {
+                signal_name = signal,
+                direction,
+                score_bucket = bucket,
+                sample_count = total,
+                correct_count = correct,
+                accuracy = total > 0 ? Math.Round((double)correct / total, 4) : 0,
+                avg_return_percent = total > 0 ? Math.Round(retSum / total, 4) : 0,
+                avg_outcome_score = total > 0 ? Math.Round(scoreSum / total, 2) : 0,
+                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+            });
+            upserted++;
+        }
+
+        _logger.LogInformation("[learning-engine] Calibration: upserted {Count} signal-bucket stats", upserted);
+        return upserted;
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 2c: Signal Correlation Analysis
+    // Compute Pearson r between each signal's net score and actual return %.
+    // -----------------------------------------------------------------------
+
+    public async Task<int> ComputeSignalCorrelationsAsync()
+    {
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        if (observations.Count == 0) return 0;
+
+        // Group by signal+direction, collect (netScore, return) pairs
+        var pairs = new Dictionary<(string Signal, string Direction), List<(double NetScore, double Return)>>();
+
+        foreach (var obs in observations)
+        {
+            if (obs.Correct is null || obs.ActualReturnPercent is null) continue;
+            var netScore = obs.BullScore - obs.BearScore;
+            if (obs.PredictedDirection == "bearish") netScore = -netScore; // flip so positive = predicted direction
+
+            void Add(string direction)
+            {
+                var key = (obs.SignalName, direction);
+                if (!pairs.ContainsKey(key)) pairs[key] = [];
+                pairs[key].Add((netScore, obs.ActualReturnPercent.Value));
+            }
+            Add(obs.PredictedDirection);
+            Add("all");
+        }
+
+        var upserted = 0;
+        foreach (var ((signal, direction), dataPoints) in pairs)
+        {
+            if (dataPoints.Count < 5) continue; // need minimum sample
+            var r = ComputePearsonR(dataPoints);
+            var avgNet = dataPoints.Average(d => d.NetScore);
+            var avgRet = dataPoints.Average(d => d.Return);
+
+            await _repo.UpsertSignalCorrelationAsync(new
+            {
+                signal_name = signal,
+                direction,
+                correlation_r = Math.Round(r, 4),
+                sample_count = dataPoints.Count,
+                avg_net_score = Math.Round(avgNet, 2),
+                avg_return_percent = Math.Round(avgRet, 4),
+                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+            });
+            upserted++;
+        }
+
+        _logger.LogInformation("[learning-engine] Correlations: upserted {Count} signal correlations", upserted);
+        return upserted;
+    }
+
+    private static double ComputePearsonR(List<(double X, double Y)> data)
+    {
+        if (data.Count < 3) return 0;
+        var n = data.Count;
+        var sumX = data.Sum(d => d.X);
+        var sumY = data.Sum(d => d.Y);
+        var sumXY = data.Sum(d => d.X * d.Y);
+        var sumX2 = data.Sum(d => d.X * d.X);
+        var sumY2 = data.Sum(d => d.Y * d.Y);
+
+        var numerator = n * sumXY - sumX * sumY;
+        var denominator = Math.Sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
+        return denominator == 0 ? 0 : numerator / denominator;
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 2d: Counterfactual Influence Analysis
+    // For each prediction, replay scoring without each signal to measure
+    // how much each signal influenced the decision.
+    // -----------------------------------------------------------------------
+
+    public async Task<int> ComputeSignalInfluenceAsync()
+    {
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        if (observations.Count == 0) return 0;
+
+        // Group observations by prediction
+        var byPrediction = observations
+            .Where(o => o.Correct is not null)
+            .GroupBy(o => o.PredictionId)
+            .Where(g => g.Count() == BucketNames.Length) // only complete sets
+            .ToList();
+
+        // Per-signal influence tallies: decisive / reinforcing / redundant
+        var influence = new Dictionary<(string Signal, string Direction),
+            (int Total, int Decisive, int Reinforcing, int Redundant, double MarginImpactSum,
+             int DecisiveCorrect, int DecisiveTotal)>();
+
+        foreach (var predGroup in byPrediction)
+        {
+            var signalObs = predGroup.ToDictionary(o => o.SignalName);
+            var first = predGroup.First();
+            var direction = first.PredictedDirection;
+            var correct = first.Correct == true;
+
+            // Compute full bull/bear totals
+            double fullBull = 0, fullBear = 0;
+            foreach (var obs in predGroup)
+            {
+                fullBull += obs.BullScore;
+                fullBear += obs.BearScore;
+            }
+            var fullMargin = fullBull - fullBear; // positive = bullish wins
+
+            foreach (var bucket in BucketNames)
+            {
+                if (!signalObs.TryGetValue(bucket, out var obs)) continue;
+
+                // Remove this signal
+                var withoutBull = fullBull - obs.BullScore;
+                var withoutBear = fullBear - obs.BearScore;
+                var withoutMargin = withoutBull - withoutBear;
+
+                // Did removing it flip the prediction?
+                var originalSide = fullMargin >= 0 ? "bullish" : "bearish";
+                var withoutSide = withoutMargin >= 0 ? "bullish" : "bearish";
+                var flipped = originalSide != withoutSide;
+                var marginImpact = Math.Abs(fullMargin - withoutMargin);
+
+                // Classify: decisive (flips), reinforcing (>20% margin change), redundant
+                string category;
+                if (flipped) category = "decisive";
+                else if (marginImpact > Math.Abs(fullMargin) * 0.2) category = "reinforcing";
+                else category = "redundant";
+
+                void Tally(string dir)
+                {
+                    var key = (bucket, dir);
+                    var (t, d, r, rd, mis, dc, dt) = influence.GetValueOrDefault(key);
+                    t++;
+                    mis += marginImpact;
+                    if (category == "decisive") { d++; dt++; if (correct) dc++; }
+                    else if (category == "reinforcing") r++;
+                    else rd++;
+                    influence[key] = (t, d, r, rd, mis, dc, dt);
+                }
+                Tally(direction);
+                Tally("all");
+            }
+        }
+
+        var upserted = 0;
+        foreach (var ((signal, dir), (total, decisive, reinforcing, redundant, marginSum, decCorrect, decTotal)) in influence)
+        {
+            await _repo.UpsertSignalInfluenceAsync(new
+            {
+                signal_name = signal,
+                direction = dir,
+                total_predictions = total,
+                decisive_count = decisive,
+                reinforcing_count = reinforcing,
+                redundant_count = redundant,
+                avg_margin_impact = total > 0 ? Math.Round(marginSum / total, 2) : 0,
+                decisive_accuracy = decTotal > 0 ? Math.Round((double)decCorrect / decTotal, 4) : (double?)null,
+                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+            });
+            upserted++;
+        }
+
+        _logger.LogInformation("[learning-engine] Influence: upserted {Count} signal influence stats", upserted);
+        return upserted;
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 2e: Signal Interaction Discovery
+    // Track pairwise signal combinations and their joint performance.
+    // -----------------------------------------------------------------------
+
+    private const double StrongThreshold = 10.0; // dominant score > 10 = "strong"
+
+    public async Task<int> ComputeSignalInteractionsAsync()
+    {
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        if (observations.Count == 0) return 0;
+
+        var byPrediction = observations
+            .Where(o => o.Correct is not null)
+            .GroupBy(o => o.PredictionId)
+            .Where(g => g.Count() == BucketNames.Length)
+            .ToList();
+
+        // For each pair of signals, track: both-strong, a-strong-b-weak, a-weak-b-strong
+        var interactions = new Dictionary<(string A, string B, string Direction),
+            (int BothStrong, int BothStrongCorrect, double BothStrongReturnSum,
+             int AStrongBWeak, int AStrongBWeakCorrect,
+             int AWeakBStrong, int AWeakBStrongCorrect)>();
+
+        foreach (var predGroup in byPrediction)
+        {
+            var signalObs = predGroup.ToDictionary(o => o.SignalName);
+            var first = predGroup.First();
+            var direction = first.PredictedDirection;
+            var correct = first.Correct == true;
+            var returnPct = first.ActualReturnPercent ?? 0;
+
+            for (int i = 0; i < BucketNames.Length; i++)
+            {
+                for (int j = i + 1; j < BucketNames.Length; j++)
+                {
+                    var a = BucketNames[i];
+                    var b = BucketNames[j];
+                    if (!signalObs.TryGetValue(a, out var obsA) || !signalObs.TryGetValue(b, out var obsB))
+                        continue;
+
+                    var aStrong = Math.Max(obsA.BullScore, obsA.BearScore) >= StrongThreshold;
+                    var bStrong = Math.Max(obsB.BullScore, obsB.BearScore) >= StrongThreshold;
+
+                    void Tally(string dir)
+                    {
+                        var key = (a, b, dir);
+                        var (bs, bsc, bsr, asb, asbc, abs2, absc) = interactions.GetValueOrDefault(key);
+                        if (aStrong && bStrong)
+                        {
+                            bs++; if (correct) bsc++; bsr += returnPct;
+                        }
+                        else if (aStrong && !bStrong)
+                        {
+                            asb++; if (correct) asbc++;
+                        }
+                        else if (!aStrong && bStrong)
+                        {
+                            abs2++; if (correct) absc++;
+                        }
+                        interactions[key] = (bs, bsc, bsr, asb, asbc, abs2, absc);
+                    }
+                    Tally(direction);
+                    Tally("all");
+                }
+            }
+        }
+
+        var upserted = 0;
+        foreach (var ((a, b, dir), (bs, bsc, bsr, asb, asbc, abs2, absc)) in interactions)
+        {
+            var bsAcc = bs > 0 ? (double)bsc / bs : 0;
+            var asbAcc = asb > 0 ? (double)asbc / asb : 0;
+            var absAcc = abs2 > 0 ? (double)absc / abs2 : 0;
+            var avgIndividual = (asbAcc + absAcc) / 2.0;
+            var synergy = avgIndividual > 0 ? (bsAcc - avgIndividual) / avgIndividual : 0;
+
+            await _repo.UpsertSignalInteractionAsync(new
+            {
+                signal_a = a,
+                signal_b = b,
+                direction = dir,
+                both_strong_count = bs,
+                both_strong_accuracy = Math.Round(bsAcc, 4),
+                both_strong_avg_return = bs > 0 ? Math.Round(bsr / bs, 4) : 0,
+                a_strong_b_weak_count = asb,
+                a_strong_b_weak_accuracy = Math.Round(asbAcc, 4),
+                a_weak_b_strong_count = abs2,
+                a_weak_b_strong_accuracy = Math.Round(absAcc, 4),
+                synergy_score = Math.Round(synergy, 4),
+                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+            });
+            upserted++;
+        }
+
+        _logger.LogInformation("[learning-engine] Interactions: upserted {Count} signal pair stats", upserted);
+        return upserted;
     }
 
     // -----------------------------------------------------------------------
@@ -904,6 +1259,41 @@ public class LearningEngine
             .Select(w => $"  {w.SignalName}: {w.ChangePercent:+0.0;-0.0}% (now {w.NewWeight:F2})")
             .ToList();
 
+        // Fetch the new layered analytics for the AI
+        var calibrationRows = await _repo.GetCalibrationBucketsAsync();
+        var correlationRows = await _repo.GetSignalCorrelationsAsync();
+        var influenceRows = await _repo.GetSignalInfluenceAsync();
+        var interactionRows = await _repo.GetSignalInteractionsAsync();
+
+        var calibrationLines = calibrationRows
+            .Select(r => $"  {r["signal_name"]} [{r["score_bucket"]}]: {GetDouble(r, "accuracy") * 100:F0}% acc, " +
+                          $"{GetDouble(r, "avg_return_percent"):+0.00;-0.00}% avg return ({r["sample_count"]} samples)")
+            .Take(20).ToList();
+
+        var correlationLines = correlationRows
+            .Select(r => $"  {r["signal_name"]}: r={GetDouble(r, "correlation_r"):F3} ({r["sample_count"]} samples)")
+            .Take(8).ToList();
+
+        var influenceLines = influenceRows
+            .Select(r => $"  {r["signal_name"]}: {r["decisive_count"]} decisive, {r["reinforcing_count"]} reinforcing, " +
+                          $"{r["redundant_count"]} redundant" +
+                          (r["decisive_accuracy"] is not null ? $", decisive acc={GetDouble(r, "decisive_accuracy") * 100:F0}%" : ""))
+            .Take(8).ToList();
+
+        var interactionLines = interactionRows
+            .Where(r => GetDouble(r, "synergy_score") != 0)
+            .Select(r => $"  {r["signal_a"]}+{r["signal_b"]}: synergy={GetDouble(r, "synergy_score"):+0.00;-0.00}, " +
+                          $"both-strong acc={GetDouble(r, "both_strong_accuracy") * 100:F0}% ({r["both_strong_count"]} samples)")
+            .Take(10).ToList();
+
+        static double GetDouble(System.Text.Json.Nodes.JsonObject r, string key)
+        {
+            var node = r[key];
+            if (node is null) return 0;
+            if (node is System.Text.Json.Nodes.JsonValue jv && jv.TryGetValue<double>(out var d)) return d;
+            return double.TryParse(node.ToString(), out var parsed) ? parsed : 0;
+        }
+
         var prompt = $@"You are the learning analyst for STOCKJAWN, an AI stock prediction system.
 Summarize what the system learned today in a concise, actionable report for the system owner.
 
@@ -913,11 +1303,23 @@ DATA:
 - Bullish accuracy: {(bullPreds.Count > 0 ? (double)bullCorrect / bullPreds.Count * 100 : 0):F1}% ({bullPreds.Count} predictions)
 - Bearish accuracy: {(bearPreds.Count > 0 ? (double)bearCorrect / bearPreds.Count * 100 : 0):F1}% ({bearPreds.Count} predictions)
 
-TOP SIGNALS:
+TOP SIGNALS (legacy binary tracking — treat with skepticism if all signals show same accuracy):
 {string.Join("\n", topSignals)}
 
 WEAK SIGNALS:
 {string.Join("\n", weakSignals)}
+
+SIGNAL CALIBRATION BY STRENGTH (does higher signal score predict better outcomes?):
+{(calibrationLines.Count > 0 ? string.Join("\n", calibrationLines) : "  No data yet — first run pending")}
+
+SIGNAL CORRELATIONS (Pearson r between signal strength and actual return %):
+{(correlationLines.Count > 0 ? string.Join("\n", correlationLines) : "  No data yet — first run pending")}
+
+SIGNAL INFLUENCE (counterfactual: how often was each signal decisive vs redundant?):
+{(influenceLines.Count > 0 ? string.Join("\n", influenceLines) : "  No data yet — first run pending")}
+
+SIGNAL INTERACTIONS (do certain signal pairs work better together?):
+{(interactionLines.Count > 0 ? string.Join("\n", interactionLines) : "  No data yet — first run pending")}
 
 CONFIDENCE CALIBRATION:
 {string.Join("\n", calibBuckets)}
@@ -928,12 +1330,16 @@ WEIGHT CHANGES APPLIED:
 
 INSTRUCTIONS:
 - Write 3-5 short paragraphs, conversational tone
-- Lead with the most important finding
+- Lead with the most important finding from the NEW analytics (calibration, correlation, influence, interactions)
+- If calibration data shows that higher signal scores DO predict better returns, highlight which signals
+- If correlation data shows some signals have strong r values vs weak ones, call out the difference
+- If influence data shows certain signals are mostly redundant, recommend downweighting them
+- If interaction data shows strong synergies, highlight the best signal pairs
+- If all legacy signals show the same accuracy, note this is a known attribution flaw being fixed
 - Highlight any concerning patterns or improvements
 - If confidence is miscalibrated, flag it clearly
-- Mention which signals are driving wins vs losses
 - Note any directional asymmetry (bull vs bear performance)
-- Keep under 400 words
+- Keep under 500 words
 - Do NOT use bullet points or headers — write in flowing prose";
 
         try

@@ -403,6 +403,8 @@ public class ResearchRepository
             RawWeight = GetDouble(r, "raw_weight"),
             EffectiveWeight = GetDouble(r, "effective_weight"),
             WeightedContribution = GetDouble(r, "weighted_contribution"),
+            ContributionPercent = GetNullableDouble(r, "contribution_percent"),
+            ActualReturnPercent = GetNullableDouble(r, "actual_return_percent"),
             Confidence = GetNullableDouble(r, "confidence"),
             OutcomeScore = GetNullableDouble(r, "outcome_score"),
             MarketRegime = r["market_regime"]?.ToString(),
@@ -876,5 +878,61 @@ public class ResearchRepository
         if (node is JsonArray arr)
             return arr.Select(n => n?.ToString() ?? "").Where(s => s != "").ToList();
         return [];
+    }
+
+    // -----------------------------------------------------------------------
+    // Signal Analytics (calibration, correlation, influence, interactions)
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> UpsertCalibrationBucketAsync(object bucket)
+    {
+        return await _db.UpsertAsync("signal_calibration_buckets", bucket,
+            onConflict: "signal_name,direction,score_bucket");
+    }
+
+    public async Task<List<JsonObject>> GetCalibrationBucketsAsync()
+    {
+        return await _db.SelectAsync("signal_calibration_buckets",
+            filter: "direction=eq.all&sample_count=gte.3",
+            order: "signal_name.asc,score_bucket.asc", limit: 200);
+    }
+
+    public async Task<bool> UpsertSignalCorrelationAsync(object correlation)
+    {
+        return await _db.UpsertAsync("signal_correlations", correlation,
+            onConflict: "signal_name,direction");
+    }
+
+    public async Task<List<JsonObject>> GetSignalCorrelationsAsync()
+    {
+        return await _db.SelectAsync("signal_correlations",
+            filter: "direction=eq.all",
+            order: "correlation_r.desc", limit: 50);
+    }
+
+    public async Task<bool> UpsertSignalInfluenceAsync(object influence)
+    {
+        return await _db.UpsertAsync("signal_influence", influence,
+            onConflict: "signal_name,direction");
+    }
+
+    public async Task<List<JsonObject>> GetSignalInfluenceAsync()
+    {
+        return await _db.SelectAsync("signal_influence",
+            filter: "direction=eq.all",
+            order: "decisive_count.desc", limit: 50);
+    }
+
+    public async Task<bool> UpsertSignalInteractionAsync(object interaction)
+    {
+        return await _db.UpsertAsync("signal_interactions", interaction,
+            onConflict: "signal_a,signal_b,direction");
+    }
+
+    public async Task<List<JsonObject>> GetSignalInteractionsAsync()
+    {
+        return await _db.SelectAsync("signal_interactions",
+            filter: "direction=eq.all&both_strong_count=gte.3",
+            order: "synergy_score.desc", limit: 50);
     }
 }
