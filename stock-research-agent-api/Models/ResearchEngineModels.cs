@@ -199,6 +199,13 @@ public record ScoringBreakdown
     public double MarketContextBearish { get; init; }
     public double CatalystBullish { get; init; }
     public double CatalystBearish { get; init; }
+    /// <summary>
+    /// Direction-independent catalyst intensity score (0-25).
+    /// Measures "how likely is rapid repricing?" based on news volume,
+    /// importance, recency, and catalyst type — regardless of bull/bear direction.
+    /// Used by the velocity formula to determine time windows.
+    /// </summary>
+    public double CatalystStrength { get; init; }
     public double LearningBullish { get; init; }
     public double LearningBearish { get; init; }
     public double ResearchSignalScore { get; init; }

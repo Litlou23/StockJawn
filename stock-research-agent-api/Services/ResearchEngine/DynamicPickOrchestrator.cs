@@ -423,14 +423,27 @@ public class DynamicPickOrchestrator
         var eod = await _dailyService.RunEndOfDayReviewAsync();
         errors.AddRange(eod.Errors);
 
-        // 4. Auto-close portfolio positions whose paper stock candidates were just evaluated.
-        //    We look up the exit price by fetching a current quote for each ticker
-        //    that had open portfolio positions. This is more reliable than searching
-        //    outcomes (which may not have been saved yet at query time).
+        // 4. Auto-close portfolio positions whose paper stock candidates have
+        //    reached their evaluation window. Positions are NOT closed until
+        //    the candidate's timeframe has elapsed (e.g. a 1_week prediction
+        //    stays open for at least 120 hours / 5 trading days).
         var portfolioPositionsClosed = 0;
+        var portfolioPositionsSkipped = 0;
         foreach (var c in openStock)
         {
             if (c.PredictionId is null) continue;
+
+            // ── Timeframe gate: don't close positions before their window ──
+            var ageHours = (DateTimeOffset.UtcNow - c.CreatedAt).TotalHours;
+            var minHours = MinEvalHours.GetValueOrDefault(c.Timeframe, 6);
+            if (ageHours < minHours)
+            {
+                _logger.LogDebug("[dynamic] {Ticker}: portfolio position too young to close ({Age:F1}h < {Min}h for {Tf})",
+                    c.Ticker, ageHours, minHours, c.Timeframe);
+                portfolioPositionsSkipped++;
+                continue;
+            }
+
             try
             {
                 var portfolioPositions = await _portfolioRepo.GetOpenPositionsByPredictionIdAsync(c.PredictionId);
@@ -462,7 +475,8 @@ public class DynamicPickOrchestrator
                      $"{optionOutcomes.Count} paper option candidates, " +
                      $"{setupsEvaluated} trade setups. " +
                      $"Existing predictions: {eod.PredictionsEvaluated}." +
-                     (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "");
+                     (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "") +
+                     (portfolioPositionsSkipped > 0 ? $" Skipped {portfolioPositionsSkipped} positions (time window not elapsed)." : "");
 
         return new DynamicEodResult
         {

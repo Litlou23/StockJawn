@@ -526,11 +526,33 @@ public class PredictionGenerator
         var predictions = new List<PredictionCandidate>();
         var allInputs = new List<PredictionInput>();
 
+        // ── Dedup: fetch open predictions and build ticker→time_windows lookup ──
+        // If a ticker already has an open prediction with the same time_window,
+        // skip it (velocity hasn't changed). If the time_window would be different,
+        // the velocity changed — allow the new prediction.
+        var openPredictions = await _repo.GetOpenPredictionsAsync();
+        var openTimeWindowsByTicker = openPredictions
+            .GroupBy(p => p.Ticker.ToUpperInvariant())
+            .ToDictionary(
+                g => g.Key,
+                g => new HashSet<string>(g.Select(p => p.TimeWindow), StringComparer.OrdinalIgnoreCase));
+
         foreach (var snapshot in snapshots)
         {
             var (pred, inputs) = await GeneratePredictionForTickerAsync(snapshot.Ticker, runId, snapshot);
             if (pred is not null)
             {
+                // Dedup check: skip if same ticker already has an open prediction with the same time_window
+                var tickerKey = pred.Ticker.ToUpperInvariant();
+                if (openTimeWindowsByTicker.TryGetValue(tickerKey, out var existingWindows)
+                    && existingWindows.Contains(pred.TimeWindow))
+                {
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: skipping — open prediction already exists with time_window={TimeWindow}",
+                        pred.Ticker, pred.TimeWindow);
+                    continue;
+                }
+
                 predictions.Add(pred);
                 allInputs.AddRange(inputs);
             }
@@ -779,15 +801,20 @@ public class PredictionGenerator
 
     /// <summary>
     /// Determines the evaluation time window based on the signal profile.
-    /// Uses a "move velocity" score: high momentum + volume + catalyst = fast move (short window),
+    /// Uses a "move velocity" score: high momentum + volume + catalyst strength = fast move (short window),
     /// high trend + research = slow move (longer window).
+    ///
+    /// CatalystStrength is direction-independent (0-25) — it measures repricing
+    /// pressure ("how likely is this stock to move quickly?") not direction.
+    /// This avoids double-counting with momentum/trend which already handle direction.
     /// </summary>
     private static string DetermineTimeWindow(ScoringBreakdown b)
     {
         // Velocity components: signals that suggest price moves quickly
         double momentumSpeed = Math.Max(Math.Abs(b.MomentumScore), 0);
         double volumeSpeed = Math.Max(Math.Abs(b.VolumeScore), 0);
-        double catalystSpeed = Math.Max(Math.Abs(b.CatalystScore), 0);
+        // CatalystStrength is already non-negative and direction-independent
+        double catalystSpeed = b.CatalystStrength;
 
         // Persistence components: signals that suggest price moves slowly
         double trendPersistence = Math.Max(Math.Abs(b.TrendScore), 0);
@@ -801,10 +828,10 @@ public class PredictionGenerator
 
         return velocity switch
         {
-            >= 90 => PredictionTimeWindows.OneDay,      // Extreme only: major catalyst + momentum spike
-            >= 55 => PredictionTimeWindows.ThreeDay,     // Fast: strong momentum/catalyst
-            >= 30 => PredictionTimeWindows.OneWeek,      // Normal: trend-driven
-            >= 15 => PredictionTimeWindows.OneMonth,     // Slow: research/fundamental
+            >= 65 => PredictionTimeWindows.OneDay,      // High: major catalyst + momentum spike
+            >= 40 => PredictionTimeWindows.ThreeDay,     // Fast: strong momentum/catalyst
+            >= 20 => PredictionTimeWindows.OneWeek,      // Normal: trend-driven
+            >= 10 => PredictionTimeWindows.OneMonth,     // Slow: research/fundamental
             _     => PredictionTimeWindows.OneWeek,      // Default
         };
     }

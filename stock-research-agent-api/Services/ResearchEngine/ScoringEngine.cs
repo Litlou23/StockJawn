@@ -47,6 +47,7 @@ public static class ScoringEngine
         var volatility = ScoreVolatilitySetup(indicators, snapshot.Quote, signals);
         var market = ScoreMarketContext(benchmark, signals);
         var catalyst = ScoreCatalyst(snapshot, weights, signals);
+        var catalystStrength = ScoreCatalystStrength(snapshot);
         var learning = ScoreLearning(weights, lessons, signals);
         var research = ScoreResearchSignals(researchSignals ?? [], weights, signals);
 
@@ -219,6 +220,7 @@ public static class ScoringEngine
                 CatalystScore = Math.Round(catalyst.Bullish - catalyst.Bearish, 2),
                 CatalystBullish = Math.Round(catalyst.Bullish, 2),
                 CatalystBearish = Math.Round(catalyst.Bearish, 2),
+                CatalystStrength = Math.Round(catalystStrength, 2),
                 LearningScore = Math.Round(learning.Bullish - learning.Bearish, 2),
                 LearningBullish = Math.Round(learning.Bullish, 2),
                 LearningBearish = Math.Round(learning.Bearish, 2),
@@ -653,6 +655,85 @@ public static class ScoringEngine
         }
 
         return new BucketScores(Math.Clamp(bull, 0, 25), Math.Clamp(bear, 0, 25));
+    }
+
+    // -----------------------------------------------------------------------
+    // Catalyst strength: direction-independent repricing pressure (0..25)
+    //
+    // Measures "how likely is rapid repricing?" regardless of bull/bear.
+    // Used by the velocity formula to determine time windows.
+    // Scores based on: news volume, max importance, recency, catalyst type.
+    // Does NOT require sentiment labels.
+    // -----------------------------------------------------------------------
+
+    internal static double ScoreCatalystStrength(MarketSnapshot snapshot)
+    {
+        var news = snapshot.NewsContext;
+        if (news.Count == 0) return 0;
+
+        double strength = 0;
+
+        // 1. News volume: more coverage = more likely to move price
+        strength += news.Count switch
+        {
+            >= 10 => 6,
+            >= 5  => 4,
+            >= 3  => 2,
+            >= 1  => 1,
+            _     => 0,
+        };
+
+        // 2. Max importance: at least one high-impact item drives speed
+        var maxImportance = news.Max(n => n.ImportanceScore);
+        strength += maxImportance switch
+        {
+            >= 85 => 8,   // Major catalyst (earnings surprise, FDA, M&A)
+            >= 65 => 5,   // Significant (analyst upgrade, sector news)
+            >= 45 => 3,   // Moderate (general news coverage)
+            >= 25 => 1,   // Minor
+            _     => 0,
+        };
+
+        // 3. Recency: fresh news moves faster
+        var mostRecent = news
+            .Select(n => DateTimeOffset.TryParse(n.PublishedAt, out var dt) ? dt : (DateTimeOffset?)null)
+            .Where(d => d.HasValue)
+            .Select(d => d!.Value)
+            .DefaultIfEmpty(DateTimeOffset.MinValue)
+            .Max();
+        var hoursOld = (DateTimeOffset.UtcNow - mostRecent).TotalHours;
+        strength += hoursOld switch
+        {
+            <= 2  => 5,   // Breaking news
+            <= 6  => 4,   // Same session
+            <= 12 => 3,   // Today
+            <= 24 => 2,   // Yesterday
+            <= 48 => 1,   // Two days ago
+            _     => 0,
+        };
+
+        // 4. Catalyst type diversity: multiple types = complex event
+        var catalystTypes = news
+            .Where(n => n.CatalystType is not null)
+            .Select(n => n.CatalystType!)
+            .Distinct()
+            .ToList();
+
+        // High-velocity catalyst types (these tend to cause fast moves)
+        var highVelocityTypes = new HashSet<string> { "earnings", "merger", "acquisition", "fda", "guidance", "buyback" };
+        if (catalystTypes.Any(t => highVelocityTypes.Contains(t)))
+            strength += 4;
+        else if (catalystTypes.Count >= 2)
+            strength += 2;
+        else if (catalystTypes.Count >= 1)
+            strength += 1;
+
+        // 5. Multi-source confirmation: same story from many sources = real
+        var sourceCount = news.Select(n => n.SourceName).Distinct().Count();
+        if (sourceCount >= 4) strength += 2;
+        else if (sourceCount >= 2) strength += 1;
+
+        return Math.Clamp(strength, 0, 25);
     }
 
     // -----------------------------------------------------------------------
