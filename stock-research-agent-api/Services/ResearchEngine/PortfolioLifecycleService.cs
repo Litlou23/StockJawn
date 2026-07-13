@@ -39,8 +39,8 @@ public class PortfolioLifecycleService
         List<string> errors)
     {
         var portfolioPositionsOpened = 0;
-        var activeChallenge = await _portfolioRepo.GetActiveChallengeAsync();
-        if (activeChallenge is null)
+        var activeChallenges = await _portfolioRepo.GetActiveChallengesAsync();
+        if (activeChallenges.Count == 0)
             return 0;
 
         var eligible = actionableCandidates
@@ -50,30 +50,34 @@ public class PortfolioLifecycleService
                 && PredictionCategoryHelper.IsDirectional(c.PredictionType))
             .ToList();
 
-        foreach (var c in eligible)
+        foreach (var challenge in activeChallenges)
         {
-            try
+            foreach (var c in eligible)
             {
-                var pos = await _portfolio.AutoOpenPositionAsync(
-                    activeChallenge.Id,
-                    c.PredictionId,
-                    c.Ticker,
-                    c.EntryPrice!.Value,
-                    PositionAssetType.stock,
-                    $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}");
+                try
+                {
+                    var pos = await _portfolio.AutoOpenPositionAsync(
+                        challenge.Id,
+                        c.PredictionId,
+                        c.Ticker,
+                        c.EntryPrice!.Value,
+                        PositionAssetType.stock,
+                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}");
 
-                if (pos is not null) portfolioPositionsOpened++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[portfolio] Position open failed for {Ticker}", c.Ticker);
-                errors.Add($"portfolio-open {c.Ticker}: {ex.Message}");
+                    if (pos is not null) portfolioPositionsOpened++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[portfolio] Position open failed for {Ticker} in challenge {Challenge}",
+                        c.Ticker, challenge.Name);
+                    errors.Add($"portfolio-open {c.Ticker} ({challenge.Name}): {ex.Message}");
+                }
             }
         }
 
         if (portfolioPositionsOpened > 0)
-            _logger.LogInformation("[portfolio] Opened {Count} portfolio positions from actionable candidates",
-                portfolioPositionsOpened);
+            _logger.LogInformation("[portfolio] Opened {Count} portfolio positions across {Challenges} active challenges",
+                portfolioPositionsOpened, activeChallenges.Count);
 
         return portfolioPositionsOpened;
     }

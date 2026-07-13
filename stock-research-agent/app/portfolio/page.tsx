@@ -200,8 +200,10 @@ async function createChallenge(data: {
   });
 }
 
-async function fetchDecisionLog(): Promise<DecisionLogEntry[]> {
-  const res = await fetch('/api/portfolio/decision-log?limit=50');
+async function fetchDecisionLog(challengeId?: string): Promise<DecisionLogEntry[]> {
+  const params = new URLSearchParams({ limit: '50' });
+  if (challengeId) params.set('challengeId', challengeId);
+  const res = await fetch(`/api/portfolio/decision-log?${params}`, { cache: 'no-store' });
   if (!res.ok) return [];
   return res.json();
 }
@@ -261,11 +263,11 @@ export default function PortfolioPage() {
   const loadDecisionLog = useCallback(async () => {
     setDecisionLogLoading(true);
     try {
-      const entries = await fetchDecisionLog();
+      const entries = await fetchDecisionLog(selectedChallengeId ?? undefined);
       setDecisionLog(entries);
     } catch { /* ignore */ }
     setDecisionLogLoading(false);
-  }, []);
+  }, [selectedChallengeId]);
 
   useEffect(() => {
     (async () => {
@@ -275,17 +277,18 @@ export default function PortfolioPage() {
     })();
   }, [reload]);
 
-  // Load decision log when tab is switched to decisions
+  // Load decision log when tab is switched to decisions or challenge changes
   useEffect(() => {
-    if (activeTab === 'decisions' && decisionLog.length === 0) {
+    if (activeTab === 'decisions') {
       loadDecisionLog();
     }
-  }, [activeTab, decisionLog.length, loadDecisionLog]);
+  }, [activeTab, loadDecisionLog]);
 
   // --- Action handlers ---
 
   const handleSwitchChallenge = async (challengeId: string) => {
     setSelectedChallengeId(challengeId);
+    setDecisionLog([]); // clear stale decision log
     setLoading(true);
     setActiveTab('portfolio');
     try {

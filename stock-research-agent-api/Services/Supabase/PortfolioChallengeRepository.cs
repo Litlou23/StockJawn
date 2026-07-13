@@ -36,6 +36,12 @@ public class PortfolioChallengeRepository
         return row is not null ? MapChallenge(row) : null;
     }
 
+    public async Task<List<PortfolioChallenge>> GetActiveChallengesAsync()
+    {
+        var rows = await _db.SelectAsync("portfolio_challenges", filter: "status=eq.active", order: "created_at.asc");
+        return rows.Select(MapChallenge).ToList();
+    }
+
     public async Task<List<PortfolioChallenge>> GetAllChallengesAsync()
     {
         var rows = await _db.SelectAsync("portfolio_challenges", order: "created_at.desc");
