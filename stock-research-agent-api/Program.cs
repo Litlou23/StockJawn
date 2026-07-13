@@ -146,6 +146,8 @@ try
     builder.Services.AddSingleton<IDiscoveryProvider, TwelveDataDiscoveryProvider>();
     builder.Services.AddSingleton<IDiscoveryProvider, CongressDiscoveryProvider>();
     builder.Services.AddSingleton<IDiscoveryProvider, MarketIntelligenceDiscoveryProvider>();
+    builder.Services.AddSingleton<FmpClient>();
+    builder.Services.AddSingleton<IDiscoveryProvider, FmpDiscoveryProvider>();
     builder.Services.AddSingleton<IDiscoveryEventRepository, SupabaseDiscoveryEventRepository>();
     builder.Services.AddSingleton<IDiscoveryEngine, DiscoveryEngine>();
     // ── Continuous Discovery Engine ─────────────────────────────

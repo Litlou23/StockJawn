@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Evidence;
 using StockResearchAgent.Api.Services.ResearchUniverse;
 
 namespace StockResearchAgent.Api.Services.Discovery;
@@ -19,17 +20,20 @@ public class DiscoveryEngine : IDiscoveryEngine
     private readonly IEnumerable<IDiscoveryProvider> _providers;
     private readonly IResearchUniverseService _universe;
     private readonly IDiscoveryEventRepository _eventRepo;
+    private readonly IEvidenceService _evidence;
     private readonly ILogger<DiscoveryEngine> _logger;
 
     public DiscoveryEngine(
         IEnumerable<IDiscoveryProvider> providers,
         IResearchUniverseService universe,
         IDiscoveryEventRepository eventRepo,
+        IEvidenceService evidence,
         ILogger<DiscoveryEngine> logger)
     {
         _providers = providers;
         _universe = universe;
         _eventRepo = eventRepo;
+        _evidence = evidence;
         _logger = logger;
     }
 
@@ -73,11 +77,14 @@ public class DiscoveryEngine : IDiscoveryEngine
         var newAssets = 0;
         var updatedAssets = 0;
 
+        var evidenceCreated = 0;
+
         foreach (var evt in deduplicated)
         {
             try
             {
-                var existing = activeTickers.Contains(evt.Ticker.ToUpperInvariant());
+                var ticker = evt.Ticker.ToUpperInvariant();
+                var existing = activeTickers.Contains(ticker);
                 var asset = await _universe.DiscoverAsync(evt.Ticker, evt.Source, evt.Reason);
 
                 if (asset is not null)
@@ -87,7 +94,20 @@ public class DiscoveryEngine : IDiscoveryEngine
                     else
                     {
                         newAssets++;
-                        activeTickers.Add(evt.Ticker.ToUpperInvariant());
+                        activeTickers.Add(ticker);
+                    }
+
+                    // Record evidence and sync Interest Score from aggregator
+                    try
+                    {
+                        await _evidence.RecordFromDiscoveryAsync(evt);
+                        await _evidence.SyncToResearchAssetAsync(ticker);
+                        evidenceCreated++;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex,
+                            "[discovery] Failed to record evidence for {Ticker}", ticker);
                     }
                 }
             }
@@ -112,7 +132,7 @@ public class DiscoveryEngine : IDiscoveryEngine
             ProviderResults = providerResults,
             TotalDuration = sw.Elapsed,
             Summary = $"Discovery complete: {allEvents.Count} events from {succeeded}/{succeeded + failed} providers → " +
-                      $"{newAssets} new + {updatedAssets} updated assets ({sw.Elapsed.TotalSeconds:F1}s)",
+                      $"{newAssets} new + {updatedAssets} updated assets, {evidenceCreated} evidence ({sw.Elapsed.TotalSeconds:F1}s)",
         };
 
         _logger.LogInformation("[discovery] {Summary}", result2.Summary);

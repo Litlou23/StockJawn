@@ -30,9 +30,9 @@ public class ResearchUniverseService : IResearchUniverseService
         var existing = await _repo.GetActiveByTickerAsync(ticker);
         if (existing is not null)
         {
-            // Bump activity and evidence
-            await RecordEvidenceAsync(existing.Id, source, 5);
-            _logger.LogDebug("[research-universe] {Ticker} already active, updated evidence", ticker);
+            // Bump activity and evidence count only — Interest Score is owned by EvidenceAggregator
+            await RecordEvidenceAsync(existing.Id, source, 0);
+            _logger.LogDebug("[research-universe] {Ticker} already active, recorded activity", ticker);
             return await _repo.GetByIdAsync(existing.Id);
         }
 
@@ -107,6 +107,21 @@ public class ResearchUniverseService : IResearchUniverseService
             EvidenceCount = asset.EvidenceCount + 1,
             InterestScore = Math.Clamp(asset.InterestScore + scoreImpact, 0, 100),
             LastActivity = DateTimeOffset.UtcNow,
+            LastUpdated = DateTimeOffset.UtcNow,
+        };
+
+        await _repo.UpdateAsync(updated);
+        return true;
+    }
+
+    public async Task<bool> UpdateInterestScoreAsync(string assetId, int newScore)
+    {
+        var asset = await _repo.GetByIdAsync(assetId);
+        if (asset is null) return false;
+
+        var updated = asset with
+        {
+            InterestScore = Math.Clamp(newScore, 0, 100),
             LastUpdated = DateTimeOffset.UtcNow,
         };
 

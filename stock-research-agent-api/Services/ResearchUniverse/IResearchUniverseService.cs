@@ -51,6 +51,10 @@ public interface IResearchUniverseService
     /// Updates evidence count, interest score, and last activity.</summary>
     Task<bool> RecordEvidenceAsync(string assetId, string evidenceType, int scoreImpact);
 
+    /// <summary>Set the Interest Score directly from the EvidenceAggregator.
+    /// Does NOT increment EvidenceCount. This is the sole path for score updates.</summary>
+    Task<bool> UpdateInterestScoreAsync(string assetId, int newScore);
+
     /// <summary>Update the thesis for an asset under investigation.</summary>
     Task<bool> UpdateThesisAsync(string assetId, string thesis);
 

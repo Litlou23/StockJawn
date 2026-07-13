@@ -141,9 +141,8 @@ public class EvidenceService : IEvidenceService
 
         var snapshot = await GetSnapshotAsync(ticker);
 
-        // Update the research asset with computed evidence values
-        await _universe.RecordEvidenceAsync(asset.Id, "evidence-sync",
-            snapshot.InterestScore - asset.InterestScore); // delta
+        // Set Interest Score directly from the aggregator (sole owner of score computation)
+        await _universe.UpdateInterestScoreAsync(asset.Id, snapshot.InterestScore);
 
         if (!string.IsNullOrEmpty(snapshot.CurrentThesis))
             await _universe.UpdateThesisAsync(asset.Id, snapshot.CurrentThesis);
@@ -171,9 +170,8 @@ public class EvidenceService : IEvidenceService
                 var snapshot = snapshots.TryGetValue(asset.Ticker, out var s)
                     ? s : new EvidenceSnapshot { Ticker = asset.Ticker };
 
-                // Update the research asset with computed evidence values
-                await _universe.RecordEvidenceAsync(asset.Id, "evidence-sync",
-                    snapshot.InterestScore - asset.InterestScore);
+                // Set Interest Score directly from the aggregator (sole owner of score computation)
+                await _universe.UpdateInterestScoreAsync(asset.Id, snapshot.InterestScore);
 
                 if (!string.IsNullOrEmpty(snapshot.CurrentThesis))
                     await _universe.UpdateThesisAsync(asset.Id, snapshot.CurrentThesis);

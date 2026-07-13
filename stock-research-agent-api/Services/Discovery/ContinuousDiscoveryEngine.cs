@@ -266,10 +266,11 @@ public class ContinuousDiscoveryEngine : IContinuousDiscoveryEngine
                     }
                 }
 
-                // 2. Convert to Evidence and persist
+                // 2. Convert to Evidence, persist, and sync Interest Score from aggregator
                 try
                 {
                     await _evidence.RecordFromDiscoveryAsync(evt);
+                    await _evidence.SyncToResearchAssetAsync(ticker);
                     evidenceCreated++;
                 }
                 catch (Exception ex)

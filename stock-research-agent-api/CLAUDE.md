@@ -89,6 +89,34 @@ Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM
 
 **Monday chaining:** On Mondays, `weekly-research-monday` (13:00 UTC) runs first to refresh the watchlist, then chains directly to the morning scan via `DynamicPickOrchestrator.RunDynamicMorningPicksAsync()` in the same background task. The `research-morning-scan` cron is Tue-Fri only (`0 13 * * 2-5`) to avoid collision. The chaining code is in `WatchlistController.cs` `RunWeeklyResearch` method.
 
+## Interest Score — Single Source of Truth
+
+Interest Score is computed ONLY by `EvidenceAggregator.ComputeInterestScoreInternal`. Discovery engines never modify it directly.
+
+**Data flow:**
+```
+DiscoveryProvider.ScanAsync() → DiscoveryEvent
+  → DiscoveryEngine/ContinuousDiscoveryEngine
+    → ResearchUniverseService.DiscoverAsync() [bumps EvidenceCount + LastActivity, score unchanged]
+    → EvidenceService.RecordFromDiscoveryAsync() [persists evidence record]
+    → EvidenceService.SyncToResearchAssetAsync() [aggregator computes score → UpdateInterestScoreAsync]
+```
+
+**Formula** (`EvidenceAggregator.ComputeInterestScoreInternal`):
+```
+volumeScore  = sum(|effectiveWeight|) × 15
+peakScore    = max(importance) × 0.3
+diversityBonus = (distinctEvidenceTypeCount - 1) × 5
+InterestScore = Clamp(volumeScore + peakScore + diversityBonus, 0, 100)
+```
+
+Where `effectiveWeight = confidence × (importance / 100.0)` per evidence record, after decay (currently passthrough).
+
+**Key methods:**
+- `UpdateInterestScoreAsync(assetId, newScore)` — sets score directly, does NOT increment EvidenceCount
+- `RecordEvidenceAsync(assetId, type, scoreImpact: 0)` — bumps EvidenceCount + LastActivity only
+- `SyncToResearchAssetAsync(ticker)` — computes aggregated snapshot, writes score via UpdateInterestScoreAsync
+
 ## Research Universe → Prediction Pipeline Integration
 
 The Morning Scan pipeline now consumes Research Universe data during prediction generation:
@@ -106,6 +134,37 @@ The Morning Scan pipeline now consumes Research Universe data during prediction 
 - `ResearchTimeline` — reserved for Learning and explanation improvements
 
 **Backward compatibility:** All new parameters are optional with null defaults. Watchlist-fallback tickers (when Research Universe is empty) pass through with `HasResearchAsset = false` and receive no research universe scoring adjustments.
+
+## FMP Discovery Provider
+
+Financial Modeling Prep (FMP) is registered as an `IDiscoveryProvider` and participates automatically in both `DiscoveryEngine` (full scan) and `ContinuousDiscoveryEngine` (incremental) cycles via `IEnumerable<IDiscoveryProvider>` DI injection.
+
+**Files:**
+- `Services/UniverseDiscovery/FmpClient.cs` — low-level HTTP client + `FmpOptions` config class
+- `Services/Discovery/Providers/FmpDiscoveryProvider.cs` — `IDiscoveryProvider` impl, emits `DiscoveryEvent` records
+- `Tests/FmpDiscoveryProviderTests.cs` — unit tests for parsing, normalization, importance scaling
+
+**Endpoints used (Starter plan, 300 req/min, 20 GB/30 days):**
+- `/stable/news/stock-latest` → `DiscoveryCategory.News` (source: `fmp-news`)
+- `/stable/news/press-releases` → `DiscoveryCategory.Filing` (source: `fmp-press-release`)
+- `/stable/earnings-calendar` → `DiscoveryCategory.Earnings` (source: `fmp-earnings`)
+- `/stable/sec-filings-search/search-by-form-type` → `DiscoveryCategory.Filing` (source: `fmp-sec-filing`)
+- `/stable/upgrades-downgrades-grading` → `DiscoveryCategory.AnalystAction` (source: `fmp-analyst`)
+- `/stable/insider-trading/latest` → `DiscoveryCategory.InsiderActivity` (source: `fmp-insider`)
+
+**Configuration (env vars):**
+- `FMP_API_KEY` (required) — API key from financialmodelingprep.com
+- `FMP_ENABLED` — `true`/`false` (default: true if key is set)
+- `FMP_BASE_URL` — override base URL (default: `https://financialmodelingprep.com`)
+- `FMP_REQUESTS_PER_MINUTE` — rate limit (default: 60, Starter allows 300)
+- `FMP_MAX_EVENTS_PER_RUN` — cap events per scan (default: 200)
+- `FMP_TIMEOUT_SECONDS` — HTTP timeout (default: 20)
+
+**Rate limiting:** Built-in semaphore-based throttle in `FmpClient` enforces `RequestsPerMinute`. Each scan uses ~6 API calls (news + press releases + earnings + SEC filings + analyst grades + insider trades).
+
+## Research Asset Enrichment (FUTURE — not yet implemented)
+
+Documented in `RESEARCH_ASSET_ENRICHMENT.md`. A future initiative to evolve Research Assets into complete research dossiers with historical market data, company intelligence, fundamentals, corporate event patterns, and market behavior profiles. Key constraints: provides context only (not scores), does not modify the scoring/prediction/learning engines, extends the existing Research Universe rather than introducing new services. See the doc for enrichment categories, roadmap phases, and the architectural decision record.
 
 ## Deployment
 
