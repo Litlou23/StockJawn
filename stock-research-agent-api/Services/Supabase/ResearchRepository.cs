@@ -239,6 +239,24 @@ public class ResearchRepository
         return true;
     }
 
+    public async Task<List<PredictionInput>> GetPredictionInputsAsync(List<string> predictionIds)
+    {
+        if (predictionIds.Count == 0) return [];
+        var filter = $"prediction_id=in.({string.Join(",", predictionIds)})";
+        var rows = await _db.SelectAsync("prediction_inputs", filter: filter, order: "created_at.asc");
+        return rows.Select(r => new PredictionInput
+        {
+            Id = r["id"]?.ToString() ?? "",
+            PredictionId = r["prediction_id"]?.ToString() ?? "",
+            InputType = r["input_type"]?.ToString() ?? "",
+            SourceName = r["source_name"]?.ToString() ?? "",
+            SourceUrl = r["source_url"]?.ToString(),
+            SourceRecordId = r["source_record_id"]?.ToString(),
+            Summary = r["summary"]?.ToString() ?? "",
+            CreatedAt = GetDateTimeOffset(r, "created_at"),
+        }).ToList();
+    }
+
     // -----------------------------------------------------------------------
     // Prediction Outcomes
     // -----------------------------------------------------------------------
@@ -934,5 +952,21 @@ public class ResearchRepository
         return await _db.SelectAsync("signal_interactions",
             filter: "direction=eq.all&both_strong_count=gte.3",
             order: "synergy_score.desc", limit: 50);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cap Tuning Stats (self-tuning confidence caps)
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> UpsertCapTuningStatAsync(object stat)
+    {
+        return await _db.UpsertAsync("cap_tuning_stats", stat,
+            onConflict: "cap_reason");
+    }
+
+    public async Task<List<JsonObject>> GetCapTuningStatsAsync()
+    {
+        return await _db.SelectAsync("cap_tuning_stats",
+            order: "computed_at.desc", limit: 50);
     }
 }

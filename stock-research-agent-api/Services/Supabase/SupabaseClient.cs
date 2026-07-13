@@ -162,6 +162,20 @@ public class SupabaseClient
     }
 
     // -----------------------------------------------------------------------
+    // HELPERS
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Build a PostgREST IN filter: column=in.(val1,val2,val3).
+    /// Escapes values for safe URL embedding.
+    /// </summary>
+    public static string InFilter(string column, IEnumerable<string> values)
+    {
+        var escaped = values.Select(v => $"\"{Uri.EscapeDataString(v)}\"");
+        return $"{column}=in.({string.Join(",", escaped)})";
+    }
+
+    // -----------------------------------------------------------------------
     // INSERT
     // -----------------------------------------------------------------------
 
@@ -333,5 +347,30 @@ public class SupabaseClient
             _logger.LogError(ex, "[supabase] UPSERT {Table} error", table);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Batch upsert: sends all rows in a single HTTP call.
+    /// PostgREST accepts JSON arrays natively for upserts.
+    /// Chunks into batches of <paramref name="chunkSize"/> to stay under
+    /// Supabase's request-size limits.
+    /// </summary>
+    public async Task<bool> UpsertManyAsync(string table, IReadOnlyList<object> rows, string onConflict, int chunkSize = 500)
+    {
+        if (!_configured || rows.Count == 0) return true;
+
+        // Small enough to send in one shot
+        if (rows.Count <= chunkSize)
+            return await UpsertAsync(table, rows, onConflict);
+
+        // Chunk into batches
+        var allOk = true;
+        for (var i = 0; i < rows.Count; i += chunkSize)
+        {
+            var chunk = rows.Skip(i).Take(chunkSize).ToList();
+            if (!await UpsertAsync(table, chunk, onConflict))
+                allOk = false;
+        }
+        return allOk;
     }
 }

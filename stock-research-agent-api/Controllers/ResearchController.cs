@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Discovery;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.Supabase;
@@ -152,6 +153,47 @@ public class ResearchController : ControllerBase
         var run = await _repo.GetLatestResearchRunAsync();
         if (run is null) return Ok(new { report = "No research runs found.", run = (object?)null });
         return Ok(new { report = run.Summary ?? "No summary available.", run });
+    }
+
+    /// <summary>GET /api/research/timeline/{ticker} — immutable research timeline for a stock.</summary>
+    [HttpGet("timeline/{ticker}")]
+    public async Task<IActionResult> GetTimeline(
+        string ticker,
+        [FromQuery] int limit = 50,
+        [FromServices] IResearchTimelineRepository timelineRepo = null!)
+    {
+        var events = await timelineRepo.GetTimelineAsync(ticker, limit);
+        return Ok(new
+        {
+            ticker = ticker.ToUpperInvariant(),
+            count = events.Count,
+            timeline = events.Select(e => new
+            {
+                e.Id,
+                e.Ticker,
+                e.Timestamp,
+                eventType = e.EventType.ToString(),
+                e.Description,
+                e.Source,
+                e.RelatedEntityId,
+                e.RelatedEntityType,
+                e.InterestScoreSnapshot,
+                e.ResearchStateSnapshot,
+                e.ThesisSnapshot,
+            }),
+        });
+    }
+
+    /// <summary>GET /api/research/historical-profile/{ticker} — one-time historical profile.</summary>
+    [HttpGet("historical-profile/{ticker}")]
+    public async Task<IActionResult> GetHistoricalProfile(
+        string ticker,
+        [FromServices] IHistoricalProfileBuilder profileBuilder = null!)
+    {
+        var profile = await profileBuilder.GetProfileAsync(ticker);
+        if (profile is null)
+            return NotFound(new { error = $"No historical profile found for {ticker.ToUpperInvariant()}" });
+        return Ok(profile);
     }
 }
 

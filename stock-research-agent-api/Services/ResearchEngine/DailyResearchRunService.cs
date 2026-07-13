@@ -1,4 +1,6 @@
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Knowledge;
+using StockResearchAgent.Api.Services.ResearchUniverse;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -14,26 +16,32 @@ public class DailyResearchRunService
     private readonly PredictionGenerator _predGen;
     private readonly OutcomeEvaluator _outcomeEval;
     private readonly LearningEngine _learning;
+    private readonly IKnowledgeEngine _knowledge;
     private readonly DailyReportService _reports;
     private readonly ResearchRepository _repo;
     private readonly WatchlistRepository _watchlistRepo;
+    private readonly IResearchUniverseService _universe;
     private readonly ILogger<DailyResearchRunService> _logger;
 
     public DailyResearchRunService(
         PredictionGenerator predGen,
         OutcomeEvaluator outcomeEval,
         LearningEngine learning,
+        IKnowledgeEngine knowledge,
         DailyReportService reports,
         ResearchRepository repo,
         WatchlistRepository watchlistRepo,
+        IResearchUniverseService universe,
         ILogger<DailyResearchRunService> logger)
     {
         _predGen = predGen;
         _outcomeEval = outcomeEval;
         _learning = learning;
+        _knowledge = knowledge;
         _reports = reports;
         _repo = repo;
         _watchlistRepo = watchlistRepo;
+        _universe = universe;
         _logger = logger;
     }
 
@@ -68,17 +76,17 @@ public class DailyResearchRunService
         try
         {
             // 1. Build market snapshots from research candidates
-            var tickers = await GetResearchCandidatesAsync();
+            var (tickers, assetLookup) = await GetResearchCandidatesAsync();
 
             if (tickers.Length == 0)
             {
-                _logger.LogWarning("[research-engine] No active watchlist items — run weekly research first to populate");
-                await _repo.CompleteResearchRunAsync(run.Id, "No active watchlist items. Run weekly research first.", 0, 0,
-                    ["No active watchlist items"]);
-                return new MorningScanResult { RunId = run.Id, Report = "No active watchlist items. Run weekly research first to discover tickers.", Errors = ["No active watchlist items"] };
+                _logger.LogWarning("[research-engine] No research candidates — Research Universe is empty and watchlist fallback returned nothing");
+                await _repo.CompleteResearchRunAsync(run.Id, "No research candidates. Run discovery first to populate the Research Universe.", 0, 0,
+                    ["No research candidates"]);
+                return new MorningScanResult { RunId = run.Id, Report = "No research candidates. Run discovery first to populate the Research Universe.", Errors = ["No research candidates"] };
             }
 
-            _logger.LogInformation("[research-engine] Building snapshots for {Count} active watchlist tickers: [{Tickers}]",
+            _logger.LogInformation("[research-engine] Building snapshots for {Count} research candidates: [{Tickers}]",
                 tickers.Length, string.Join(", ", tickers));
             var snapshotTasks = tickers
                 .Select(t => _predGen.BuildMarketSnapshotAsync(t, run.Id));
@@ -100,7 +108,7 @@ public class DailyResearchRunService
             // 2. Generate predictions
             _logger.LogInformation("[research-engine] Generating predictions...");
             var (predictions, allInputs) = await _predGen.GeneratePredictionsForWatchlistAsync(
-                tickers, run.Id, snapshots);
+                tickers, run.Id, snapshots, assetLookup);
 
             // Save predictions
             var predRows = predictions.Select(p => (object)new
@@ -258,15 +266,42 @@ public class DailyResearchRunService
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Returns the tickers that Morning Scan should research. Today this is
-    /// simply every active watchlist item. Tomorrow it can layer in
-    /// prioritization, budget awareness, or round-robin without touching
-    /// the rest of the scan pipeline.
+    /// Returns the research candidates that Morning Scan should evaluate.
+    /// Sources candidates exclusively from the Research Universe — only
+    /// active (non-archived) Research Assets are evaluated. The watchlist
+    /// is used as a fallback if the Research Universe is empty, to avoid
+    /// a completely silent run during the transition period.
+    ///
+    /// Returns full ResearchAsset objects so the prediction pipeline can
+    /// access InterestScore, EvidenceCount, ResearchState, and other
+    /// Research Universe metadata during scoring.
     /// </summary>
-    private async Task<string[]> GetResearchCandidatesAsync()
+    private async Task<(string[] Tickers, Dictionary<string, ResearchAsset> AssetLookup)> GetResearchCandidatesAsync()
     {
+        var activeAssets = await _universe.GetActiveAssetsAsync(500);
+        // Deduplicate by ticker (case-insensitive), keeping highest InterestScore
+        var assetLookup = activeAssets
+            .GroupBy(a => a.Ticker, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderByDescending(a => a.InterestScore).First(),
+                StringComparer.OrdinalIgnoreCase);
+
+        if (assetLookup.Count > 0)
+        {
+            _logger.LogInformation(
+                "[research-engine] Sourced {Count} candidates from Research Universe",
+                assetLookup.Count);
+            return (assetLookup.Keys.ToArray(), assetLookup);
+        }
+
+        // Fallback: if Research Universe is empty, use watchlist so we don't
+        // produce zero predictions during the bootstrap period.
+        _logger.LogWarning(
+            "[research-engine] Research Universe is empty — falling back to watchlist");
         var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
-        return activeWatchlist.Select(w => w.Ticker).ToArray();
+        var tickers = activeWatchlist.Select(w => w.Ticker).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return (tickers, new Dictionary<string, ResearchAsset>(StringComparer.OrdinalIgnoreCase));
     }
 
     // -----------------------------------------------------------------------
@@ -296,12 +331,21 @@ public class DailyResearchRunService
         {
             // Run the unified learning pipeline
             var result = await _learning.RunFullLearningCycleAsync();
+            var knowledge = await _knowledge.RunKnowledgeCycleAsync();
             result = result with { RunId = run.Id };
+            result = result with
+            {
+                KnowledgeCasesIndexed = knowledge.CasesIndexed,
+                KnowledgePatternsDetected = knowledge.PatternsDetected,
+                KnowledgeRulesGenerated = knowledge.RulesGenerated,
+                Report = $"{result.Report} {knowledge.Summary}",
+            };
 
             await _repo.CompleteResearchRunAsync(run.Id, result.Report, 0, 0, result.Errors);
 
-            _logger.LogInformation("[research-engine] Learning cycle complete: {Obs} observations, {Insights} insights, {Weights} weight changes",
-                result.ObservationsCreated, result.InsightsGenerated, result.WeightsAdjusted);
+            _logger.LogInformation("[research-engine] Learning cycle complete: {Obs} observations, {Insights} insights, {Weights} weight changes, {Cases} knowledge cases, {Patterns} patterns",
+                result.ObservationsCreated, result.InsightsGenerated, result.WeightsAdjusted,
+                result.KnowledgeCasesIndexed, result.KnowledgePatternsDetected);
             return result;
         }
         catch (Exception ex)

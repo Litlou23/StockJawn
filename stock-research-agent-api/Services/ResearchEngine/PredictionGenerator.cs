@@ -2,9 +2,13 @@ using System.Text.Json;
 using OpenAI.Chat;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
-using StockResearchAgent.Api.Services.Providers.StockFit;
+using StockResearchAgent.Api.Services.MarketIntelligence;
+// StockFitProvider and FinnhubProvider now injected via MarketSnapshotBuilder
+using StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.ResearchSignals;
+using StockResearchAgent.Api.Services.Discovery;
+using StockResearchAgent.Api.Services.ResearchUniverse;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -31,10 +35,12 @@ public class PredictionGenerator
     private readonly ResearchRepository _repo;
     private readonly PaperStockCandidateRepository _stockRepo;
     private readonly ResearchSignalService _signalService;
+    private readonly IMarketIntelligencePipeline _marketIntelligence;
+    private readonly IScoringEngine _scoringEngine;
     private readonly EnsembleScoringService _ensemble;
     private readonly TradeSetupEngine _setupEngine;
-    private readonly StockFitProvider _stockFit;
-    private readonly FinnhubProvider _finnhub;
+    private readonly MarketSnapshotBuilder _snapshotBuilder;
+    private readonly IHistoricalProfileBuilder _profileBuilder;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
@@ -44,10 +50,12 @@ public class PredictionGenerator
         ResearchRepository repo,
         PaperStockCandidateRepository stockRepo,
         ResearchSignalService signalService,
+        IMarketIntelligencePipeline marketIntelligence,
+        IScoringEngine scoringEngine,
         EnsembleScoringService ensemble,
         TradeSetupEngine setupEngine,
-        StockFitProvider stockFit,
-        FinnhubProvider finnhub,
+        MarketSnapshotBuilder snapshotBuilder,
+        IHistoricalProfileBuilder profileBuilder,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
@@ -55,10 +63,12 @@ public class PredictionGenerator
         _repo = repo;
         _stockRepo = stockRepo;
         _signalService = signalService;
+        _marketIntelligence = marketIntelligence;
+        _scoringEngine = scoringEngine;
         _ensemble = ensemble;
         _setupEngine = setupEngine;
-        _stockFit = stockFit;
-        _finnhub = finnhub;
+        _snapshotBuilder = snapshotBuilder;
+        _profileBuilder = profileBuilder;
         _logger = logger;
         _ensembleEnabled = string.Equals(
             configuration["ENSEMBLE_SCORING_ENABLED"], "true",
@@ -77,169 +87,18 @@ public class PredictionGenerator
     }
 
     // -----------------------------------------------------------------------
-    // Market snapshot builder
+    // Market snapshot builder — delegates to MarketSnapshotBuilder
     // -----------------------------------------------------------------------
 
-    public async Task<MarketSnapshot> BuildMarketSnapshotAsync(string ticker, string runId)
-    {
-        var (quote, bars, technical, warnings) = await _marketData.GetFullContextAsync(ticker);
-
-        var newsContext = new List<MarketSnapshotNews>();
-
-        // StockFit — company news + SEC filings + earnings context. Never a
-        // source of price/technical data. If not configured or the endpoint
-        // errors, we log a warning and continue with an empty catalyst set —
-        // never fake filings/articles.
-        if (_stockFit.IsConfigured)
-        {
-            try
-            {
-                var news = await _stockFit.GetNewsAsync(ticker, limit: 15);
-                foreach (var w in news.Warnings) warnings.Add($"stockfit_news:{w}");
-                foreach (var a in news.Data ?? [])
-                {
-                    newsContext.Add(new MarketSnapshotNews
-                    {
-                        Title = a.Title,
-                        SourceName = a.Publisher ?? "stockfit",
-                        Url = a.ArticleUrl ?? "",
-                        PublishedAt = (a.PublishedAt ?? DateTimeOffset.UtcNow).ToString("o"),
-                        CatalystType = "news",
-                        Sentiment = a.Sentiment,
-                        ImportanceScore = ScoreNewsImportance(a),
-                    });
-                }
-
-                var filings = await _stockFit.GetFilingsAsync(ticker, limit: 10);
-                foreach (var w in filings.Warnings) warnings.Add($"stockfit_filings:{w}");
-                foreach (var f in filings.Data ?? [])
-                {
-                    newsContext.Add(new MarketSnapshotNews
-                    {
-                        Title = f.Headline,
-                        SourceName = "SEC via stockfit",
-                        Url = f.FilingUrl ?? "",
-                        PublishedAt = (f.FilingDate ?? DateTimeOffset.UtcNow).ToString("o"),
-                        CatalystType = MapFilingToCatalystType(f.FilingType, f.EventType),
-                        Sentiment = null, // filings are structural — no sentiment invented
-                        ImportanceScore = f.CatalystStrengthScore,
-                    });
-                }
-
-                var earnings = await _stockFit.GetEarningsCalendarAsync(ticker);
-                foreach (var w in earnings.Warnings) warnings.Add($"stockfit_earnings:{w}");
-                foreach (var e in (earnings.Data ?? []).Where(x => x.DaysUntilReport is >= 0 and <= 14))
-                {
-                    newsContext.Add(new MarketSnapshotNews
-                    {
-                        Title = $"Earnings in {e.DaysUntilReport}d ({e.FiscalPeriod ?? "?"}{(e.Time is null ? "" : " " + e.Time)})",
-                        SourceName = "earnings via stockfit",
-                        Url = "",
-                        PublishedAt = DateTimeOffset.UtcNow.ToString("o"),
-                        CatalystType = "earnings",
-                        Sentiment = null,
-                        ImportanceScore = e.DaysUntilReport switch
-                        {
-                            <= 1 => 95,
-                            <= 3 => 85,
-                            <= 7 => 70,
-                            _ => 55,
-                        },
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[prediction] StockFit fetch failed for {Ticker}", ticker);
-                warnings.Add($"stockfit_exception:{ex.Message}");
-            }
-        }
-        else
-        {
-            warnings.Add("stockfit_not_configured");
-        }
-
-        // ── Finnhub — company-specific news (last 3 days) ──
-        // Complements StockFit with real-time company news from Finnhub.
-        // Returns empty list if FINNHUB_API_KEY is not configured.
-        try
-        {
-            var finnhubNews = await _finnhub.GetCompanyNewsAsync(ticker, daysBack: 3);
-            if (finnhubNews.Count > 0)
-            {
-                _logger.LogInformation("[prediction] Finnhub returned {Count} news items for {Ticker}", finnhubNews.Count, ticker);
-                foreach (var article in finnhubNews.Take(10))
-                {
-                    // Skip if we already have a news item with the same title (dedup vs StockFit)
-                    if (newsContext.Any(n => string.Equals(n.Title, article.Headline, StringComparison.OrdinalIgnoreCase)))
-                        continue;
-
-                    var hoursAgo = (DateTimeOffset.UtcNow - article.Datetime).TotalHours;
-                    var importance = hoursAgo switch
-                    {
-                        <= 6 => 65.0,
-                        <= 24 => 50.0,
-                        <= 48 => 35.0,
-                        _ => 25.0,
-                    };
-
-                    newsContext.Add(new MarketSnapshotNews
-                    {
-                        Title = article.Headline,
-                        SourceName = article.Source ?? "finnhub",
-                        Url = article.Url ?? "",
-                        PublishedAt = article.Datetime.ToString("o"),
-                        CatalystType = "news",
-                        Sentiment = null, // Finnhub doesn't provide sentiment — let scoring handle it
-                        ImportanceScore = importance,
-                    });
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[prediction] Finnhub news fetch failed for {Ticker}", ticker);
-            warnings.Add($"finnhub_news_exception:{ex.Message}");
-        }
-
-        // RSS feeds are used for universe discovery only (ticker selection),
-        // not for prediction scoring. News for predictions comes from
-        // Finnhub (company news) and StockFit (SEC filings/earnings).
-
-        var availability = new MarketSnapshotAvailability
-        {
-            MarketDataAvailable = quote is not null,
-            NewsAvailable = newsContext.Count > 0,
-            OptionsChainAvailable = false,
-            Warnings = warnings,
-        };
-
-        var recentBars = bars.Select(b => new MarketSnapshotBar
-        {
-            Date = b.Date, Open = b.Open, High = b.High,
-            Low = b.Low, Close = b.Close, Volume = b.Volume,
-        }).ToList();
-
-        return new MarketSnapshot
-        {
-            Id = "",
-            RunId = runId,
-            Ticker = ticker,
-            Quote = quote,
-            RecentBars = recentBars,
-            TechnicalContext = technical,
-            NewsContext = newsContext,
-            DataAvailability = availability,
-            CreatedAt = DateTimeOffset.UtcNow,
-        };
-    }
+    public Task<MarketSnapshot> BuildMarketSnapshotAsync(string ticker, string runId)
+        => _snapshotBuilder.BuildAsync(ticker, runId);
 
     // -----------------------------------------------------------------------
     // Prediction generation — signals first, AI explains
     // -----------------------------------------------------------------------
 
     public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
-        GeneratePredictionForTickerAsync(string ticker, string runId, MarketSnapshot snapshot)
+        GeneratePredictionForTickerAsync(string ticker, string runId, MarketSnapshot snapshot, ResearchAsset? researchAsset = null)
     {
         // ── Step 1: Compute indicators, benchmark, and scores ────────
         var weights = (await _repo.GetScoringWeightsAsync())
@@ -274,6 +133,45 @@ public class PredictionGenerator
 
         // Fetch active research signals for this ticker
         var researchSignals = await _signalService.GetActiveSignalsForTickerAsync(ticker);
+        var intelligence = await _marketIntelligence.BuildContextAsync(
+            ticker, snapshot, indicators, benchmark, researchSignals);
+
+        // Build Research Universe context from the threaded ResearchAsset (Phase 2)
+        // and Historical Research Profile (Phase 3)
+        HistoricalResearchProfile? historicalProfile = null;
+        try
+        {
+            historicalProfile = await _profileBuilder.GetProfileAsync(ticker);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[prediction] Historical profile lookup skipped for {Ticker}", ticker);
+        }
+
+        var researchUniverse = researchAsset is not null
+            ? new ResearchUniverseContext
+            {
+                InterestScore = researchAsset.InterestScore,
+                EvidenceCount = researchAsset.EvidenceCount,
+                ResearchState = researchAsset.CurrentState,
+                DaysActive = researchAsset.DaysActive,
+                HasResearchAsset = true,
+                HistoricalVolatility = historicalProfile?.HistoricalVolatility,
+                HistoricalAtrPercent = historicalProfile?.AtrPercent,
+                PreviousPredictionAccuracy = historicalProfile?.PreviousPredictionAccuracy,
+                PreviousPredictionCount = historicalProfile?.PreviousPredictionCount ?? 0,
+            }
+            : historicalProfile is not null
+                ? new ResearchUniverseContext
+                {
+                    // Watchlist fallback — no ResearchAsset but profile exists
+                    HasResearchAsset = false,
+                    HistoricalVolatility = historicalProfile.HistoricalVolatility,
+                    HistoricalAtrPercent = historicalProfile.AtrPercent,
+                    PreviousPredictionAccuracy = historicalProfile.PreviousPredictionAccuracy,
+                    PreviousPredictionCount = historicalProfile.PreviousPredictionCount ?? 0,
+                }
+                : null;
 
         ScoringEngine.ScoringResult scoring;
         EnsembleScoringService.EnsembleResult? ensembleResult = null;
@@ -281,7 +179,8 @@ public class PredictionGenerator
         if (_ensembleEnabled)
         {
             ensembleResult = await _ensemble.ScoreWithEnsembleAsync(
-                snapshot, indicators, benchmark, weights, lessons, researchSignals);
+                snapshot, indicators, benchmark, weights, lessons, researchSignals,
+                intelligence, researchUniverse);
             scoring = ensembleResult.BlendedResult;
             _logger.LogInformation(
                 "[prediction] {Ticker}: ensemble scoring — agreement={Agreement:P0}, dominant={Dominant}",
@@ -289,7 +188,8 @@ public class PredictionGenerator
         }
         else
         {
-            scoring = ScoringEngine.Score(snapshot, indicators, benchmark, weights, lessons, researchSignals);
+            scoring = _scoringEngine.Evaluate(
+                snapshot, indicators, benchmark, weights, lessons, researchSignals, intelligence, researchUniverse);
         }
 
         var predType = scoring.PredictionType;
@@ -339,6 +239,7 @@ public class PredictionGenerator
         var bearishCase = explanation?.BearishCase
             ?? string.Join("; ", allSignals.Where(s => s.Contains("bearish") || s.Contains("negative") || s.Contains("below")));
         var thesis = explanation?.Thesis
+            ?? scoring.Thesis?.Narrative
             ?? $"Score: {totalScore:F1}. Signals: {allSignals.Count}. {predType} stance based on {(dataSources.Count > 0 ? string.Join(" + ", dataSources) : "limited data")}.";
         var invalidation = explanation?.InvalidationRule
             ?? (predType == "bullish"
@@ -351,7 +252,7 @@ public class PredictionGenerator
         var timeWindow = DetermineTimeWindow(scoring.Breakdown);
         var entryPrice = snapshot.Quote?.Price;
         var priceCalc = ComputeAtrPriceForecast(
-            entryPrice, predType, timeWindow, snapshot, confidence, risk);
+            entryPrice, predType, timeWindow, snapshot, confidence, risk, scoring.Breakdown, researchUniverse);
 
         // Second-pass finalization: apply R/R-aware caps + actionability tier
         // now that we know the risk/reward ratio.
@@ -378,7 +279,7 @@ public class PredictionGenerator
         confidence = scoring.Confidence;
 
         // ── Per-ticker confidence reliability factor (Bayesian-smoothed) ──
-        // Uses prediction_outcomes for real accuracy (not stock_learning_stats which only tracks paper candidates)
+        // Delegated to ScoringEngine.AdjustForTickerReliability (single source of truth).
         try
         {
             var tickerOutcomes = await _repo.GetTickerAccuracyFromOutcomesAsync(ticker);
@@ -388,39 +289,29 @@ public class PredictionGenerator
                 int n = tickerOutcomes.Value.Total;
                 double tickerAccuracy = (double)tickerOutcomes.Value.Correct / n;
 
-                // Global accuracy from prediction stats
                 var globalStats = await _repo.GetPredictionStatsAsync();
                 double globalAccuracy = globalStats.EvaluatedPredictions > 0
                     ? (double)globalStats.CorrectPredictions / globalStats.EvaluatedPredictions
                     : 0.50;
 
-                // Bayesian smoothing: weight = n / (n + prior_strength)
-                const int priorStrength = 10;
-                double sampleWeight = (double)n / (n + priorStrength);
-                double effectiveAccuracy = sampleWeight * tickerAccuracy + (1 - sampleWeight) * globalAccuracy;
+                var prevConfidence = confidence;
+                var (adjusted, shouldDowngrade) = ScoringEngine.AdjustForTickerReliability(
+                    scoring, tickerAccuracy, n, globalAccuracy);
+                scoring = adjusted;
+                confidence = scoring.Confidence;
 
-                // Hard cutoff: if we're terrible at this ticker, downgrade to watch_only
-                if (effectiveAccuracy < 0.25 && n >= 10)
+                if (shouldDowngrade)
+                {
+                    predType = "watch_only";
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: downgrading to watch_only — ticker reliability triggered",
+                        ticker);
+                }
+                else if (confidence != prevConfidence)
                 {
                     _logger.LogInformation(
-                        "[prediction] {Ticker}: downgrading to watch_only — effective accuracy {Acc:F0}% over {N} predictions is below 25% threshold",
-                        ticker, effectiveAccuracy * 100, n);
-                    predType = "watch_only";
-                    confidence = Math.Min(confidence, 20);
-                }
-                else
-                {
-                    double reliabilityFactor = 0.6 + 0.4 * Math.Clamp(effectiveAccuracy / 0.8, 0, 1);
-
-                    if (reliabilityFactor < 0.95)
-                    {
-                        var prevConfidence = confidence;
-                        confidence = (int)Math.Round(confidence * reliabilityFactor);
-                        confidence = Math.Clamp(confidence, 10, 85);
-                        _logger.LogInformation(
-                            "[prediction] {Ticker}: ticker reliability {Factor:F2} (accuracy={Acc:F0}%, n={N}, effective={Eff:F0}%) — confidence {Prev}→{New}",
-                            ticker, reliabilityFactor, tickerAccuracy * 100, n, effectiveAccuracy * 100, prevConfidence, confidence);
-                    }
+                        "[prediction] {Ticker}: ticker reliability adjusted confidence {Prev}→{New} (accuracy={Acc:F0}%, n={N})",
+                        ticker, prevConfidence, confidence, tickerAccuracy * 100, n);
                 }
             }
         }
@@ -501,7 +392,7 @@ public class PredictionGenerator
             Status = "open",
         };
 
-        var inputs = BuildInputs(ticker, snapshot, lessons);
+        var inputs = BuildInputs(ticker, snapshot, lessons, intelligence);
         if (explanation is not null)
         {
             inputs.Add(new PredictionInput
@@ -521,37 +412,65 @@ public class PredictionGenerator
     }
 
     public async Task<(List<PredictionCandidate> Predictions, List<PredictionInput> AllInputs)>
-        GeneratePredictionsForWatchlistAsync(string[] watchlist, string runId, List<MarketSnapshot> snapshots)
+        GeneratePredictionsForWatchlistAsync(string[] watchlist, string runId, List<MarketSnapshot> snapshots, Dictionary<string, ResearchAsset>? assetLookup = null)
     {
         var predictions = new List<PredictionCandidate>();
         var allInputs = new List<PredictionInput>();
 
-        // ── Dedup: fetch open predictions and build ticker→time_windows lookup ──
-        // If a ticker already has an open prediction with the same time_window,
-        // skip it (velocity hasn't changed). If the time_window would be different,
-        // the velocity changed — allow the new prediction.
+        // ── Dedup: fetch recent predictions (any status) created today and build
+        // ticker→time_windows lookup. This prevents duplicates within the same day
+        // even if prior predictions were already evaluated/closed.
+        var todayStart = DateTimeOffset.UtcNow.Date;
+        var recentPredictions = await _repo.GetPredictionsByDateRangeAsync(
+            todayStart, DateTimeOffset.UtcNow);
+        // Also include open predictions from earlier days
         var openPredictions = await _repo.GetOpenPredictionsAsync();
-        var openTimeWindowsByTicker = openPredictions
+        var allExisting = recentPredictions
+            .Concat(openPredictions)
+            .DistinctBy(p => p.Id)
+            .ToList();
+
+        var existingTimeWindowsByTicker = allExisting
             .GroupBy(p => p.Ticker.ToUpperInvariant())
             .ToDictionary(
                 g => g.Key,
                 g => new HashSet<string>(g.Select(p => p.TimeWindow), StringComparer.OrdinalIgnoreCase));
 
+        // Track within-batch additions to prevent intra-batch duplicates
+        var batchTracker = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var snapshot in snapshots)
         {
-            var (pred, inputs) = await GeneratePredictionForTickerAsync(snapshot.Ticker, runId, snapshot);
+            assetLookup?.TryGetValue(snapshot.Ticker, out var asset);
+            var (pred, inputs) = await GeneratePredictionForTickerAsync(snapshot.Ticker, runId, snapshot, asset);
             if (pred is not null)
             {
-                // Dedup check: skip if same ticker already has an open prediction with the same time_window
                 var tickerKey = pred.Ticker.ToUpperInvariant();
-                if (openTimeWindowsByTicker.TryGetValue(tickerKey, out var existingWindows)
+
+                // Check against existing DB predictions
+                if (existingTimeWindowsByTicker.TryGetValue(tickerKey, out var existingWindows)
                     && existingWindows.Contains(pred.TimeWindow))
                 {
                     _logger.LogInformation(
-                        "[prediction] {Ticker}: skipping — open prediction already exists with time_window={TimeWindow}",
+                        "[prediction] {Ticker}: skipping — prediction already exists today with time_window={TimeWindow}",
                         pred.Ticker, pred.TimeWindow);
                     continue;
                 }
+
+                // Check against earlier items in this batch
+                if (batchTracker.TryGetValue(tickerKey, out var batchWindows)
+                    && batchWindows.Contains(pred.TimeWindow))
+                {
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: skipping — duplicate within this batch for time_window={TimeWindow}",
+                        pred.Ticker, pred.TimeWindow);
+                    continue;
+                }
+
+                // Track this prediction
+                if (!batchTracker.ContainsKey(tickerKey))
+                    batchTracker[tickerKey] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                batchTracker[tickerKey].Add(pred.TimeWindow);
 
                 predictions.Add(pred);
                 allInputs.AddRange(inputs);
@@ -740,7 +659,11 @@ public class PredictionGenerator
     // Helpers
     // -----------------------------------------------------------------------
 
-    private static List<PredictionInput> BuildInputs(string ticker, MarketSnapshot snapshot, List<string> lessons)
+    private static List<PredictionInput> BuildInputs(
+        string ticker,
+        MarketSnapshot snapshot,
+        List<string> lessons,
+        MarketIntelligenceContext intelligence)
     {
         var inputs = new List<PredictionInput>();
 
@@ -786,6 +709,28 @@ public class PredictionGenerator
                 InputType = "prior_lesson",
                 SourceName = "learning-engine",
                 Summary = $"{lessons.Count} prior lessons considered: {lessons[0][..Math.Min(100, lessons[0].Length)]}...",
+            });
+        }
+
+        if (!string.IsNullOrWhiteSpace(intelligence.Thesis.Narrative))
+        {
+            inputs.Add(new PredictionInput
+            {
+                PredictionId = "",
+                InputType = "market_thesis",
+                SourceName = "market-intelligence",
+                Summary = intelligence.Thesis.Narrative,
+            });
+        }
+
+        foreach (var evidence in intelligence.Evidence.Take(3))
+        {
+            inputs.Add(new PredictionInput
+            {
+                PredictionId = "",
+                InputType = "market_evidence",
+                SourceName = "market-intelligence",
+                Summary = $"{evidence.Title}: {evidence.Description}",
             });
         }
 
@@ -877,7 +822,9 @@ public class PredictionGenerator
 
     private static AtrPriceForecast ComputeAtrPriceForecast(
         double? entryPrice, string predType, string timeWindow,
-        MarketSnapshot snapshot, int confidence, int risk)
+        MarketSnapshot snapshot, int confidence, int risk,
+        ScoringBreakdown? breakdown = null,
+        ResearchUniverseContext? researchUniverse = null)
     {
         var result = new AtrPriceForecast();
         if (entryPrice is not double ep || ep == 0) return result;
@@ -916,20 +863,46 @@ public class PredictionGenerator
         if (result.AtrPercent < 0.3)
             result.Warnings.Add($"ATR is unusually low ({result.AtrPercent}% of price) — stock may be range-bound");
 
+        // Historical ATR sanity check (Phase 3): if the live ATR diverges
+        // significantly from the historical ATR, flag it. This catches unusual
+        // volatility regimes (e.g., earnings week spike, post-crash compression).
+        if (researchUniverse?.HistoricalAtrPercent is double histAtr && histAtr > 0 && result.AtrPercent is double liveAtr)
+        {
+            var atrRatio = liveAtr / histAtr;
+            if (atrRatio > 2.0)
+                result.Warnings.Add($"Live ATR ({liveAtr:F2}%) is {atrRatio:F1}x historical ATR ({histAtr:F2}%) — unusual volatility expansion");
+            else if (atrRatio < 0.5)
+                result.Warnings.Add($"Live ATR ({liveAtr:F2}%) is {atrRatio:F1}x historical ATR ({histAtr:F2}%) — unusual volatility compression");
+        }
+
         // --- Timeframe multiplier ---
         var tfMultiplier = TimeframeMultipliers.GetValueOrDefault(timeWindow, 1.0);
         result.TimeframeMultiplier = tfMultiplier;
 
-        // --- Signal modifier: 1.0 + (catalyst*0.25) + (volume*0.15) + (trend*0.15) - (risk*0.25) ---
-        var catalystScore = ScoreCatalystFactor(snapshot);
-        var volumeScore = ScoreVolumeFactor(snapshot);
-        var trendScore = ScoreTrendFactor(snapshot);
+        // --- Signal modifier from ScoringEngine breakdown (single source of truth) ---
+        // Derive catalyst/volume/trend factors from ScoringEngine's bucket scores
+        // instead of independently recalculating from raw snapshot data.
+        double catalystFactor, volumeFactor, trendFactor;
+        if (breakdown is not null)
+        {
+            // Normalize ScoringEngine net scores (-30..+30 range) to -1..+1 factor
+            catalystFactor = Math.Clamp((breakdown.CatalystBullish - breakdown.CatalystBearish) / 30.0, -1, 1);
+            volumeFactor = Math.Clamp((breakdown.VolumeBullish - breakdown.VolumeBearish) / 30.0, -1, 1);
+            trendFactor = Math.Clamp((breakdown.TrendBullish - breakdown.TrendBearish) / 30.0, -1, 1);
+        }
+        else
+        {
+            // Fallback for missing breakdown (should not happen in normal flow)
+            catalystFactor = ScoreCatalystFactor(snapshot);
+            volumeFactor = ScoreVolumeFactor(snapshot);
+            trendFactor = ScoreTrendFactor(snapshot);
+        }
         var riskScore = risk / 100.0;
 
         var modifier = 1.0
-            + (catalystScore * 0.25)
-            + (volumeScore * 0.15)
-            + (trendScore * 0.15)
+            + (catalystFactor * 0.25)
+            + (volumeFactor * 0.15)
+            + (trendFactor * 0.15)
             - (riskScore * 0.25);
         modifier = Math.Clamp(modifier, 0.75, 1.75);
         result.SignalModifier = Math.Round(modifier, 3);
@@ -1011,50 +984,6 @@ public class PredictionGenerator
     // -----------------------------------------------------------------------
     // StockFit → MarketSnapshotNews helpers
     // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Deterministic importance score for a StockFit news article. Blends
-    /// provider-supplied relevance with a small sentiment lift; never
-    /// invents. Missing signals default to 30 (neutral placeholder in the
-    /// 0..100 range that catalyst scoring reads).
-    /// </summary>
-    private static double ScoreNewsImportance(NormalizedNewsArticle a)
-    {
-        double baseScore = 40;
-        if (a.RelevanceScore is double rel) baseScore = Math.Clamp(rel * 100.0, 10, 90);
-        if (a.SentimentScore is double s && Math.Abs(s) > 0.3) baseScore += 10;
-        // Recency lift — news from the last 24h counts more than a week-old article.
-        if (a.PublishedAt is DateTimeOffset p)
-        {
-            var hours = (DateTimeOffset.UtcNow - p).TotalHours;
-            if (hours <= 6) baseScore += 15;
-            else if (hours <= 24) baseScore += 8;
-            else if (hours > 168) baseScore *= 0.5;
-        }
-        return Math.Round(Math.Clamp(baseScore, 0, 100), 1);
-    }
-
-    private static string MapFilingToCatalystType(string filingType, string? eventType)
-    {
-        // For 8-K, prefer the inferred event (earnings_release, acquisition,
-        // etc.) since those score differently in the learning engine. Fall
-        // back to filing-type shorthand for non-8-K filings.
-        var ft = filingType.ToUpperInvariant();
-        if (ft == "8-K" && !string.IsNullOrWhiteSpace(eventType))
-            return $"8k_{eventType}";
-
-        return ft switch
-        {
-            "8-K" => "8k_filing",
-            "10-Q" => "quarterly_report",
-            "10-K" => "annual_report",
-            "S-1" or "S-3" => "shelf_or_ipo",
-            "4" => "insider_transaction",
-            "13D" => "beneficial_ownership_change",
-            "13G" or "13F" or "13F-HR" => "institutional_holding",
-            _ => eventType ?? "filing",
-        };
-    }
 
     private static double ScoreVolumeFactor(MarketSnapshot snapshot)
     {

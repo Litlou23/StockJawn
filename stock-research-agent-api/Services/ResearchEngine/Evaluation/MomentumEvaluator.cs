@@ -1,0 +1,61 @@
+namespace StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
+
+public class MomentumEvaluator : IMomentumEvaluator
+{
+    public EvaluatorKind Kind => EvaluatorKind.momentum;
+
+    public EvaluatorOutput Evaluate(EvaluationContext context)
+    {
+        var ind = context.Indicators;
+        var signals = new List<string>();
+        double bull = 0, bear = 0;
+
+        if (ind.Roc5 is double roc5)
+        {
+            if (roc5 > 2) { bull += 5; signals.Add($"Momentum: ROC5 strong up ({roc5:F1}%)"); }
+            else if (roc5 > 0.5) { bull += 2; signals.Add($"Momentum: ROC5 up ({roc5:F1}%)"); }
+            else if (roc5 < -2) { bear += 5; signals.Add($"Momentum: ROC5 strong down ({roc5:F1}%)"); }
+            else if (roc5 < -0.5) { bear += 2; signals.Add($"Momentum: ROC5 down ({roc5:F1}%)"); }
+        }
+
+        if (ind.Roc10 is double roc10)
+        {
+            if (roc10 > 3) { bull += 4; signals.Add($"Momentum: ROC10 strong up ({roc10:F1}%)"); }
+            else if (roc10 > 1) { bull += 2; signals.Add($"Momentum: ROC10 up ({roc10:F1}%)"); }
+            else if (roc10 < -3) { bear += 4; signals.Add($"Momentum: ROC10 strong down ({roc10:F1}%)"); }
+            else if (roc10 < -1) { bear += 2; signals.Add($"Momentum: ROC10 down ({roc10:F1}%)"); }
+        }
+
+        if (ind.Rsi14 is double rsi)
+        {
+            if (rsi > 70) { bear += 3; signals.Add($"Momentum: RSI overbought ({rsi:F0})"); }
+            else if (rsi > 55) { bull += 4; signals.Add($"Momentum: RSI bullish ({rsi:F0})"); }
+            else if (rsi < 30) { bull += 3; signals.Add($"Momentum: RSI oversold ({rsi:F0})"); }
+            else if (rsi < 45) { bear += 4; signals.Add($"Momentum: RSI bearish ({rsi:F0})"); }
+        }
+
+        if (ind.StochasticCloseLocation is double stoch)
+        {
+            if (stoch > 80) { bull += 3; signals.Add($"Momentum: close near highs ({stoch:F0}%)"); }
+            else if (stoch < 20) { bear += 3; signals.Add($"Momentum: close near lows ({stoch:F0}%)"); }
+        }
+
+        return new EvaluatorOutput
+        {
+            Kind = Kind,
+            BullishContribution = Math.Clamp(bull, 0, 20),
+            BearishContribution = Math.Clamp(bear, 0, 20),
+            DebugSignals = signals,
+            DebugInformation = new EvaluatorReasoning
+            {
+                EvaluatorName = nameof(MomentumEvaluator),
+                Summary = "Momentum contribution based on ROC, RSI, and close-location behavior.",
+                Reasons = signals,
+                SupportingFeatureIds = context.Intelligence.Features
+                    .Where(f => f.FeatureId.Contains("momentum", StringComparison.OrdinalIgnoreCase))
+                    .Select(f => f.FeatureId)
+                    .ToList(),
+            },
+        };
+    }
+}

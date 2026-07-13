@@ -3,7 +3,10 @@ using StockResearchAgent.Api.Diagnostics;
 using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.MarketIntelligence;
+using StockResearchAgent.Api.Services.Knowledge;
 using StockResearchAgent.Api.Services.ResearchEngine;
+using StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 using StockResearchAgent.Api.Services.Watchlist;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 using StockResearchAgent.Api.Services.OptionsLab;
@@ -11,7 +14,19 @@ using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Providers.StockFit;
 using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.ResearchSignals.Providers;
+using StockResearchAgent.Api.Services.TradeDecision;
+using StockResearchAgent.Api.Services.TradeDecision.Filters;
 using StockResearchAgent.Api.Services.Portfolio;
+using StockResearchAgent.Api.Services.MarketRegime;
+using StockResearchAgent.Api.Services.AdaptiveLearning;
+using StockResearchAgent.Api.Services.StrategyDiscovery;
+using StockResearchAgent.Api.Services.CaseRepository;
+using StockResearchAgent.Api.Services.KnowledgeBase;
+using StockResearchAgent.Api.Services.ResearchUniverse;
+using StockResearchAgent.Api.Services.Discovery;
+using StockResearchAgent.Api.Services.Discovery.Providers;
+using StockResearchAgent.Api.Services.Evidence;
+using StockResearchAgent.Api.Services.OpportunityLearning;
 using StockResearchAgent.Api.Models;
 
 // =====================================================================
@@ -79,9 +94,82 @@ try
     builder.Services.AddSingleton<ResearchRepository>();
     builder.Services.AddSingleton<TwelveDataProvider>();
     builder.Services.AddSingleton<MarketDataService>();
+    builder.Services.AddSingleton<IMarketFactService, MarketFactService>();
+    builder.Services.AddSingleton<IMarketFeatureService, MarketFeatureService>();
+    builder.Services.AddSingleton<IMarketEvidenceService, MarketEvidenceService>();
+    builder.Services.AddSingleton<IMarketThesisService, MarketThesisService>();
+    builder.Services.AddSingleton<IMarketIntelligencePipeline, MarketIntelligencePipeline>();
+    builder.Services.AddSingleton<ITrendEvaluator, TrendEvaluator>();
+    builder.Services.AddSingleton<IMomentumEvaluator, MomentumEvaluator>();
+    builder.Services.AddSingleton<IVolumeEvaluator, VolumeEvaluator>();
+    builder.Services.AddSingleton<IVolatilityEvaluator, VolatilityEvaluator>();
+    builder.Services.AddSingleton<IMarketContextEvaluator, MarketContextEvaluator>();
+    builder.Services.AddSingleton<ICatalystEvaluator, CatalystEvaluator>();
+    builder.Services.AddSingleton<ILearningAdjustmentEvaluator, LearningAdjustmentEvaluator>();
+    builder.Services.AddSingleton<IResearchSignalEvaluator, ResearchSignalEvaluator>();
+    builder.Services.AddSingleton<IScoreAggregator, ScoreAggregator>();
+    builder.Services.AddSingleton<IConfidenceEngine, ConfidenceEngine>();
+    builder.Services.AddSingleton<IRiskEngine, RiskEngine>();
+    builder.Services.AddSingleton<IScoringEngine, ScoringEngine>();
+    builder.Services.AddSingleton<IKnowledgeRepository, InMemoryKnowledgeRepository>();
+    builder.Services.AddSingleton<IConceptLearningService, ConceptLearningService>();
+    builder.Services.AddSingleton<ICaseLibraryBuilder, CaseLibraryBuilder>();
+    builder.Services.AddSingleton<IKnowledgePatternDetectionService, KnowledgePatternDetectionService>();
+    builder.Services.AddSingleton<IKnowledgeRuleGenerator, KnowledgeRuleGenerator>();
+    builder.Services.AddSingleton<IKnowledgeRetrievalService, KnowledgeRetrievalService>();
+    builder.Services.AddSingleton<IKnowledgeEngine, KnowledgeEngine>();
+    builder.Services.AddSingleton<IExpectedValueCalculator, ExpectedValueCalculator>();
+    builder.Services.AddSingleton<IRiskRewardAnalyzer, RiskRewardAnalyzer>();
+    builder.Services.AddSingleton<ITradeFilter, ConfidenceTradeFilter>();
+    builder.Services.AddSingleton<ITradeFilter, LiquidityTradeFilter>();
+    builder.Services.AddSingleton<ITradeFilter, VolatilityTradeFilter>();
+    builder.Services.AddSingleton<ITradeGradeService, TradeGradeService>();
+    builder.Services.AddSingleton<IDecisionExplanationService, DecisionExplanationService>();
+    builder.Services.AddSingleton<ITradeDecisionEngine, TradeDecisionEngine>();
+    builder.Services.AddSingleton<IHistoricalSimilarityEngine, HistoricalSimilarityEngine>();
+    builder.Services.AddSingleton<IPortfolioDecisionEngine, PortfolioDecisionEngine>();
+    // ── Market Intelligence layer ────────────────────────────────
+    builder.Services.AddSingleton<IMarketRegimeEngine, MarketRegimeEngine>();
+    builder.Services.AddSingleton<IAdaptiveLearningRepository, SupabaseAdaptiveLearningRepository>();
+    builder.Services.AddSingleton<IAdaptiveLearningEngine, AdaptiveLearningEngine>();
+    builder.Services.AddSingleton<IStrategyDiscoveryRepository, SupabaseStrategyDiscoveryRepository>();
+    builder.Services.AddSingleton<IStrategyDiscoveryEngine, StrategyDiscoveryEngine>();
+    builder.Services.AddSingleton<IHistoricalCaseRepository, SupabaseHistoricalCaseRepository>();
+    builder.Services.AddSingleton<IKnowledgeBase, SupabaseKnowledgeBase>();
+    // ── Research Universe layer ─────────────────────────────────
+    builder.Services.AddSingleton<IResearchUniverseRepository, SupabaseResearchUniverseRepository>();
+    builder.Services.AddSingleton<IResearchUniverseService, ResearchUniverseService>();
+    builder.Services.AddSingleton<ResearchUniverseConfig>();
+    builder.Services.AddSingleton<IResearchUniverseEngine, ResearchUniverseEngine>();
+    // ── Discovery Engine ────────────────────────────────────────
+    builder.Services.AddSingleton<IDiscoveryProvider, FinnhubDiscoveryProvider>();
+    builder.Services.AddSingleton<IDiscoveryProvider, TwelveDataDiscoveryProvider>();
+    builder.Services.AddSingleton<IDiscoveryProvider, CongressDiscoveryProvider>();
+    builder.Services.AddSingleton<IDiscoveryProvider, MarketIntelligenceDiscoveryProvider>();
+    builder.Services.AddSingleton<IDiscoveryEventRepository, SupabaseDiscoveryEventRepository>();
+    builder.Services.AddSingleton<IDiscoveryEngine, DiscoveryEngine>();
+    // ── Continuous Discovery Engine ─────────────────────────────
+    builder.Services.AddSingleton<ContinuousDiscoveryConfig>();
+    builder.Services.AddSingleton<IResearchTimelineRepository, SupabaseResearchTimelineRepository>();
+    builder.Services.AddSingleton<IDiscoveryCheckpointRepository, SupabaseDiscoveryCheckpointRepository>();
+    builder.Services.AddSingleton<IHistoricalProfileBuilder, HistoricalProfileBuilder>();
+    builder.Services.AddSingleton<IContinuousDiscoveryEngine, ContinuousDiscoveryEngine>();
+    // ── Evidence Engine ─────────────────────────────────────────
+    builder.Services.AddSingleton<IEvidenceRepository, SupabaseEvidenceRepository>();
+    builder.Services.AddSingleton<IEvidenceDecayStrategy, PassthroughDecayStrategy>();
+    builder.Services.AddSingleton<IEvidenceAggregator, EvidenceAggregator>();
+    builder.Services.AddSingleton<IEvidenceService, EvidenceService>();
+    // ── Opportunity Learning ───────────────────────────────────────
+    builder.Services.AddSingleton<OpportunityLearningConfig>();
+    builder.Services.AddSingleton<IOpportunityLearningRepository, SupabaseOpportunityLearningRepository>();
+    builder.Services.AddSingleton<IOpportunityLearningService, OpportunityLearningService>();
+    builder.Services.AddSingleton<MarketSnapshotBuilder>();
     builder.Services.AddSingleton<PredictionGenerator>();
     builder.Services.AddSingleton<OutcomeEvaluator>();
     builder.Services.AddSingleton<TradeSetupEngine>();
+    builder.Services.Configure<LearningGuardrailOptions>(
+        builder.Configuration.GetSection(LearningGuardrailOptions.SectionName));
+    builder.Services.AddSingleton<WeightUpdateValidator>();
     builder.Services.AddSingleton<LearningEngine>();
     builder.Services.AddSingleton<DailyReportService>();
     builder.Services.AddSingleton<PatternDetectionService>();
@@ -130,6 +218,9 @@ builder.Services.AddSingleton<OptionsDataService>();
     // Dynamic pick orchestrator — wraps research engine + paper options
     // services to auto-generate stock + linked option candidates daily.
     builder.Services.AddSingleton<PaperStockCandidateRepository>();
+    builder.Services.AddSingleton<StockCandidateService>();
+    builder.Services.AddSingleton<OptionCandidateService>();
+    builder.Services.AddSingleton<PortfolioLifecycleService>();
     builder.Services.AddSingleton<DynamicPickOrchestrator>();
 
     // Portfolio Challenge — simulated portfolio growth tracking.
@@ -190,6 +281,10 @@ builder.Services.AddSingleton<OptionsDataService>();
         new("POST", "/api/jobs/run-morning-scan", "Morning research scan: gathers market data, generates predictions.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
         new("POST", "/api/jobs/run-end-of-day-review", "EOD review: evaluates open predictions against current prices.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
         new("POST", "/api/jobs/run-learning-update", "Learning update: updates signal performance, adjusts weights, generates insights.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
+        new("POST", "/api/jobs/run-discovery", "Discovery engine: scans all providers (Finnhub, TwelveData, Congress, Market Intelligence) for new research assets.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
+        new("POST", "/api/jobs/run-continuous-discovery", "Continuous discovery: lightweight incremental scan for new evidence since last checkpoint. Updates Research Universe without generating predictions.", true, "Scheduled (pg_cron -> Edge Function, hourly), x-job-secret required", "This server"),
+        new("POST", "/api/jobs/run-universe-maintenance", "Research Universe maintenance: decay scores, promote assets, archive stale research.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
+        new("POST", "/api/jobs/run-opportunity-scan", "Opportunity learning: scan for significant movers and evaluate pipeline coverage.", true, "Scheduled (pg_cron -> Edge Function), x-job-secret required", "This server"),
         new("GET", "/api/research/predictions", "Query predictions with optional ?status=open and ?limit=N.", false, "Next.js app, browser", "This server"),
         new("GET", "/api/research/outcomes", "Query recent prediction outcomes with optional ?limit=N.", false, "Next.js app, browser", "This server"),
         new("GET", "/api/research/latest-report", "Latest research run report.", false, "Next.js app, browser", "This server"),

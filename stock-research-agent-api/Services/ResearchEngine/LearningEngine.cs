@@ -41,17 +41,20 @@ public class LearningEngine
     private readonly PatternDetectionService _patternDetection;
     private readonly TradeSetupEngine _setupEngine;
     private readonly IOpenAiCompletionService _ai;
+    private readonly WeightUpdateValidator _guardrail;
     private readonly ILogger<LearningEngine> _logger;
 
     public LearningEngine(
         ResearchRepository repo, PatternDetectionService patternDetection,
         TradeSetupEngine setupEngine,
-        IOpenAiCompletionService ai, ILogger<LearningEngine> logger)
+        IOpenAiCompletionService ai, WeightUpdateValidator guardrail,
+        ILogger<LearningEngine> logger)
     {
         _repo = repo;
         _patternDetection = patternDetection;
         _setupEngine = setupEngine;
         _ai = ai;
+        _guardrail = guardrail;
         _logger = logger;
     }
 
@@ -92,6 +95,9 @@ public class LearningEngine
         // Stage 3: Confidence calibration — detect AND correct overconfidence
         var calibration = await ComputeConfidenceCalibrationAsync();
         await ApplyCalibrationFactorAsync(calibration);
+
+        // Stage 3c: Self-tuning confidence caps — detect caps that crush correct calls
+        var capTuningCount = await ComputeCapEffectivenessAsync();
 
         // Stage 4: Optimize weights (signal-level first-order adjustments)
         var (weightsAdjusted, weightChanges) = await OptimizeWeightsAsync(signalStats);
@@ -756,7 +762,7 @@ public class LearningEngine
                 weightedError += bucket.CalibrationError * bucket.Count;
             }
 
-            if (totalWeight < 20) return; // Need meaningful sample
+            if (totalWeight < 20) return;
 
             var avgError = weightedError / totalWeight;
             // avgError < 0 means overconfident → we need factor < 1.0 to dampen
@@ -779,7 +785,15 @@ public class LearningEngine
             var newFactor = Math.Round(currentFactor + movement, 4);
             newFactor = Math.Clamp(newFactor, 0.85, 1.15);
 
-            if (Math.Abs(movement) < 0.0005) return; // No meaningful change
+            if (Math.Abs(movement) < 0.0005) return;
+
+            // Guardrail gate
+            var validation = _guardrail.ValidateCalibrationUpdate(totalWeight, avgError, movement);
+            if (!validation.Approved)
+            {
+                _logger.LogInformation("[learning-engine] Calibration update blocked: {Reason}", validation.Reason);
+                return;
+            }
 
             var reason = $"Calibration error: {avgError * 100:F1}% across {totalWeight} predictions. " +
                          $"Target factor: {targetFactor:F4}. " +
@@ -810,6 +824,255 @@ public class LearningEngine
     }
 
     // -----------------------------------------------------------------------
+    // Stage 3c: Self-Tuning Confidence Caps
+    // -----------------------------------------------------------------------
+    // The system has hard caps that limit confidence based on risk, conflict,
+    // earnings, etc.  These caps sometimes crush confidence on predictions that
+    // are actually correct (e.g., risk ≥ 60 caps to 50, but 57% of those were
+    // right — better than the 50-65 band).
+    //
+    // This stage groups resolved predictions by their cap_reason from
+    // score_debug_json, measures accuracy per reason, and persists the analysis
+    // to cap_tuning_stats.  ScoringEngine reads these stats to dynamically
+    // loosen or tighten caps based on observed effectiveness.
+    // -----------------------------------------------------------------------
+
+    private async Task<int> ComputeCapEffectivenessAsync()
+    {
+        try
+        {
+            var predictionsWithOutcomes = await _repo.GetRecentPredictionsWithOutcomesAsync(500);
+            if (predictionsWithOutcomes.Count < 20) return 0;
+
+            // Group by cap reason extracted from score_debug_json
+            var capGroups = new Dictionary<string, List<(PredictionWithOutcome pw, ScoringBreakdown? debug)>>();
+
+            foreach (var pw in predictionsWithOutcomes)
+            {
+                if (pw.Outcome?.DirectionCorrect is null) continue;
+
+                ScoringBreakdown? debug = null;
+                var capReason = "none";
+
+                if (!string.IsNullOrEmpty(pw.Prediction.ScoreDebugJson))
+                {
+                    debug = ScoringBreakdownEnvelope.Parse(pw.Prediction.ScoreDebugJson);
+                    capReason = debug?.ConfidenceCap ?? "none";
+                }
+
+                if (!capGroups.ContainsKey(capReason))
+                    capGroups[capReason] = new();
+                capGroups[capReason].Add((pw, debug));
+            }
+
+            var upsertCount = 0;
+            foreach (var (reason, items) in capGroups)
+            {
+                if (items.Count < 5) continue; // need meaningful sample
+
+                var correct = items.Count(i => i.pw.Outcome!.DirectionCorrect == true);
+                var accuracy = (double)correct / items.Count;
+                var avgConf = (int)items.Average(i => i.pw.Prediction.ConfidenceScore);
+                var avgRisk = (int)items
+                    .Select(i => i.pw.Prediction.RiskScore)
+                    .DefaultIfEmpty(50)
+                    .Average();
+                var avgMargin = items.Where(i => i.debug?.DecisionMargin > 0)
+                    .Select(i => i.debug!.DecisionMargin)
+                    .DefaultIfEmpty(0)
+                    .Average();
+
+                // Direct calibration error (ChatGPT recommendation):
+                // Compare observed win rate directly against the mean predicted
+                // confidence for this group, avoiding the moving-target problem of
+                // band-based comparisons.  If confidence averages 42% but accuracy
+                // is 57%, calibration error = +15% → cap is too aggressive.
+                var predictedProb = avgConf / 100.0;
+                var calibrationError = accuracy - predictedProb; // positive = underconfident
+                var isEffective = calibrationError <= 0.10; // 10% tolerance
+
+                // Recommend a new cap: if ineffective, suggest raising by up to 15
+                int? recommendedCap = null;
+                int? currentCap = null;
+                int capDelta = 0;
+
+                if (!isEffective && reason != "none")
+                {
+                    currentCap = avgConf;
+                    // Boost proportional to calibration error
+                    var boost = (int)Math.Round(calibrationError * 30);
+                    boost = Math.Clamp(boost, 5, 15);
+                    recommendedCap = Math.Min(avgConf + boost, 85);
+                    capDelta = boost;
+                }
+
+                var notes = isEffective
+                    ? $"Cap is effective: accuracy {accuracy:P0} vs predicted {predictedProb:P0} (error {calibrationError:+0.0%;-0.0%})"
+                    : $"Cap is INEFFECTIVE: accuracy {accuracy:P0} vs predicted {predictedProb:P0} (error {calibrationError:+0.0%;-0.0%}). " +
+                      $"Recommend raising cap by {capDelta} points.";
+
+                await _repo.UpsertCapTuningStatAsync(new
+                {
+                    cap_reason = reason,
+                    sample_size = items.Count,
+                    accuracy = Math.Round(accuracy, 4),
+                    avg_confidence = avgConf,
+                    avg_risk = avgRisk,
+                    avg_opposition_ratio = Math.Round(avgMargin, 4),
+                    recommended_cap = recommendedCap,
+                    current_cap = currentCap,
+                    cap_delta = capDelta,
+                    is_effective = isEffective,
+                    analysis_notes = notes,
+                    computed_at = DateTimeOffset.UtcNow,
+                });
+                upsertCount++;
+            }
+
+            // Compute aggregate risk_cap_boost from risk-related caps
+            var riskCaps = capGroups
+                .Where(g => g.Key.StartsWith("Risk") && g.Value.Count >= 5)
+                .ToList();
+
+            if (riskCaps.Count > 0)
+            {
+                var totalRiskCapped = riskCaps.Sum(g => g.Value.Count);
+                var totalRiskCorrect = riskCaps.Sum(g =>
+                    g.Value.Count(i => i.pw.Outcome?.DirectionCorrect == true));
+                var riskCapAcc = (double)totalRiskCorrect / totalRiskCapped;
+                // Direct calibration error: compare observed accuracy vs mean predicted confidence
+                var predictedProb = riskCaps.SelectMany(g => g.Value)
+                    .Average(i => i.pw.Prediction.ConfidenceScore) / 100.0;
+                var calError = riskCapAcc - predictedProb; // positive = underconfident
+
+                // If calibration error > 5% (predictions are underconfident), boost caps.
+                // Also allows TIGHTENING: if error < -5%, reduce boost (ChatGPT recommendation).
+                var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+                var currentBoost = currentOverrides
+                    .Where(o => o.SignalName == "risk_cap_boost")
+                    .Select(o => o.EffectiveWeight)
+                    .FirstOrDefault(0.0);
+
+                if (totalRiskCapped >= 10)
+                {
+                    // Guardrail gate
+                    var capValidation = _guardrail.ValidateCapBoostUpdate(
+                        totalRiskCapped, calError, 0); // movement checked after compute
+                    if (!capValidation.Approved)
+                    {
+                        _logger.LogInformation("[learning-engine] Cap boost update blocked: {Reason}", capValidation.Reason);
+                        return upsertCount;
+                    }
+
+                    double targetBoost;
+                    if (calError > 0.05)
+                    {
+                        // Underconfident: boost caps
+                        targetBoost = Math.Min(calError * 30, 15);
+                    }
+                    else if (calError < -0.05)
+                    {
+                        // Overconfident: tighten caps (reduce boost toward 0)
+                        targetBoost = Math.Max(currentBoost + calError * 20, 0);
+                    }
+                    else
+                    {
+                        targetBoost = currentBoost; // within tolerance, hold steady
+                    }
+
+                    var delta = targetBoost - currentBoost;
+                    var movement = Math.Clamp(delta, -2.0, 2.0); // max 2 pts/day
+                    var newBoost = Math.Clamp(currentBoost + movement, 0, 15);
+
+                    await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+                    {
+                        SignalName = "risk_cap_boost",
+                        BaseWeight = 0.0,
+                        AdjustmentPercent = newBoost,
+                        EffectiveWeight = newBoost,
+                        Confidence = Math.Min((double)totalRiskCapped / 100.0, 1.0),
+                        SampleSize = totalRiskCapped,
+                        Status = "active",
+                        Reason = $"Risk-capped: accuracy {riskCapAcc:P0} vs predicted {predictedProb:P0} " +
+                                 $"(cal error {calError:+0.0%;-0.0%}, {totalRiskCapped} samples). Boost: {newBoost:F1} pts.",
+                    });
+
+                    _logger.LogInformation(
+                        "[learning-engine] Risk cap boost: {Old:F1} → {New:F1} (acc={Acc:P0}, predicted={Pred:P0}, calError={Err:+0.0%;-0.0%})",
+                        currentBoost, newBoost, riskCapAcc, predictedProb, calError);
+                }
+            }
+
+            // --- Risk-specific calibration (ChatGPT recommendation #3) ---
+            // Judge risk quality using MAE (max adverse excursion), not directional
+            // accuracy.  High risk should correlate with high MAE, low risk with low MAE.
+            // If they diverge, the risk model is miscalibrated.
+            var riskBuckets = new (string Label, int Min, int Max)[]
+            {
+                ("risk_low", 0, 40), ("risk_med", 40, 60),
+                ("risk_high", 60, 80), ("risk_extreme", 80, 100),
+            };
+
+            foreach (var (label, rMin, rMax) in riskBuckets)
+            {
+                var inBucket = predictionsWithOutcomes
+                    .Where(pw => pw.Prediction.RiskScore >= rMin && pw.Prediction.RiskScore < rMax
+                        && pw.Outcome?.MaxAdversePercent is not null)
+                    .ToList();
+
+                if (inBucket.Count < 5) continue;
+
+                var avgMAE = inBucket.Average(pw => pw.Outcome!.MaxAdversePercent!.Value);
+                var avgMFE = inBucket.Where(pw => pw.Outcome?.MaxFavorablePercent is not null)
+                    .Select(pw => pw.Outcome!.MaxFavorablePercent!.Value)
+                    .DefaultIfEmpty(0)
+                    .Average();
+                var avgRisk = inBucket.Average(pw => pw.Prediction.RiskScore);
+
+                // Risk-MAE correlation: low risk should have low MAE
+                // If risk says "safe" (low) but MAE is high → risk is underestimating danger
+                var riskCalibrated = label switch
+                {
+                    "risk_low" => avgMAE < 3.0,    // low risk should mean < 3% adverse move
+                    "risk_med" => avgMAE < 5.0,     // medium risk < 5%
+                    "risk_high" => avgMAE < 8.0,    // high risk < 8%
+                    _ => true,                       // extreme risk = anything goes
+                };
+
+                await _repo.UpsertCapTuningStatAsync(new
+                {
+                    cap_reason = label,
+                    sample_size = inBucket.Count,
+                    accuracy = Math.Round(avgMAE, 4), // repurpose accuracy field for avg MAE
+                    avg_confidence = (int)inBucket.Average(pw => pw.Prediction.ConfidenceScore),
+                    avg_risk = (int)avgRisk,
+                    avg_opposition_ratio = Math.Round(avgMFE, 4), // repurpose for MFE
+                    recommended_cap = (int?)null,
+                    current_cap = (int?)null,
+                    cap_delta = 0,
+                    is_effective = riskCalibrated,
+                    analysis_notes = $"Risk {label}: avg MAE {avgMAE:F2}%, avg MFE {avgMFE:F2}%, " +
+                        $"avg risk score {avgRisk:F0}, {inBucket.Count} samples. " +
+                        $"Risk model {(riskCalibrated ? "CALIBRATED" : "MISCALIBRATED")}.",
+                    computed_at = DateTimeOffset.UtcNow,
+                });
+                upsertCount++;
+            }
+
+            _logger.LogInformation(
+                "[learning-engine] Cap effectiveness: analyzed {Count} cap/risk reasons across {Total} predictions",
+                upsertCount, predictionsWithOutcomes.Count);
+
+            return upsertCount;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to compute cap effectiveness");
+            return 0;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Stage 4: Weight Optimization (safe, gradual, Bayesian-smoothed)
     // -----------------------------------------------------------------------
 
@@ -835,12 +1098,23 @@ public class LearningEngine
             var targetAdj = (bayesianAccuracy - 0.5) * 2.0;
             targetAdj = Math.Clamp(targetAdj, -MaxAdjustmentPercent, MaxAdjustmentPercent);
 
-            // Gradual movement: max 1% per day toward target
+            // Gradual movement — use guardrail-aware daily limit
+            var effectiveDailyLimit = await _guardrail.GetEffectiveDailyMovementAsync(stat.SignalName);
             var delta = targetAdj - currentAdj;
-            var movement = Math.Clamp(delta, -MaxDailyMovement, MaxDailyMovement);
+            var movement = Math.Clamp(delta, -effectiveDailyLimit, effectiveDailyLimit);
             var newAdj = Math.Round(currentAdj + movement, 4);
 
             if (Math.Abs(movement) < 0.001) continue;
+
+            // Guardrail gate — refuse update when evidence is insufficient
+            var validation = await _guardrail.ValidateSignalWeightUpdateAsync(
+                stat.SignalName, stat.TotalPredictions, stat.Accuracy, movement);
+            if (!validation.Approved)
+            {
+                _logger.LogInformation("[learning-engine] Weight update blocked for {Signal}: {Reason}",
+                    stat.SignalName, validation.Reason);
+                continue;
+            }
 
             var effectiveWeight = baseWeight * (1.0 + newAdj);
             var confidence = Math.Min((double)stat.TotalPredictions / 200.0, 1.0);
@@ -1179,6 +1453,22 @@ public class LearningEngine
 
         foreach (var (signal, avgAdjustment) in synergyBySignal)
         {
+            // Guardrail gate — validate pattern evidence before applying
+            var patternEvidence = recommendations
+                .Where(r => r.Type == "synergy_weight" && r.SignalName == signal)
+                .Sum(r => r.Evidence);
+            var patternConfidence = recommendations
+                .Where(r => r.Type == "synergy_weight" && r.SignalName == signal)
+                .Average(r => r.Confidence);
+            var patternValidation = _guardrail.ValidatePatternRecommendation(
+                signal, patternEvidence, patternConfidence, avgAdjustment);
+            if (!patternValidation.Approved)
+            {
+                _logger.LogInformation("[learning-engine] Pattern adjustment blocked for {Signal}: {Reason}",
+                    signal, patternValidation.Reason);
+                continue;
+            }
+
             var baseWeight = DefaultBaseWeights.GetValueOrDefault(signal, 1.0);
             var currentAdj = overrideMap.TryGetValue(signal, out var existing)
                 ? existing.AdjustmentPercent : 0.0;

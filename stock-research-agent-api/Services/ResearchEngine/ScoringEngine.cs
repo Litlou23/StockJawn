@@ -1,20 +1,29 @@
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 using ResearchSignal = StockResearchAgent.Api.Models.ResearchSignal;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
 /// <summary>
-/// Direction-neutral scoring engine. Each bucket independently produces
-/// a bullish score and a bearish score. The winning direction is whichever
-/// side has the stronger evidence by a configurable margin.
+/// Orchestrates the scoring pipeline. Scoring formulas are preserved but moved
+/// into independent evaluator, aggregation, confidence, and risk services.
 /// </summary>
-public static class ScoringEngine
+public class ScoringEngine : IScoringEngine
 {
-    // Configurable thresholds for direction determination
-    private const double MinEdgeMargin = 15;
-    private const double MinScoreForDirection = 20;
+    private readonly ITrendEvaluator _trendEvaluator;
+    private readonly IMomentumEvaluator _momentumEvaluator;
+    private readonly IVolumeEvaluator _volumeEvaluator;
+    private readonly IVolatilityEvaluator _volatilityEvaluator;
+    private readonly IMarketContextEvaluator _marketContextEvaluator;
+    private readonly ICatalystEvaluator _catalystEvaluator;
+    private readonly ILearningAdjustmentEvaluator _learningAdjustmentEvaluator;
+    private readonly IResearchSignalEvaluator _researchSignalEvaluator;
+    private readonly IScoreAggregator _scoreAggregator;
+    private readonly IConfidenceEngine _confidenceEngine;
+    private readonly IRiskEngine _riskEngine;
 
-    public record BucketScores(double Bullish, double Bearish);
+    private const double MinEdgeMargin = 10;
+    private const double MinScoreForDirection = 20;
 
     public record ScoringResult
     {
@@ -28,218 +37,219 @@ public static class ScoringEngine
         public int Risk { get; init; }
         public ScoringBreakdown Breakdown { get; init; } = new();
         public List<string> Signals { get; init; } = [];
+        public List<MarketEvidence> Evidence { get; init; } = [];
+        public MarketThesis? Thesis { get; init; }
+        public List<EvaluatorReasoning> Reasoning { get; init; } = [];
     }
 
+    public ScoringEngine()
+        : this(
+            new TrendEvaluator(),
+            new MomentumEvaluator(),
+            new VolumeEvaluator(),
+            new VolatilityEvaluator(),
+            new MarketContextEvaluator(),
+            new CatalystEvaluator(),
+            new LearningAdjustmentEvaluator(),
+            new ResearchSignalEvaluator(),
+            new ScoreAggregator(),
+            new ConfidenceEngine(),
+            new RiskEngine())
+    {
+    }
+
+    public ScoringEngine(
+        ITrendEvaluator trendEvaluator,
+        IMomentumEvaluator momentumEvaluator,
+        IVolumeEvaluator volumeEvaluator,
+        IVolatilityEvaluator volatilityEvaluator,
+        IMarketContextEvaluator marketContextEvaluator,
+        ICatalystEvaluator catalystEvaluator,
+        ILearningAdjustmentEvaluator learningAdjustmentEvaluator,
+        IResearchSignalEvaluator researchSignalEvaluator,
+        IScoreAggregator scoreAggregator,
+        IConfidenceEngine confidenceEngine,
+        IRiskEngine riskEngine)
+    {
+        _trendEvaluator = trendEvaluator;
+        _momentumEvaluator = momentumEvaluator;
+        _volumeEvaluator = volumeEvaluator;
+        _volatilityEvaluator = volatilityEvaluator;
+        _marketContextEvaluator = marketContextEvaluator;
+        _catalystEvaluator = catalystEvaluator;
+        _learningAdjustmentEvaluator = learningAdjustmentEvaluator;
+        _researchSignalEvaluator = researchSignalEvaluator;
+        _scoreAggregator = scoreAggregator;
+        _confidenceEngine = confidenceEngine;
+        _riskEngine = riskEngine;
+    }
+
+    // Compatibility wrapper for older callers and tests.
     public static ScoringResult Score(
         MarketSnapshot snapshot,
         TechnicalIndicators indicators,
         BenchmarkContext benchmark,
         Dictionary<string, double> weights,
         List<string> lessons,
-        List<ResearchSignal>? researchSignals = null)
+        List<ResearchSignal>? researchSignals = null,
+        IReadOnlyList<MarketEvidence>? evidence = null,
+        MarketThesis? thesis = null)
     {
-        var signals = new List<string>();
-
-        // --- Dual-score bucket scoring ---
-        var trend = ScoreTrend(indicators, signals);
-        var momentum = ScoreMomentum(indicators, signals);
-        var volume = ScoreVolume(indicators, signals);
-        var volatility = ScoreVolatilitySetup(indicators, snapshot.Quote, signals);
-        var market = ScoreMarketContext(benchmark, signals);
-        var catalyst = ScoreCatalyst(snapshot, weights, signals);
-        var catalystStrength = ScoreCatalystStrength(snapshot);
-        var learning = ScoreLearning(weights, lessons, signals);
-        var research = ScoreResearchSignals(researchSignals ?? [], weights, signals);
-
-        // Aggregate independent scores
-        var bullishScore = trend.Bullish + momentum.Bullish + volume.Bullish
-            + volatility.Bullish + market.Bullish + catalyst.Bullish + learning.Bullish + research.Bullish;
-        var bearishScore = trend.Bearish + momentum.Bearish + volume.Bearish
-            + volatility.Bearish + market.Bearish + catalyst.Bearish + learning.Bearish + research.Bearish;
-
-        bullishScore = Math.Clamp(bullishScore, 0, 100);
-        bearishScore = Math.Clamp(bearishScore, 0, 100);
-
-        // Legacy directional score for backward compatibility
-        var directionalScore = bullishScore - bearishScore;
-
-        // --- Risk penalty (applied to confidence, not to direction) ---
-        var riskPenalty = ScoreRiskPenalty(indicators, benchmark, snapshot, signals);
-
-        // --- Direction determination ---
-        var margin = Math.Abs(bullishScore - bearishScore);
-        var (winningDirection, predType) = DeterminePredictionType(
-            bullishScore, bearishScore, snapshot, indicators);
-
-        // --- Data quality factor ---
-        var availableSignals = indicators.IndicatorsComputed.Count;
-        var totalPossibleSignals = availableSignals + indicators.IndicatorsSkipped.Count;
-        var dataQuality = totalPossibleSignals > 0 ? (double)availableSignals / totalPossibleSignals : 0.5;
-        var dataQualityFactor = 0.75 + (0.25 * dataQuality);
-
-        // --- Confirmation multiplier ---
-        var buckets = new BucketScores[]
+        var intelligence = new MarketIntelligenceContext
         {
-            trend, momentum, volume, market, catalyst, learning, research,
+            Ticker = snapshot.Ticker,
+            Evidence = evidence?.ToList() ?? [],
+            Thesis = thesis ?? new MarketThesis { Ticker = snapshot.Ticker, Direction = MarketThesisDirection.neutral },
+            GeneratedAt = DateTimeOffset.UtcNow,
         };
 
-        int aligned = 0, conflicting = 0;
-        bool winIsBullish = winningDirection == "bullish";
-        foreach (var bucket in buckets)
-        {
-            var net = bucket.Bullish - bucket.Bearish;
-            if (Math.Abs(net) < 1) continue;
-            bool bucketVotesBullish = net > 0;
-            if (bucketVotesBullish == winIsBullish) aligned++;
-            else conflicting++;
-        }
+        return new ScoringEngine().Evaluate(
+            snapshot, indicators, benchmark, weights, lessons, researchSignals, intelligence);
+    }
 
-        double confirmMult = aligned switch
+    public ScoringResult Evaluate(
+        MarketSnapshot snapshot,
+        TechnicalIndicators indicators,
+        BenchmarkContext benchmark,
+        Dictionary<string, double> weights,
+        List<string> lessons,
+        List<ResearchSignal>? researchSignals = null,
+        MarketIntelligenceContext? intelligence = null,
+        ResearchUniverseContext? researchUniverse = null)
+    {
+        intelligence ??= new MarketIntelligenceContext
         {
-            >= 5 => 1.30,
-            4 => 1.20,
-            3 => 1.10,
-            _ => 1.00,
+            Ticker = snapshot.Ticker,
+            Thesis = new MarketThesis { Ticker = snapshot.Ticker, Direction = MarketThesisDirection.neutral },
+            GeneratedAt = DateTimeOffset.UtcNow,
         };
-        confirmMult -= conflicting * 0.10;
-        confirmMult = Math.Clamp(confirmMult, 0.75, 1.30);
 
-        // --- Risk adjustment ---
-        var riskAdj = 1.0 - Math.Min(Math.Abs(riskPenalty), 30) / 100.0;
+        var context = EvaluationContext.Create(
+            snapshot,
+            indicators,
+            benchmark,
+            intelligence,
+            weights,
+            lessons,
+            researchSignals ?? [],
+            researchUniverse);
 
-        // --- Calibration factor from learning ---
-        var calFactor = weights.GetValueOrDefault("calibration_factor", 1.0);
-        calFactor = Math.Clamp(calFactor, 0.85, 1.15);
-
-        // --- Final confidence (based on winning score, not signed directional) ---
-        var winningScore = Math.Max(bullishScore, bearishScore);
-        var baseConf = winningScore;
-        var rawConfidence = baseConf * dataQualityFactor * confirmMult * riskAdj * calFactor;
-
-        // --- Hard caps ---
-        string? capReason = null;
-        if (indicators.IndicatorsComputed.Count <= 3)
+        var outputs = new List<EvaluatorOutput>
         {
-            rawConfidence = Math.Min(rawConfidence, 45);
-            capReason = "Only one signal bucket available";
-        }
-        if (trend.Bullish > 5 && trend.Bearish > 5 && momentum.Bullish > 5 && momentum.Bearish > 5)
-        {
-            // Both trend and momentum have meaningful signals on both sides = conflict
-            rawConfidence = Math.Min(rawConfidence, 60);
-            capReason = "Trend and momentum conflict";
-        }
-        if (market.Bearish > 5 && winningDirection == "bullish")
-        {
-            rawConfidence = Math.Min(rawConfidence, 65);
-            capReason = "Strong market context conflict";
-        }
-        if (market.Bullish > 5 && winningDirection == "bearish")
-        {
-            rawConfidence = Math.Min(rawConfidence, 65);
-            capReason = "Strong market context conflict";
-        }
+            _trendEvaluator.Evaluate(context),
+            _momentumEvaluator.Evaluate(context),
+            _volumeEvaluator.Evaluate(context),
+            _volatilityEvaluator.Evaluate(context),
+            _marketContextEvaluator.Evaluate(context),
+            _catalystEvaluator.Evaluate(context),
+            _learningAdjustmentEvaluator.Evaluate(context),
+            _researchSignalEvaluator.Evaluate(context),
+        };
 
-        int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, 85));
+        var tentativeBull = Math.Clamp(outputs.Sum(o => o.BullishContribution), 0, 100);
+        var tentativeBear = Math.Clamp(outputs.Sum(o => o.BearishContribution), 0, 100);
+        var (winningDirection, predType) = DeterminePredictionType(tentativeBull, tentativeBear, snapshot, indicators);
 
-        // --- Risk score ---
-        int risk = ComputeRisk(snapshot, indicators, benchmark, predType, riskPenalty);
+        var aggregate = _scoreAggregator.Aggregate(outputs, winningDirection, context);
+        var riskAssessment = _riskEngine.Evaluate(context, predType);
+        var confidence = _confidenceEngine.Evaluate(context, aggregate, riskAssessment, winningDirection);
 
-        // --- Risk-confidence coherence ---
-        // High risk must cap confidence. A 95-confidence / 60-risk prediction
-        // is internally contradictory — if risk is real, confidence should reflect it.
-        if (risk >= 75) { confidence = Math.Min(confidence, 35); capReason ??= $"Risk {risk} ≥ 75"; }
-        else if (risk >= 60) { confidence = Math.Min(confidence, 50); capReason ??= $"Risk {risk} ≥ 60"; }
-        else if (risk >= 50) { confidence = Math.Min(confidence, 65); capReason ??= $"Risk {risk} ≥ 50"; }
+        var signals = outputs
+            .SelectMany(o => o.DebugSignals)
+            .Concat(riskAssessment.DebugSignals)
+            .ToList();
 
-        // --- Earnings proximity risk ---
-        // Earnings within 3 days make any directional prediction unreliable.
-        // The binary event dominates all technical/catalyst signals.
-        var earningsNear = snapshot.NewsContext.Any(n =>
-            n.CatalystType == "earnings"
-            && n.Title.Contains("Earnings in", StringComparison.OrdinalIgnoreCase)
-            && (n.Title.Contains("0d") || n.Title.Contains("1d") || n.Title.Contains("2d") || n.Title.Contains("3d")));
-        if (earningsNear)
-        {
-            risk = Math.Max(risk, 70);
-            confidence = Math.Min(confidence, 45);
-            capReason = "Earnings within 3 days — binary event";
-            signals.Add("Risk: earnings imminent — directional prediction unreliable");
-        }
+        var catalystStrength = _catalystEvaluator.ScoreCatalystStrength(context);
+        var catalyst = aggregate.Outputs[EvaluatorKind.catalyst];
+        var market = aggregate.Outputs[EvaluatorKind.market_context];
+        var trend = aggregate.Outputs[EvaluatorKind.trend];
+        var momentum = aggregate.Outputs[EvaluatorKind.momentum];
+        var volume = aggregate.Outputs[EvaluatorKind.volume];
+        var volatility = aggregate.Outputs[EvaluatorKind.volatility];
+        var learning = aggregate.Outputs[EvaluatorKind.learning];
+        var research = aggregate.Outputs[EvaluatorKind.research_signal];
 
-        // --- Actionability ---
         var (actionScore, actionTier, actionReasons) = ComputeActionability(
-            confidence, riskReward: null,
-            catalystScore: catalyst.Bullish - catalyst.Bearish,
-            marketContextScore: market.Bullish - market.Bearish,
-            dataQualityFactor: dataQualityFactor,
-            confidenceCap: capReason);
+            confidence.Confidence, riskReward: null,
+            catalystScore: catalyst.BullishContribution - catalyst.BearishContribution,
+            marketContextScore: market.BullishContribution - market.BearishContribution,
+            dataQualityFactor: confidence.DataQualityFactor,
+            confidenceCap: confidence.ConfidenceCap);
 
         return new ScoringResult
         {
-            DirectionalScore = Math.Round(directionalScore, 2),
-            BullishScore = Math.Round(bullishScore, 2),
-            BearishScore = Math.Round(bearishScore, 2),
+            DirectionalScore = Math.Round(aggregate.DirectionalScore, 2),
+            BullishScore = Math.Round(aggregate.BullishScore, 2),
+            BearishScore = Math.Round(aggregate.BearishScore, 2),
             WinningDirection = winningDirection,
-            DirectionMargin = Math.Round(margin, 2),
-            Confidence = confidence,
+            DirectionMargin = Math.Round(Math.Abs(aggregate.BullishScore - aggregate.BearishScore), 2),
+            Confidence = confidence.Confidence,
             PredictionType = predType,
-            Risk = risk,
+            Risk = riskAssessment.RiskScore,
             Signals = signals,
+            Evidence = intelligence.Evidence.ToList(),
+            Thesis = intelligence.Thesis,
+            Reasoning = outputs.Select(o => o.DebugInformation).ToList(),
             Breakdown = new ScoringBreakdown
             {
-                DirectionalScore = Math.Round(directionalScore, 2),
-                BullishScore = Math.Round(bullishScore, 2),
-                BearishScore = Math.Round(bearishScore, 2),
+                DirectionalScore = Math.Round(aggregate.DirectionalScore, 2),
+                BullishScore = Math.Round(aggregate.BullishScore, 2),
+                BearishScore = Math.Round(aggregate.BearishScore, 2),
                 WinningDirection = winningDirection,
-                DirectionMargin = Math.Round(margin, 2),
-                Confidence = confidence,
+                DirectionMargin = Math.Round(Math.Abs(aggregate.BullishScore - aggregate.BearishScore), 2),
+                Confidence = confidence.Confidence,
                 ActionabilityScore = actionScore,
                 ActionabilityTier = actionTier,
-                DataQualityFactor = Math.Round(dataQualityFactor, 3),
-                ConfirmationMultiplier = Math.Round(confirmMult, 3),
-                AlignedBuckets = aligned,
-                ConflictingBuckets = conflicting,
-                RiskAdjustment = Math.Round(riskAdj, 3),
-                CalibrationFactor = Math.Round(calFactor, 3),
-                TrendScore = Math.Round(trend.Bullish - trend.Bearish, 2),
-                TrendBullish = Math.Round(trend.Bullish, 2),
-                TrendBearish = Math.Round(trend.Bearish, 2),
-                MomentumScore = Math.Round(momentum.Bullish - momentum.Bearish, 2),
-                MomentumBullish = Math.Round(momentum.Bullish, 2),
-                MomentumBearish = Math.Round(momentum.Bearish, 2),
-                VolumeScore = Math.Round(volume.Bullish - volume.Bearish, 2),
-                VolumeBullish = Math.Round(volume.Bullish, 2),
-                VolumeBearish = Math.Round(volume.Bearish, 2),
-                VolatilitySetupScore = Math.Round(volatility.Bullish - volatility.Bearish, 2),
-                VolatilityBullish = Math.Round(volatility.Bullish, 2),
-                VolatilityBearish = Math.Round(volatility.Bearish, 2),
-                MarketContextScore = Math.Round(market.Bullish - market.Bearish, 2),
-                MarketContextBullish = Math.Round(market.Bullish, 2),
-                MarketContextBearish = Math.Round(market.Bearish, 2),
-                CatalystScore = Math.Round(catalyst.Bullish - catalyst.Bearish, 2),
-                CatalystBullish = Math.Round(catalyst.Bullish, 2),
-                CatalystBearish = Math.Round(catalyst.Bearish, 2),
+                DataQualityFactor = Math.Round(confidence.DataQualityFactor, 3),
+                ConfirmationMultiplier = Math.Round(confidence.ConfirmationMultiplier, 3),
+                AlignedBuckets = aggregate.AlignedBuckets,
+                ConflictingBuckets = aggregate.ConflictingBuckets,
+                RiskAdjustment = Math.Round(confidence.RiskAdjustment, 3),
+                CalibrationFactor = Math.Round(confidence.CalibrationFactor, 3),
+                OppositionPenalty = Math.Round(confidence.OppositionPenalty, 3),
+                DecisionMargin = Math.Round(confidence.DecisionMargin, 3),
+                ClearDirection = confidence.ClearDirection,
+                TrendScore = Math.Round(trend.BullishContribution - trend.BearishContribution, 2),
+                TrendBullish = Math.Round(trend.BullishContribution, 2),
+                TrendBearish = Math.Round(trend.BearishContribution, 2),
+                MomentumScore = Math.Round(momentum.BullishContribution - momentum.BearishContribution, 2),
+                MomentumBullish = Math.Round(momentum.BullishContribution, 2),
+                MomentumBearish = Math.Round(momentum.BearishContribution, 2),
+                VolumeScore = Math.Round(volume.BullishContribution - volume.BearishContribution, 2),
+                VolumeBullish = Math.Round(volume.BullishContribution, 2),
+                VolumeBearish = Math.Round(volume.BearishContribution, 2),
+                VolatilitySetupScore = Math.Round(volatility.BullishContribution - volatility.BearishContribution, 2),
+                VolatilityBullish = Math.Round(volatility.BullishContribution, 2),
+                VolatilityBearish = Math.Round(volatility.BearishContribution, 2),
+                MarketContextScore = Math.Round(market.BullishContribution - market.BearishContribution, 2),
+                MarketContextBullish = Math.Round(market.BullishContribution, 2),
+                MarketContextBearish = Math.Round(market.BearishContribution, 2),
+                CatalystScore = Math.Round(catalyst.BullishContribution - catalyst.BearishContribution, 2),
+                CatalystBullish = Math.Round(catalyst.BullishContribution, 2),
+                CatalystBearish = Math.Round(catalyst.BearishContribution, 2),
                 CatalystStrength = Math.Round(catalystStrength, 2),
-                LearningScore = Math.Round(learning.Bullish - learning.Bearish, 2),
-                LearningBullish = Math.Round(learning.Bullish, 2),
-                LearningBearish = Math.Round(learning.Bearish, 2),
-                ResearchSignalScore = Math.Round(research.Bullish - research.Bearish, 2),
-                ResearchSignalBullish = Math.Round(research.Bullish, 2),
-                ResearchSignalBearish = Math.Round(research.Bearish, 2),
-                ResearchSignalCount = (researchSignals ?? []).Count,
-                RiskPenalty = Math.Round(riskPenalty, 2),
+                LearningScore = Math.Round(learning.BullishContribution - learning.BearishContribution, 2),
+                LearningBullish = Math.Round(learning.BullishContribution, 2),
+                LearningBearish = Math.Round(learning.BearishContribution, 2),
+                ResearchSignalScore = Math.Round(research.BullishContribution - research.BearishContribution, 2),
+                ResearchSignalBullish = Math.Round(research.BullishContribution, 2),
+                ResearchSignalBearish = Math.Round(research.BearishContribution, 2),
+                ResearchSignalCount = context.ResearchSignals.Count,
+                RiskPenalty = Math.Round(riskAssessment.RiskPenalty, 2),
                 IndicatorsUsed = indicators.IndicatorsComputed,
                 IndicatorsSkipped = indicators.IndicatorsSkipped,
-                ConfidenceCap = capReason,
+                ConfidenceCap = confidence.ConfidenceCap,
                 ActionabilityReasons = actionReasons,
+                // Research Universe integration
+                ResearchUniverseInterestScore = context.ResearchUniverse.InterestScore,
+                ResearchUniverseEvidenceCount = context.ResearchUniverse.EvidenceCount,
+                ResearchUniverseState = context.ResearchUniverse.ResearchState.ToString(),
+                HasResearchAsset = context.ResearchUniverse.HasResearchAsset,
+                HistoricalVolatility = context.ResearchUniverse.HistoricalVolatility,
+                HistoricalAtrPercent = context.ResearchUniverse.HistoricalAtrPercent,
             },
         };
     }
-
-    // -----------------------------------------------------------------------
-    // R/R-aware finalization (unchanged interface, works with new internals)
-    // -----------------------------------------------------------------------
 
     public static ScoringResult FinalizeWithRiskReward(ScoringResult initial, double? riskReward)
     {
@@ -296,23 +306,13 @@ public static class ScoringEngine
         };
     }
 
-    // -----------------------------------------------------------------------
-    // Setup-aware confidence adjustment
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Adjusts confidence based on the historical performance of the detected
-    /// trade setup. Positive EV + trusted setup → boost; degraded or negative
-    /// EV → penalize. Called after ClassifySetupAsync provides the setup's
-    /// historical performance.
-    /// </summary>
     public static ScoringResult AdjustForSetupHistory(
         ScoringResult initial,
         SetupPerformance? setupPerformance,
         bool isHistoricallyFavorable)
     {
         if (setupPerformance is null || setupPerformance.SampleSize < 5)
-            return initial; // Not enough history to adjust
+            return initial;
 
         var breakdown = initial.Breakdown;
         var reasons = new List<string>(breakdown.ActionabilityReasons);
@@ -325,7 +325,6 @@ public static class ScoringEngine
 
         if (isHistoricallyFavorable && trusted)
         {
-            // Boost confidence for proven setups: +5 to +15 based on EV strength
             var boost = ev switch
             {
                 >= 2.0 => 15,
@@ -342,22 +341,19 @@ public static class ScoringEngine
         }
         else if (!trusted && setupPerformance.SampleSize >= 8)
         {
-            // Degrading setup — cap confidence
             var penalty = 10;
             confidence = Math.Max(confidence - penalty, 20);
-            capReason = $"Degraded setup (recent WR dropped >15% from all-time)";
+            capReason = "Degraded setup (recent WR dropped >15% from all-time)";
             reasons.Add($"Setup penalty -{penalty}: setup degrading, EV={ev:F2}%");
         }
         else if (ev < -0.5 && setupPerformance.SampleSize >= 8)
         {
-            // Negative EV setup — strong penalty
             var penalty = 15;
             confidence = Math.Max(confidence - penalty, 15);
             capReason = $"Negative EV setup ({ev:F2}%)";
             reasons.Add($"Setup penalty -{penalty}: negative EV={ev:F2}%, WR={wr * 100:F0}%");
         }
 
-        // Recompute actionability with adjusted confidence
         var catalystNet = breakdown.CatalystBullish - breakdown.CatalystBearish;
         var marketNet = breakdown.MarketContextBullish - breakdown.MarketContextBearish;
         var (actionScore, actionTier, tierReasons) = ComputeActionability(
@@ -382,9 +378,76 @@ public static class ScoringEngine
         };
     }
 
-    // -----------------------------------------------------------------------
-    // Actionability tier (unchanged)
-    // -----------------------------------------------------------------------
+    /// <summary>
+    /// Adjusts confidence for per-ticker historical reliability.
+    /// Uses Bayesian-smoothed accuracy to scale confidence.
+    /// Returns (adjustedResult, shouldDowngradeToWatchOnly).
+    /// </summary>
+    public static (ScoringResult Result, bool DowngradeToWatchOnly) AdjustForTickerReliability(
+        ScoringResult initial,
+        double tickerAccuracy,
+        int tickerSampleSize,
+        double globalAccuracy)
+    {
+        if (tickerSampleSize < 5)
+            return (initial, false);
+
+        // Bayesian smoothing: weight = n / (n + prior_strength)
+        const int priorStrength = 10;
+        double sampleWeight = (double)tickerSampleSize / (tickerSampleSize + priorStrength);
+        double effectiveAccuracy = sampleWeight * tickerAccuracy + (1 - sampleWeight) * globalAccuracy;
+
+        var breakdown = initial.Breakdown;
+        var reasons = new List<string>(breakdown.ActionabilityReasons);
+        int confidence = initial.Confidence;
+        string? capReason = breakdown.ConfidenceCap;
+        bool downgrade = false;
+
+        // Hard cutoff: terrible accuracy → watch_only
+        if (effectiveAccuracy < 0.25 && tickerSampleSize >= 10)
+        {
+            confidence = Math.Min(confidence, 20);
+            capReason = $"Ticker effective accuracy {effectiveAccuracy * 100:F0}% < 25%";
+            reasons.Add($"Ticker reliability downgrade: accuracy={tickerAccuracy * 100:F0}%, n={tickerSampleSize}, effective={effectiveAccuracy * 100:F0}%");
+            downgrade = true;
+        }
+        else
+        {
+            double reliabilityFactor = 0.6 + 0.4 * Math.Clamp(effectiveAccuracy / 0.8, 0, 1);
+
+            if (reliabilityFactor < 0.95)
+            {
+                confidence = (int)Math.Round(confidence * reliabilityFactor);
+                confidence = Math.Clamp(confidence, 10, 85);
+                reasons.Add($"Ticker reliability {reliabilityFactor:F2}: accuracy={tickerAccuracy * 100:F0}%, n={tickerSampleSize}");
+            }
+        }
+
+        var catalystNet = breakdown.CatalystBullish - breakdown.CatalystBearish;
+        var marketNet = breakdown.MarketContextBullish - breakdown.MarketContextBearish;
+        var (actionScore, actionTier, tierReasons) = ComputeActionability(
+            confidence, riskReward: null,
+            catalystScore: catalystNet,
+            marketContextScore: marketNet,
+            dataQualityFactor: breakdown.DataQualityFactor,
+            confidenceCap: capReason);
+        reasons.AddRange(tierReasons.Where(r => !reasons.Contains(r)));
+
+        var adjusted = initial with
+        {
+            Confidence = confidence,
+            Breakdown = breakdown with
+            {
+                Confidence = confidence,
+                ActionabilityScore = actionScore,
+                ActionabilityTier = actionTier,
+                ConfidenceCap = capReason,
+                ActionabilityReasons = reasons,
+            },
+        };
+
+        return (adjusted, downgrade);
+    }
 
     public static (int Score, ActionabilityTier Tier, List<string> Reasons) ComputeActionability(
         int confidence,
@@ -443,425 +506,6 @@ public static class ScoringEngine
         return (confidence, tier, reasons);
     }
 
-    // -----------------------------------------------------------------------
-    // Trend bucket: bullish 0..25, bearish 0..25
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreTrend(TechnicalIndicators ind, List<string> signals)
-    {
-        double bull = 0, bear = 0;
-
-        if (ind.Sma5 is not null && ind.Sma20 is not null)
-        {
-            if (ind.Sma5AboveSma20) { bull += 8; signals.Add("Trend: SMA5 above SMA20"); }
-            else { bear += 8; signals.Add("Trend: SMA5 below SMA20"); }
-        }
-
-        if (ind.Sma20 is not null)
-        {
-            if (ind.CloseAboveSma20) { bull += 6; signals.Add("Trend: close above SMA20"); }
-            else { bear += 6; signals.Add("Trend: close below SMA20"); }
-        }
-
-        if (ind.LinearRegressionSlope is double slope)
-        {
-            if (slope > 0.5) { bull += 6; signals.Add($"Trend: strong upslope ({slope:F2})"); }
-            else if (slope > 0.1) { bull += 3; signals.Add($"Trend: mild upslope ({slope:F2})"); }
-            else if (slope < -0.5) { bear += 6; signals.Add($"Trend: strong downslope ({slope:F2})"); }
-            else if (slope < -0.1) { bear += 3; signals.Add($"Trend: mild downslope ({slope:F2})"); }
-        }
-
-        if (ind.DonchianBreakout == true) { bull += 5; signals.Add("Trend: Donchian 20 breakout"); }
-        else if (ind.DonchianBreakdown == true) { bear += 5; signals.Add("Trend: Donchian 20 breakdown"); }
-
-        return new BucketScores(Math.Clamp(bull, 0, 25), Math.Clamp(bear, 0, 25));
-    }
-
-    // -----------------------------------------------------------------------
-    // Momentum bucket: bullish 0..20, bearish 0..20
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreMomentum(TechnicalIndicators ind, List<string> signals)
-    {
-        double bull = 0, bear = 0;
-
-        if (ind.Roc5 is double roc5)
-        {
-            if (roc5 > 2) { bull += 5; signals.Add($"Momentum: ROC5 strong up ({roc5:F1}%)"); }
-            else if (roc5 > 0.5) { bull += 2; signals.Add($"Momentum: ROC5 up ({roc5:F1}%)"); }
-            else if (roc5 < -2) { bear += 5; signals.Add($"Momentum: ROC5 strong down ({roc5:F1}%)"); }
-            else if (roc5 < -0.5) { bear += 2; signals.Add($"Momentum: ROC5 down ({roc5:F1}%)"); }
-        }
-
-        if (ind.Roc10 is double roc10)
-        {
-            if (roc10 > 3) { bull += 4; signals.Add($"Momentum: ROC10 strong up ({roc10:F1}%)"); }
-            else if (roc10 > 1) { bull += 2; signals.Add($"Momentum: ROC10 up ({roc10:F1}%)"); }
-            else if (roc10 < -3) { bear += 4; signals.Add($"Momentum: ROC10 strong down ({roc10:F1}%)"); }
-            else if (roc10 < -1) { bear += 2; signals.Add($"Momentum: ROC10 down ({roc10:F1}%)"); }
-        }
-
-        if (ind.Rsi14 is double rsi)
-        {
-            if (rsi > 70) { bear += 3; signals.Add($"Momentum: RSI overbought ({rsi:F0})"); }
-            else if (rsi > 55) { bull += 4; signals.Add($"Momentum: RSI bullish ({rsi:F0})"); }
-            else if (rsi < 30) { bull += 3; signals.Add($"Momentum: RSI oversold ({rsi:F0})"); }
-            else if (rsi < 45) { bear += 4; signals.Add($"Momentum: RSI bearish ({rsi:F0})"); }
-        }
-
-        if (ind.StochasticCloseLocation is double stoch)
-        {
-            if (stoch > 80) { bull += 3; signals.Add($"Momentum: close near highs ({stoch:F0}%)"); }
-            else if (stoch < 20) { bear += 3; signals.Add($"Momentum: close near lows ({stoch:F0}%)"); }
-        }
-
-        return new BucketScores(Math.Clamp(bull, 0, 20), Math.Clamp(bear, 0, 20));
-    }
-
-    // -----------------------------------------------------------------------
-    // Volume bucket: bullish 0..15, bearish 0..15
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreVolume(TechnicalIndicators ind, List<string> signals)
-    {
-        double bull = 0, bear = 0;
-
-        if (ind.VolumeRatio is double vr)
-        {
-            // High volume is directionally ambiguous on its own — it confirms
-            // whichever direction price is moving. We add to both sides a small
-            // amount, but OBV and price-volume confirmation resolve the direction.
-            if (vr > 2.0) { bull += 3; bear += 3; signals.Add($"Volume: very elevated ({vr:F1}x avg)"); }
-            else if (vr > 1.3) { bull += 2; bear += 2; signals.Add($"Volume: above average ({vr:F1}x avg)"); }
-            else if (vr < 0.5) { signals.Add($"Volume: very low ({vr:F1}x avg)"); }
-            else if (vr < 0.7) { signals.Add($"Volume: below average ({vr:F1}x avg)"); }
-        }
-
-        if (ind.ObvSlope is double obvS)
-        {
-            if (obvS > 0) { bull += 5; signals.Add("Volume: OBV trending up (accumulation)"); }
-            else if (obvS < 0) { bear += 5; signals.Add("Volume: OBV trending down (distribution)"); }
-        }
-
-        if (ind.PriceVolumeConfirmation is bool pvc)
-        {
-            if (pvc) { bull += 4; signals.Add("Volume: price-volume confirmed"); }
-            else { bear += 4; signals.Add("Volume: price-volume divergence"); }
-        }
-
-        return new BucketScores(Math.Clamp(bull, 0, 15), Math.Clamp(bear, 0, 15));
-    }
-
-    // -----------------------------------------------------------------------
-    // Volatility setup bucket: bullish 0..10, bearish 0..10
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreVolatilitySetup(TechnicalIndicators ind, MarketSnapshotQuote? quote, List<string> signals)
-    {
-        double bull = 0, bear = 0;
-
-        if (ind.BollingerBreakout == true && quote is not null)
-        {
-            if (quote.Price > (ind.BollingerUpper ?? 0))
-            { bull += 5; signals.Add("Volatility: Bollinger upper breakout"); }
-            else
-            { bear += 5; signals.Add("Volatility: Bollinger lower breakdown"); }
-        }
-
-        if (ind.BollingerBandwidth is double bw)
-        {
-            // Squeeze is a setup signal — contributes to both sides mildly
-            if (bw < 3) { bull += 2; bear += 2; signals.Add($"Volatility: Bollinger squeeze ({bw:F1}%)"); }
-            else if (bw > 10) { signals.Add($"Volatility: bands very wide ({bw:F1}%)"); }
-        }
-
-        return new BucketScores(Math.Clamp(bull, 0, 10), Math.Clamp(bear, 0, 10));
-    }
-
-    // -----------------------------------------------------------------------
-    // Market context bucket: bullish 0..15, bearish 0..15
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreMarketContext(BenchmarkContext ctx, List<string> signals)
-    {
-        double bull = 0, bear = 0;
-
-        if (ctx.RelativeStrengthVsSpy is double relSpy)
-        {
-            if (relSpy > 1.5) { bull += 6; signals.Add($"Market: outperforming SPY (+{relSpy:F1}%)"); }
-            else if (relSpy > 0.5) { bull += 3; signals.Add($"Market: beating SPY (+{relSpy:F1}%)"); }
-            else if (relSpy < -1.5) { bear += 6; signals.Add($"Market: lagging SPY ({relSpy:F1}%)"); }
-            else if (relSpy < -0.5) { bear += 3; signals.Add($"Market: trailing SPY ({relSpy:F1}%)"); }
-        }
-
-        if (ctx.RelativeStrengthVsQqq is double relQqq)
-        {
-            if (relQqq > 1.5) { bull += 4; signals.Add($"Market: outperforming QQQ (+{relQqq:F1}%)"); }
-            else if (relQqq < -1.5) { bear += 4; signals.Add($"Market: lagging QQQ ({relQqq:F1}%)"); }
-        }
-
-        if (ctx.SpyTrend is not null)
-        {
-            if (ctx.SpyTrend == "bullish") { bull += 3; signals.Add("Market: SPY trend bullish"); }
-            else if (ctx.SpyTrend == "bearish") { bear += 3; signals.Add("Market: SPY trend bearish"); }
-        }
-        if (ctx.QqqTrend is not null)
-        {
-            if (ctx.QqqTrend == "bullish") { bull += 2; signals.Add("Market: QQQ trend bullish"); }
-            else if (ctx.QqqTrend == "bearish") { bear += 2; signals.Add("Market: QQQ trend bearish"); }
-        }
-
-        return new BucketScores(Math.Clamp(bull, 0, 15), Math.Clamp(bear, 0, 15));
-    }
-
-    // -----------------------------------------------------------------------
-    // Catalyst bucket: bullish 0..25, bearish 0..25
-    // Unknown/null sentiment contributes to NEITHER side.
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreCatalyst(MarketSnapshot snapshot, Dictionary<string, double> weights, List<string> signals)
-    {
-        var news = snapshot.NewsContext;
-        if (news.Count == 0)
-        {
-            signals.Add("Catalyst: no recent news");
-            return new BucketScores(0, 0);
-        }
-
-        double bull = 0, bear = 0;
-
-        var sources = news.Select(n => n.SourceName).Distinct().Count();
-        if (sources >= 3) { bull += 3; bear += 3; signals.Add($"Catalyst: {sources} sources confirming"); }
-        else if (sources >= 2) { bull += 1; bear += 1; signals.Add($"Catalyst: {sources} sources"); }
-
-        foreach (var item in news)
-        {
-            var catKey = item.CatalystType is not null ? $"catalyst_{item.CatalystType}" : null;
-            var catW = catKey is not null ? weights.GetValueOrDefault(catKey, 1.0) : 1.0;
-            var impactScore = item.ImportanceScore * catW * 3;
-
-            if (item.Sentiment == "bullish")
-            {
-                bull += impactScore;
-            }
-            else if (item.Sentiment == "bearish")
-            {
-                bear += impactScore;
-            }
-            // null/unknown/neutral → no directional contribution
-
-            var preview = item.Title.Length > 50 ? item.Title[..50] : item.Title;
-            signals.Add($"Catalyst: \"{preview}\" ({item.Sentiment ?? "neutral"}, imp={item.ImportanceScore:F0})");
-        }
-
-        return new BucketScores(Math.Clamp(bull, 0, 25), Math.Clamp(bear, 0, 25));
-    }
-
-    // -----------------------------------------------------------------------
-    // Catalyst strength: direction-independent repricing pressure (0..25)
-    //
-    // Measures "how likely is rapid repricing?" regardless of bull/bear.
-    // Used by the velocity formula to determine time windows.
-    // Scores based on: news volume, max importance, recency, catalyst type.
-    // Does NOT require sentiment labels.
-    // -----------------------------------------------------------------------
-
-    internal static double ScoreCatalystStrength(MarketSnapshot snapshot)
-    {
-        var news = snapshot.NewsContext;
-        if (news.Count == 0) return 0;
-
-        double strength = 0;
-
-        // 1. News volume: more coverage = more likely to move price
-        strength += news.Count switch
-        {
-            >= 10 => 6,
-            >= 5  => 4,
-            >= 3  => 2,
-            >= 1  => 1,
-            _     => 0,
-        };
-
-        // 2. Max importance: at least one high-impact item drives speed
-        var maxImportance = news.Max(n => n.ImportanceScore);
-        strength += maxImportance switch
-        {
-            >= 85 => 8,   // Major catalyst (earnings surprise, FDA, M&A)
-            >= 65 => 5,   // Significant (analyst upgrade, sector news)
-            >= 45 => 3,   // Moderate (general news coverage)
-            >= 25 => 1,   // Minor
-            _     => 0,
-        };
-
-        // 3. Recency: fresh news moves faster
-        var mostRecent = news
-            .Select(n => DateTimeOffset.TryParse(n.PublishedAt, out var dt) ? dt : (DateTimeOffset?)null)
-            .Where(d => d.HasValue)
-            .Select(d => d!.Value)
-            .DefaultIfEmpty(DateTimeOffset.MinValue)
-            .Max();
-        var hoursOld = (DateTimeOffset.UtcNow - mostRecent).TotalHours;
-        strength += hoursOld switch
-        {
-            <= 2  => 5,   // Breaking news
-            <= 6  => 4,   // Same session
-            <= 12 => 3,   // Today
-            <= 24 => 2,   // Yesterday
-            <= 48 => 1,   // Two days ago
-            _     => 0,
-        };
-
-        // 4. Catalyst type diversity: multiple types = complex event
-        var catalystTypes = news
-            .Where(n => n.CatalystType is not null)
-            .Select(n => n.CatalystType!)
-            .Distinct()
-            .ToList();
-
-        // High-velocity catalyst types (these tend to cause fast moves)
-        var highVelocityTypes = new HashSet<string> { "earnings", "merger", "acquisition", "fda", "guidance", "buyback" };
-        if (catalystTypes.Any(t => highVelocityTypes.Contains(t)))
-            strength += 4;
-        else if (catalystTypes.Count >= 2)
-            strength += 2;
-        else if (catalystTypes.Count >= 1)
-            strength += 1;
-
-        // 5. Multi-source confirmation: same story from many sources = real
-        var sourceCount = news.Select(n => n.SourceName).Distinct().Count();
-        if (sourceCount >= 4) strength += 2;
-        else if (sourceCount >= 2) strength += 1;
-
-        return Math.Clamp(strength, 0, 25);
-    }
-
-    // -----------------------------------------------------------------------
-    // Learning bucket: bullish 0..15, bearish 0..15
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreLearning(Dictionary<string, double> weights, List<string> lessons, List<string> signals)
-    {
-        double bull = 0, bear = 0;
-
-        // Direction-specific weights (e.g., technical_trend_bullish, technical_trend_bearish)
-        var bullishWeights = weights
-            .Where(w => w.Key.EndsWith("_bullish") && Math.Abs(w.Value - 1.0) > 0.15)
-            .ToList();
-        var bearishWeights = weights
-            .Where(w => w.Key.EndsWith("_bearish") && Math.Abs(w.Value - 1.0) > 0.15)
-            .ToList();
-
-        if (bullishWeights.Count > 0)
-        {
-            var avgWeight = bullishWeights.Average(w => w.Value);
-            bull = Math.Clamp((avgWeight - 1.0) * 30, 0, 15);
-            signals.Add($"Learning: {bullishWeights.Count} bullish weights adjusted (avg {avgWeight:F2}x)");
-        }
-        if (bearishWeights.Count > 0)
-        {
-            var avgWeight = bearishWeights.Average(w => w.Value);
-            bear = Math.Clamp((avgWeight - 1.0) * 30, 0, 15);
-            signals.Add($"Learning: {bearishWeights.Count} bearish weights adjusted (avg {avgWeight:F2}x)");
-        }
-
-        // Fallback: generic (non-directional) weights contribute equally
-        var genericWeights = weights
-            .Where(w => w.Key != "calibration_factor"
-                && !w.Key.EndsWith("_bullish") && !w.Key.EndsWith("_bearish")
-                && Math.Abs(w.Value - 1.0) > 0.15)
-            .ToList();
-        if (genericWeights.Count > 0)
-        {
-            var avgWeight = genericWeights.Average(w => w.Value);
-            var contribution = Math.Clamp((avgWeight - 1.0) * 15, -7, 7);
-            if (contribution > 0) { bull += contribution; }
-            else { bear += Math.Abs(contribution); }
-            signals.Add($"Learning: {genericWeights.Count} generic weights (avg {avgWeight:F2}x)");
-        }
-
-        if (lessons.Count > 0)
-            signals.Add($"Learning: {lessons.Count} prior lessons considered");
-
-        return new BucketScores(Math.Clamp(bull, 0, 15), Math.Clamp(bear, 0, 15));
-    }
-
-    // -----------------------------------------------------------------------
-    // Research signal bucket: bullish 0..20, bearish 0..20
-    // Scores active signals from registered providers (congress, etc.)
-    // -----------------------------------------------------------------------
-
-    private static BucketScores ScoreResearchSignals(
-        List<ResearchSignal> researchSignals, Dictionary<string, double> weights, List<string> signals)
-    {
-        if (researchSignals.Count == 0) return new BucketScores(0, 0);
-
-        double bull = 0, bear = 0;
-
-        foreach (var sig in researchSignals)
-        {
-            var weightKey = $"research_{sig.SignalType}";
-            var w = weights.GetValueOrDefault(weightKey, 1.0);
-            var contribution = sig.Strength * sig.Confidence * 15 * w;
-
-            if (sig.SignalCategory == "institutional")
-            {
-                // Congressional buys are bullish signals, sells are bearish
-                if (sig.SignalType.Contains("buy") || sig.SignalType.Contains("cluster"))
-                    bull += contribution;
-                else if (sig.SignalType.Contains("sell"))
-                    bear += contribution;
-                else
-                    bull += contribution * 0.5; // unknown direction — mild bullish lean
-            }
-            else
-            {
-                // Generic: positive strength = bullish, negative = bearish
-                if (sig.Strength > 0) bull += contribution;
-                else bear += Math.Abs(contribution);
-            }
-
-            signals.Add($"Research: {sig.Summary ?? sig.SignalType} (str={sig.Strength:F2}, conf={sig.Confidence:F2})");
-        }
-
-        return new BucketScores(Math.Clamp(bull, 0, 20), Math.Clamp(bear, 0, 20));
-    }
-
-    // -----------------------------------------------------------------------
-    // Risk penalty: 0 to -30 (direction-independent)
-    // -----------------------------------------------------------------------
-
-    private static double ScoreRiskPenalty(
-        TechnicalIndicators ind, BenchmarkContext ctx, MarketSnapshot snapshot, List<string> signals)
-    {
-        double penalty = 0;
-
-        if (ind.Atr14 is double atr && snapshot.Quote is not null && snapshot.Quote.Price > 0)
-        {
-            var atrPct = (atr / snapshot.Quote.Price) * 100;
-            if (atrPct > 8) { penalty -= 10; signals.Add($"Risk: ATR very high ({atrPct:F1}%)"); }
-            else if (atrPct > 5) { penalty -= 5; signals.Add($"Risk: ATR elevated ({atrPct:F1}%)"); }
-        }
-
-        if (ctx.SpyTrend == "bearish" && ctx.QqqTrend == "bearish")
-        { penalty -= 8; signals.Add("Risk: both SPY and QQQ bearish"); }
-
-        if (!snapshot.DataAvailability.MarketDataAvailable)
-        { penalty -= 15; signals.Add("Risk: no market data available"); }
-
-        if (ind.BarsAvailable < 10)
-        { penalty -= 5; signals.Add($"Risk: only {ind.BarsAvailable} bars available"); }
-
-        if (ind.Rsi14 is double rsi && (rsi > 80 || rsi < 20))
-        { penalty -= 5; signals.Add($"Risk: RSI at extreme ({rsi:F0})"); }
-
-        return Math.Clamp(penalty, -30, 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // Direction-neutral prediction type determination
-    // -----------------------------------------------------------------------
-
     private static (string WinningDirection, string PredictionType) DeterminePredictionType(
         double bullishScore, double bearishScore, MarketSnapshot snapshot, TechnicalIndicators ind)
     {
@@ -876,6 +520,17 @@ public static class ScoringEngine
         if (bearishScore >= MinScoreForDirection && -margin >= MinEdgeMargin)
             return ("bearish", "bearish");
 
+        const double MinRatioForDirection = 1.4;
+        const double MinScoreForRatio = 15;
+        if (bullishScore >= MinScoreForRatio && bearishScore >= MinScoreForRatio)
+        {
+            var ratio = bullishScore / bearishScore;
+            if (ratio >= MinRatioForDirection)
+                return ("bullish", "bullish");
+            if (1.0 / ratio >= MinRatioForDirection)
+                return ("bearish", "bearish");
+        }
+
         if (Math.Max(bullishScore, bearishScore) < 8)
             return ("neutral", "watch_only");
 
@@ -887,36 +542,5 @@ public static class ScoringEngine
             return ("neutral", "neutral_range_bound");
 
         return ("neutral", "neutral_no_edge");
-    }
-
-    // -----------------------------------------------------------------------
-    // Risk score (unchanged logic, adapted for dual scores)
-    // -----------------------------------------------------------------------
-
-    private static int ComputeRisk(
-        MarketSnapshot snapshot, TechnicalIndicators ind,
-        BenchmarkContext ctx, string predType, double riskPenalty)
-    {
-        int risk = 40;
-
-        if (ind.Atr14 is double atr && snapshot.Quote is not null && snapshot.Quote.Price > 0)
-        {
-            var atrPct = (atr / snapshot.Quote.Price) * 100;
-            if (atrPct > 5) risk += 15;
-            else if (atrPct > 3) risk += 5;
-        }
-
-        if (predType == "bullish" && !ind.Sma5AboveSma20) risk += 10;
-        if (predType == "bearish" && ind.Sma5AboveSma20) risk += 10;
-
-        if (ctx.SpyTrend == "bearish" && predType == "bullish") risk += 10;
-        if (ctx.SpyTrend == "bullish" && predType == "bearish") risk += 10;
-
-        if (!snapshot.DataAvailability.MarketDataAvailable) risk += 15;
-        if (!snapshot.DataAvailability.NewsAvailable) risk += 5;
-
-        risk += (int)Math.Abs(riskPenalty / 2);
-
-        return Math.Clamp(risk, 0, 100);
     }
 }

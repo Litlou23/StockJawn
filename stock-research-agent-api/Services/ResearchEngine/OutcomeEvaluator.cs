@@ -1,5 +1,6 @@
 using System.Text.Json;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Evidence;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Supabase;
 
@@ -14,15 +15,18 @@ public class OutcomeEvaluator
 {
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
+    private readonly IEvidenceService _evidence;
     private readonly ILogger<OutcomeEvaluator> _logger;
 
     public OutcomeEvaluator(
         MarketDataService marketData,
         ResearchRepository repo,
+        IEvidenceService evidence,
         ILogger<OutcomeEvaluator> logger)
     {
         _marketData = marketData;
         _repo = repo;
+        _evidence = evidence;
         _logger = logger;
     }
 
@@ -310,6 +314,41 @@ public class OutcomeEvaluator
 
         _logger.LogInformation("[outcome-evaluator] Evaluated {Eval}, skipped {Skip}, errors {Err}",
             evaluated.Count, skipped.Count, errors.Count);
+
+        // Record evidence from evaluated outcomes (non-blocking).
+        try
+        {
+            var evidenceRecords = new List<EvidenceRecord>();
+            foreach (var result in evaluated)
+            {
+                var outcome = result.Outcome;
+                var weight = outcome.DirectionCorrect == true ? 0.5
+                           : outcome.DirectionCorrect == false ? -0.5 : 0.0;
+                // Boost weight for large moves
+                if (Math.Abs(outcome.PercentMove ?? 0) > 3) weight *= 1.5;
+
+                evidenceRecords.Add(new EvidenceRecord
+                {
+                    Ticker = result.Ticker,
+                    EvidenceType = EvidenceType.Research,
+                    Source = "outcome-evaluation",
+                    Weight = Math.Clamp(weight, -1.0, 1.0),
+                    Importance = (int)Math.Clamp(outcome.OutcomeScore ?? 50, 1, 100),
+                    Summary = (outcome.OutcomeSummary ?? "")[..Math.Min(300, (outcome.OutcomeSummary ?? "").Length)],
+                    RelatedEventId = result.PredictionId,
+                });
+            }
+            if (evidenceRecords.Count > 0)
+            {
+                var recorded = await _evidence.RecordManyAsync(evidenceRecords);
+                _logger.LogInformation("[outcome-evaluator] Recorded {Count} evidence items from outcomes", recorded);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[outcome-evaluator] Evidence recording failed (non-blocking)");
+        }
+
         return (evaluated, skipped, errors);
     }
 

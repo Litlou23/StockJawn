@@ -1,7 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
+using StockResearchAgent.Api.Services.Discovery;
+using StockResearchAgent.Api.Services.Evidence;
+using StockResearchAgent.Api.Services.OpportunityLearning;
 using StockResearchAgent.Api.Services.ResearchEngine;
+using StockResearchAgent.Api.Services.ResearchUniverse;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Controllers;
@@ -322,6 +326,213 @@ public class ResearchJobsController : ControllerBase
 
                 return (report, summary);
             });
+    }
+
+    // -----------------------------------------------------------------------
+    // Discovery Engine — scan all providers for new Research Assets
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run-discovery")]
+    public Task<IActionResult> RunDiscovery([FromBody] JobTriggerRequest? trigger)
+    {
+        if (!ValidateJobSecret())
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
+
+        var traceId = GetTraceId();
+        _logger.LogInformation("[jobs] Discovery scan triggered by {Trigger} traceId={TraceId}",
+            trigger?.Trigger ?? "unknown", traceId ?? "(none)");
+
+        _tracker.MarkStarted("discovery");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var engine = scope.ServiceProvider.GetRequiredService<IDiscoveryEngine>();
+                var result = await engine.RunDiscoveryAsync();
+
+                _tracker.MarkCompleted("discovery",
+                    $"{result.TotalEventsDiscovered} events from {result.ProviderResults.Count} providers, {result.NewAssetsCreated} new assets");
+
+                _logger.LogInformation("[jobs] Discovery completed: {Events} events, {Assets} new assets traceId={TraceId}",
+                    result.TotalEventsDiscovered, result.NewAssetsCreated, traceId ?? "(none)");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[jobs] Discovery failed traceId={TraceId}", traceId ?? "(none)");
+                _tracker.MarkFailed("discovery", ex.Message);
+            }
+        });
+
+        return Task.FromResult<IActionResult>(Accepted(new
+        {
+            ok = true,
+            accepted = true,
+            runType = "discovery",
+            status = "running",
+            message = "Discovery scan accepted — running all providers.",
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Continuous Discovery — incremental evidence since last checkpoint
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Runs one lightweight continuous discovery cycle.
+    /// Only processes events newer than the last checkpoint.
+    /// Does NOT generate predictions, run Morning Scan, or trigger Learning.
+    /// Designed to be called hourly (configurable) during market hours.
+    /// </summary>
+    [HttpPost("run-continuous-discovery")]
+    public Task<IActionResult> RunContinuousDiscovery([FromBody] JobTriggerRequest? trigger)
+    {
+        if (!ValidateJobSecret())
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
+
+        var traceId = GetTraceId();
+        _logger.LogInformation(
+            "[jobs] Continuous discovery triggered by {Trigger} traceId={TraceId}",
+            trigger?.Trigger ?? "unknown", traceId ?? "(none)");
+
+        _tracker.MarkStarted("continuous_discovery");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var engine = scope.ServiceProvider.GetRequiredService<IContinuousDiscoveryEngine>();
+                var result = await engine.RunCycleAsync();
+
+                if (result.WasSkipped)
+                    _tracker.MarkCompleted("continuous_discovery",
+                        $"Skipped: {result.SkipReason}");
+                else
+                    _tracker.MarkCompleted("continuous_discovery",
+                        $"{result.NewEventsFound} events, {result.NewAssetsCreated} new + " +
+                        $"{result.ExistingAssetsUpdated} updated assets, " +
+                        $"{result.TimelineEventsCreated} timeline events, " +
+                        $"{result.HistoricalProfilesBuilt} profiles built, " +
+                        $"{result.HistoricalProfilesRefreshed} refreshed");
+
+                _logger.LogInformation(
+                    "[jobs] Continuous discovery completed traceId={TraceId}: {Summary}",
+                    traceId ?? "(none)", result.Summary);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "[jobs] Continuous discovery failed traceId={TraceId}",
+                    traceId ?? "(none)");
+                _tracker.MarkFailed("continuous_discovery", ex.Message);
+            }
+        });
+
+        return Task.FromResult<IActionResult>(Accepted(new
+        {
+            ok = true,
+            accepted = true,
+            runType = "continuous_discovery",
+            status = "running",
+            message = "Continuous discovery cycle accepted — scanning for new evidence since last checkpoint.",
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Research Universe Maintenance — decay scores, promote, archive stale
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run-universe-maintenance")]
+    public Task<IActionResult> RunUniverseMaintenance([FromBody] JobTriggerRequest? trigger)
+    {
+        if (!ValidateJobSecret())
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
+
+        var traceId = GetTraceId();
+        _logger.LogInformation("[jobs] Universe maintenance triggered by {Trigger} traceId={TraceId}",
+            trigger?.Trigger ?? "unknown", traceId ?? "(none)");
+
+        _tracker.MarkStarted("universe_maintenance");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var engine = scope.ServiceProvider.GetRequiredService<IResearchUniverseEngine>();
+                var result = await engine.RunMaintenanceAsync();
+
+                _tracker.MarkCompleted("universe_maintenance", result.Summary);
+
+                _logger.LogInformation("[jobs] Universe maintenance completed traceId={TraceId}: {Summary}",
+                    traceId ?? "(none)", result.Summary);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[jobs] Universe maintenance failed traceId={TraceId}", traceId ?? "(none)");
+                _tracker.MarkFailed("universe_maintenance", ex.Message);
+            }
+        });
+
+        return Task.FromResult<IActionResult>(Accepted(new
+        {
+            ok = true,
+            accepted = true,
+            runType = "universe_maintenance",
+            status = "running",
+            message = "Universe maintenance accepted — evaluating all active research assets.",
+        }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Opportunity Learning — scan for missed opportunities
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run-opportunity-scan")]
+    public Task<IActionResult> RunOpportunityScan([FromBody] JobTriggerRequest? trigger)
+    {
+        if (!ValidateJobSecret())
+            return Task.FromResult<IActionResult>(Unauthorized(new { error = "Invalid or missing x-job-secret header" }));
+
+        var traceId = GetTraceId();
+        _logger.LogInformation("[jobs] Opportunity scan triggered by {Trigger} traceId={TraceId}",
+            trigger?.Trigger ?? "unknown", traceId ?? "(none)");
+
+        _tracker.MarkStarted("opportunity_scan");
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var service = scope.ServiceProvider.GetRequiredService<IOpportunityLearningService>();
+                var result = await service.ScanForMissedOpportunitiesAsync();
+
+                if (result.Errors.Count > 0)
+                    _tracker.MarkFailed("opportunity_scan", string.Join("; ", result.Errors.Take(5)));
+                else
+                    _tracker.MarkCompleted("opportunity_scan", result.Summary);
+
+                _logger.LogInformation("[jobs] Opportunity scan completed traceId={TraceId}: {Summary}",
+                    traceId ?? "(none)", result.Summary);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[jobs] Opportunity scan failed traceId={TraceId}", traceId ?? "(none)");
+                _tracker.MarkFailed("opportunity_scan", ex.Message);
+            }
+        });
+
+        return Task.FromResult<IActionResult>(Accepted(new
+        {
+            ok = true,
+            accepted = true,
+            runType = "opportunity_scan",
+            status = "running",
+            message = "Opportunity scan accepted — scanning for missed opportunities.",
+        }));
     }
 
     // -----------------------------------------------------------------------

@@ -47,8 +47,8 @@ export default function SortableSignalTable({ signals }: { signals: SignalPerf[]
           </tr>
         </thead>
         <tbody>
-          {sorted.map((s) => (
-            <tr key={s.signalName} className="border-b border-zinc-800/50">
+          {sorted.map((s, idx) => (
+            <tr key={`${s.signalName}-${idx}`} className="border-b border-zinc-800/50">
               <td className="py-2 pr-3 text-zinc-200">{s.signalName.replace(/_/g, ' ')}</td>
               <td className="py-2 pr-3">
                 <span className={scoreColor(s.accuracy * 100)}>{(s.accuracy * 100).toFixed(1)}%</span>

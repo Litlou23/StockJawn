@@ -72,7 +72,7 @@ The closed-loop feedback system that makes every other capability improve over t
 | **Outcome evaluation** | Active — `OutcomeEvaluator.cs` compares predictions to actual results |
 | **Weight adjustment** | Active — `LearningEngine.cs` adjusts scoring weights based on outcomes |
 | **Signal extraction** | Active — `ExtractSignalsFromPrediction` identifies which signals contributed |
-| **Options learning** | Active — `OptionLearningService.cs` tracks options-specific performance |
+| **Options learning** | Dead code — `OptionLearningService.cs` is scheduled for deletion (tech debt #4). Options learning will be rebuilt after LearningEngine decomposition. |
 | **Learning insights** | Active — automated insight generation stored in `learning_insights` table |
 | **Observability UI** | Active — `/learning` page with signal performance panel and report card |
 
@@ -213,4 +213,4 @@ Connecting to a real brokerage for live execution.
 
 ---
 
-*Cross-references: [PRODUCT_VISION.md](PRODUCT_VISION.md) · [CHECKLIST.md](CHECKLIST.md) · [PRODUCT_IDEAS.md](PRODUCT_IDEAS.md) · [EXPERIMENTS.md](EXPERIMENTS.md) · [DECISIONS.md](DECISIONS.md) · [GLOSSARY.md](GLOSSARY.md) · [DATA_MODEL.md](DATA_MODEL.md) · [AGENTS.md](../AGENTS.md)*
+*Cross-references: [PRODUCT_VISION.md](PRODUCT_VISION.md) · [CHECKLIST.md](CHECKLIST.md) · [PRODUCT_IDEAS.md](PRODUCT_IDEAS.md) · [EXPERIMENTS.md](EXPERIMENTS.md) · [ADRs](adr/) · [GLOSSARY.md](GLOSSARY.md) · [DATA_MODEL.md](DATA_MODEL.md) · [ProjectState.md](ProjectState.md)*

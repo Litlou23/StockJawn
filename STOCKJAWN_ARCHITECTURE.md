@@ -205,7 +205,7 @@ Three evaluators run, all against live Twelve Data / MarketData.app quotes, all 
 - `PaperOptionsService.EvaluateAllOpenAsync` scores every open `paper_option_candidates` row into `paper_option_outcomes` (simulated P&L, IV change) and updates `option_learning_stats`.
 
 ### Learning Update (processing + storage)
-`LearningEngine` re-tallies signal-level accuracy across recent predictions/outcomes into `research_signal_performance`, nudges `research_scoring_weights` up or down (bounded per-adjustment, minimum sample size required) based on measured accuracy, and writes plain-English summaries to `learning_insights`. It also runs two additional stages: (1) **Confidence calibration** — `ComputeConfidenceCalibrationAsync` measures predicted vs. actual accuracy across confidence bands, and `ApplyCalibrationFactorAsync` computes a dampening multiplier (clamped 0.85–1.15, moved max 1%/day toward the target) that is persisted as a weight override (`calibration_factor`) and applied by `ScoringEngine` on the next Morning Scan to correct systematic overconfidence or underconfidence. (2) **Setup performance analytics** — `ComputeSetupPerformanceAsync` groups resolved predictions by their setup fingerprint (canonical pipe-delimited string of active signal components), computes per-fingerprint win rate, average win/loss, expected value, confidence, risk rating, regime breakdown, and degradation detection, and upserts results to `setup_learning_stats`. These weights, calibration factor, and insights are read back in on the *next* Morning Scan by both `ScoringEngine` (weights, calibration factor, setup history) and `DynamicWatchlistService` (insights, ticker accuracy).
+`LearningEngine` re-tallies signal-level accuracy across recent predictions/outcomes into `research_signal_performance`, nudges `research_scoring_weights` up or down (bounded per-adjustment, minimum sample size required) based on measured accuracy, and writes plain-English summaries to `learning_insights`. It also runs several additional stages: (1) **Confidence calibration** — `ComputeConfidenceCalibrationAsync` measures predicted vs. actual accuracy across confidence bands, and `ApplyCalibrationFactorAsync` computes a dampening multiplier (clamped 0.85–1.15, moved max 1%/day toward the target) that is persisted as a weight override (`calibration_factor`) and applied by `ScoringEngine` on the next Morning Scan to correct systematic overconfidence or underconfidence. (1b) **Self-tuning confidence caps** — `ComputeCapEffectivenessAsync` groups resolved predictions by the `ConfidenceCap` reason stored in their `score_debug_json`, measures accuracy per cap reason, persists results to `cap_tuning_stats`, and computes a `risk_cap_boost` weight override (0–15 pts, max 2 pts/day movement) when risk-capped predictions are more accurate than their confidence band implies — see §10 "Self-Tuning Confidence Caps". (2) **Setup performance analytics** — `ComputeSetupPerformanceAsync` groups resolved predictions by their setup fingerprint (canonical pipe-delimited string of active signal components), computes per-fingerprint win rate, average win/loss, expected value, confidence, risk rating, regime breakdown, and degradation detection, and upserts results to `setup_learning_stats`. These weights, calibration factor, cap boost, and insights are read back in on the *next* Morning Scan by both `ScoringEngine` (weights, calibration factor, risk cap boost, setup history) and `DynamicWatchlistService` (insights, ticker accuracy).
 
 ### Scheduled jobs (external trigger)
 Per `stock-research-agent-api/CLAUDE.md`, scheduling is external to both repositories: Supabase Edge Functions (`supabase/functions/morning-scan`, `end-of-day-review`, `learning-update`, `weekly-research`, in the separate Supabase project, not in this workspace) run on a `pg_cron` schedule and call the .NET API's job endpoints (`POST /api/jobs/run-*`) using a `DOTNET_API_BASE_URL` secret. Every job route requires an `x-job-secret` header matching `JOB_RUN_SECRET`. The Dashboard's manual "Run" buttons call the exact same .NET endpoints, via the Next.js proxy route `POST /api/jobs/trigger` (which adds the same secret server-side). Long-running jobs (weekly research, all three dynamic-orchestrator jobs) use a fire-and-forget pattern: the controller validates the secret, starts a background `Task.Run`, and returns HTTP 202 immediately; a `JobStatusTracker` singleton holds in-memory job state that `GET /api/jobs/status` exposes for polling.
@@ -432,5 +432,314 @@ The `candidate_mode` enum on `paper_stock_candidates` (`learning` → `actionabl
 The Settings page's own copy ("These will be adjustable in a future update — for now, this is a preview") indicates an intended move from the current read-only, algorithm-managed scoring weights toward direct user control over signal weighting.
 
 The chat-tool architecture (`chatToolDefinitions.ts`) has grown to 13 tools covering read-only queries, action triggers (morning scan, EOD review, learning update), scoring explanation, setup performance analysis, and configuration management. The tool surface is explicitly designed to be extended further — it serves as the single integration point between the AI assistant and all system capabilities, and the same `get_ticker_detail` tool is shared between the chat assistant and the Watchlist page's detail modal.
+
+### Self-Tuning Confidence Caps (Phase 1 — Active)
+
+The system's confidence formula includes hard caps that limit confidence based on risk score, trend/momentum conflict, market context conflict, and earnings proximity. Historically these caps were static, which created a problem: the risk caps in particular crushed confidence on predictions that had clear directional signals in volatile environments. Calibration data showed the 0–30 confidence band (all risk-capped) was 57% accurate — the best of any band — while the 50–65 band (uncapped but directionally conflicted) was only 19% accurate. The system was saying "I'm not confident" about its best calls and "I'm confident" about its worst.
+
+**Phase 1** adds a self-tuning feedback loop:
+
+1. **Cap Effectiveness Analysis** (`LearningEngine.ComputeCapEffectivenessAsync`): During the nightly learning update, the system groups all resolved predictions by their `ConfidenceCap` reason (stored in `score_debug_json`), measures accuracy per cap reason, and persists results to `cap_tuning_stats`. A cap is classified as *ineffective* if the accuracy of capped predictions exceeds the expected accuracy for their confidence band by more than 10%.
+
+2. **Automatic Cap Adjustment**: When risk-capped predictions are collectively more accurate than their confidence band implies, the learning engine computes a `risk_cap_boost` (0–15 points) and persists it as a weight override. Movement is gradual (max 2 points per day) to prevent whiplash.
+
+3. **ScoringEngine Consumption**: `ScoringEngine.Score()` reads `risk_cap_boost` from the weights dictionary (same mechanism as `calibration_factor`) and adds it to the risk-confidence caps, with absolute ceilings to prevent runaway boosting (70 for risk ≥ 75, 75 for risk ≥ 60, 80 for risk ≥ 50).
+
+4. **Direction-Aware Caps**: Risk caps are now conditioned on the normalized decision margin `(W-L)/(W+L)` — when the margin exceeds 0.54 (clear directional signal), caps are loosened before the self-tuning boost is applied. The opposition penalty also uses decision margin instead of a simple ratio, which is more stable across different score magnitudes. This addresses the independence of risk (environmental volatility) vs. directional uncertainty. Risk model quality is separately evaluated using MAE (max adverse excursion) per risk bucket, not directional accuracy.
+
+**Future phases** (not yet built):
+- Per-cap-reason individual tuning (separate boosts for earnings caps, conflict caps, etc.)
+- Meta-analysis correlating prediction accuracy with each confidence formula component
+- Automatic cap threshold discovery (instead of fixed risk ≥ 60/75 breakpoints)
+- Separation of "risk score" into distinct dimensions: environmental risk (volatility, liquidity) vs. directional uncertainty
+
+---
+
+## 11. Research Pipeline v2 — Discovery → Evidence → Research Universe
+
+The original pipeline was: watchlist (manual/weekly refresh) → predictions → outcomes → learning. The new architecture adds four systems between data ingestion and prediction generation, creating a more autonomous and evidence-driven flow.
+
+### New Pipeline Flow
+
+```
+Data Sources (Finnhub, TwelveData, MarketData.app, Congress data)
+        ↓
+Market Intelligence (MarketRegimeEngine, AdaptiveLearningEngine, KnowledgeBase)
+        ↓
+Discovery Engine (multiple providers scan for interesting tickers)
+        ↓
+Evidence Engine (every signal becomes an evidence record with weight and decay)
+        ↓
+Research Universe (scored, lifecycle-managed collection of research targets)
+        ↓
+Morning Scan (generates predictions ONLY for Research Universe members)
+        ↓
+Scoring Engine (confidence, risk, EV, trade grade)
+        ↓
+Trade Decision Engine (filters, risk-reward, portfolio context)
+        ↓
+Portfolio (paper stock + option candidates)
+        ↓
+Outcome Evaluation (EOD price check → evidence feedback)
+        ↓
+Learning (signal performance, self-tuning, opportunity learning)
+```
+
+### 11.1 Discovery Engine
+
+**Purpose**: Automatically find new tickers worth researching — replaces the manual "weekly research" as the primary ticker intake.
+
+**Entry point**: `IDiscoveryEngine.RunDiscoveryAsync()` via `POST /api/jobs/run-discovery`.
+
+**Provider pattern**: Each discovery source implements `IDiscoveryProvider`:
+- `NewsDiscoveryProvider` — scans Finnhub news for tickers with high mention counts or significant catalysts.
+- `MoverDiscoveryProvider` — uses TwelveData top movers to find stocks with unusual price action.
+- `CongressDiscoveryProvider` — flags tickers with recent congressional trading disclosures.
+
+**Flow**: The engine runs all registered providers in sequence, deduplicates by ticker, persists `DiscoveryEvent` records to the `discovery_events` table, and calls `IResearchUniverseService.DiscoverAsync()` for each new ticker (idempotent — creates a `ResearchAsset` only if one doesn't already exist).
+
+**Model**: `DiscoveryEvent` — ticker, category (`DiscoveryCategory` enum: TopMover, HighVolume, NewsCatalyst, EarningsUpcoming, CongressTrade, TechnicalBreakout, SectorRotation, OptionsUnusualActivity, InsiderActivity, AnalystUpgrade, IPO, Other), source, confidence, metadata JSON, summary.
+
+**Table**: `discovery_events` — indexed on ticker, category, and discovered_at.
+
+### 11.2 Evidence Engine
+
+**Purpose**: Every observation about a ticker — from discovery, predictions, outcomes, regime changes, or learning insights — is recorded as a weighted evidence record. Evidence accumulates over time and decays, providing a quantitative measure of how interesting a ticker is right now.
+
+**Entry point**: `IEvidenceService` — the main orchestrator.
+
+**Core concepts**:
+- `EvidenceRecord` — a single observation: ticker, type (`EvidenceType` enum: News, Technical, Congress, SEC, Learning, MarketRegime, Options, Volume, Momentum, Research, Catalyst), source string, weight (-1.0 to 1.0, positive = bullish), importance (1-100), optional expiration, optional link to a DiscoveryEvent.
+- `EvidenceSnapshot` — aggregated view: interest score (0-100), evidence count, weight breakdown by type, auto-generated thesis, timeline.
+- **Decay**: Each evidence type has configurable half-life and TTL. News evidence decays faster than SEC filings. Weight diminishes over time using the configured half-life.
+
+**Recording sources**:
+- Discovery Engine → `RecordFromDiscoveryAsync()` converts discovery events into evidence.
+- Morning Scan → `DynamicPickOrchestrator` records evidence for each prediction generated.
+- Outcome Evaluation → `OutcomeEvaluator` records evidence from evaluated outcomes (correct predictions strengthen, wrong predictions weaken).
+- Future: market regime changes, learning insights, manual analyst input.
+
+**Research Asset sync**: `SyncToResearchAssetAsync()` recomputes the evidence snapshot for a ticker and pushes updated interest score, evidence count, thesis, and last activity timestamp to the corresponding `ResearchAsset`.
+
+**Components**: `IEvidenceRepository` (Supabase persistence), `IEvidenceAggregator` (snapshot computation), `IEvidenceDecayStrategy` (time-based weight decay).
+
+**Table**: `evidence_records` — indexed on ticker, evidence_type, timestamp.
+
+### 11.3 Research Universe
+
+**Purpose**: A scored, lifecycle-managed collection of every ticker the system is actively researching. Replaces the old static watchlist as the source of morning scan candidates.
+
+**Entry point**: `IResearchUniverseEngine.RunMaintenanceAsync()` via `POST /api/jobs/run-universe-maintenance`.
+
+**Lifecycle states** (`ResearchState` enum): `New` → `Active` → `Monitoring` → `Archived`. Each state has rules for promotion/demotion:
+- `New` → `Active`: sufficient evidence accumulates (configurable threshold in `ResearchUniverseConfig`).
+- `Active` → `Monitoring`: interest score decays below threshold, or no new evidence for a configurable period.
+- `Monitoring` → `Archived`: remains low-interest for too long, or staleness threshold exceeded.
+- Any state can be promoted back if new high-weight evidence arrives.
+
+**Status tracking** (`ResearchAssetStatus` enum): NotStarted, Discovered, EvidenceGathering, ReadyForAnalysis, ActiveResearch, Monitoring, Archived.
+
+**Model**: `ResearchAsset` — ticker, state, status, interest score, evidence count, thesis, first/last discovery, holding window start/end, tags, metadata.
+
+**Configurable rules** (`ResearchUniverseConfig`):
+- `ActiveMinInterestScore` / `MonitoringMinInterestScore` — promotion/demotion thresholds.
+- `StalenessThresholdDays` — how long without new evidence before demotion.
+- `DecayRatePerDay` — daily interest score decay for assets with no new evidence.
+- `MinEvidenceForActive` — minimum evidence records to promote from New.
+- `HoldingWindowDays` — minimum days an asset stays Active before it can be demoted.
+- `MaxActiveAssets` — hard cap on how many tickers can be Active simultaneously.
+
+**Morning Scan integration**: `DailyResearchRunService.GetResearchCandidatesAsync()` now pulls from `IResearchUniverseService.GetActiveAssetsAsync()` instead of the watchlist. Falls back to watchlist if the Research Universe is empty (bootstrap period).
+
+**Table**: `research_universe` — indexed on ticker (unique), state, interest_score.
+
+### 11.4 Opportunity Learning
+
+**Purpose**: Learn from opportunities the system missed. Instead of only evaluating predictions the system chose to make, it retroactively analyzes every significant stock movement to determine whether the pipeline should have caught it.
+
+**Entry point**: `IOpportunityLearningService.ScanForMissedOpportunitiesAsync()` via `POST /api/jobs/run-opportunity-scan`. Also runs automatically as part of the learning update pipeline in `DynamicPickOrchestrator.RunDynamicLearningUpdateAsync()`.
+
+**Movement thresholds** (configurable in `OpportunityLearningConfig`): 10%, 20%, 30%, 50%. Each movement is classified into a `MovementTier`: Tier1 (10%+), Tier2 (20%+), Tier3 (30%+), Tier4 (50%+).
+
+**Measurement periods**: 1-day, 1-week (5 days), 1-month (21 days) — configurable.
+
+**For each significant mover, the system evaluates**:
+1. **Discovery awareness**: Was it in our Discovery Events? How many days before the move? From what source?
+2. **Research Universe state**: Was it in the Research Universe? What state? What was its interest score and evidence count at the time?
+3. **Prediction coverage**: Did we generate a prediction? Was it the correct direction? What was the confidence and risk?
+4. **Capture status** (`OpportunityCaptureStatus`): Captured (prediction correct direction), PartiallyCaptured (discovered/in universe but no prediction), WrongDirection (prediction opposite), CompletelyMissed (never discovered).
+5. **Miss reasons** (`MissedOpportunityReason` enum): NeverDiscovered, NotInResearchUniverse, NoPredictionGenerated, LowConfidence, HighRisk, MissingCatalyst, MissingNews, MissingTechnicalConfirmation, MissingVolume, MissingWatchlistEntry, WrongDirection, TooLate, ArchivedTooEarly.
+
+**Analytics** (`OpportunityAnalytics`): Total opportunities, capture rate, awareness rate, breakdown by tier and period, top miss reasons, average discovery lead days.
+
+**Design constraint**: Observation only — no automatic weight updates based on opportunity analysis. All records are persisted for manual review and future integration.
+
+**Table**: `opportunity_learning_records` — indexed on ticker, scan_date, capture_status, highest_tier, percent_move.
+
+### 11.5 Scheduled Jobs
+
+The pipeline adds three new scheduled job endpoints (all require `x-job-secret` header):
+
+| Endpoint | Service | Purpose |
+|---|---|---|
+| `POST /api/jobs/run-discovery` | `IDiscoveryEngine.RunDiscoveryAsync()` | Run all discovery providers, persist events, create research assets |
+| `POST /api/jobs/run-universe-maintenance` | `IResearchUniverseEngine.RunMaintenanceAsync()` | Evaluate all assets: decay scores, promote/demote states, sync evidence |
+| `POST /api/jobs/run-opportunity-scan` | `IOpportunityLearningService.ScanForMissedOpportunitiesAsync()` | Scan for significant movers, evaluate pipeline coverage |
+
+**Recommended cron schedule** (not yet configured):
+1. Discovery → runs before morning scan (e.g. 7:00 AM ET)
+2. Universe Maintenance → runs after discovery, before morning scan (e.g. 7:15 AM ET)
+3. Morning Scan → existing schedule (e.g. 7:30 AM ET)
+4. Opportunity Scan → runs after EOD/learning update (e.g. 8:00 PM ET) or as part of learning update
+
+### 11.6 New Supabase Tables
+
+| Table | Purpose |
+|---|---|
+| `discovery_events` | Raw discovery observations from providers |
+| `evidence_records` | Weighted, timestamped evidence attached to tickers |
+| `research_universe` | Lifecycle-managed research targets with scores |
+| `opportunity_learning_records` | Retroactive analysis of missed opportunities |
+
+### 11.7 Future Extension Points
+
+1. **Additional Discovery Providers**: Implement `IDiscoveryProvider` to add new data sources (social sentiment, insider trading feeds, sector ETF flows, earnings whisper data).
+2. **Evidence from External Signals**: Any system that observes something about a ticker can call `IEvidenceService.RecordAsync()` — the interface is intentionally generic.
+3. **Automatic Weight Tuning from Opportunity Learning**: Currently observation-only. Future work: use miss-reason patterns to automatically adjust discovery provider weights, scoring thresholds, or confidence caps.
+4. **Research Universe Capacity Planning**: Dynamic `MaxActiveAssets` based on system load and prediction accuracy.
+5. **Evidence-Driven Prediction Confidence**: Use the evidence snapshot's interest score and thesis quality to modulate prediction confidence before scoring.
+6. **Cross-Ticker Evidence Correlation**: Detect when evidence for one ticker implies something about related tickers (sector peers, supply chain).
+
+---
+
+## 12. Market Intelligence Layer
+
+Built in a prior phase, the Market Intelligence layer provides context-aware analysis that feeds into the Research and Discovery pipelines.
+
+### 12.1 MarketRegimeEngine
+
+**Purpose**: Classifies the current market environment into regimes (Bull, Bear, Volatile, Transitioning, Sideways, CrisisSelling, MeltUp, SectorRotation). Uses SPY price data, VIX levels, breadth indicators, and moving average analysis.
+
+**Service**: `IMarketRegimeEngine` → `MarketRegimeEngine`.
+**Output**: `MarketRegimeAssessment` — current regime, confidence, regime history, transition probability.
+**Persistence**: `SupabaseMarketRegimeRepository` → `market_regime_assessments` table.
+
+### 12.2 AdaptiveLearningEngine
+
+**Purpose**: Tracks what prediction strategies work under which market conditions. Records strategy-regime performance pairs and adjusts recommendations.
+
+**Service**: `IAdaptiveLearningEngine` → `AdaptiveLearningEngine`.
+**Output**: `AdaptiveLearningInsight` — strategy effectiveness by regime, suggested adjustments.
+**Persistence**: `SupabaseAdaptiveLearningRepository` → `adaptive_learning_insights` table.
+
+### 12.3 StrategyDiscoveryEngine
+
+**Purpose**: Identifies new trading patterns by analyzing which combinations of signals, time windows, and market conditions produce the best outcomes.
+
+**Service**: `IStrategyDiscoveryEngine` → `StrategyDiscoveryEngine`.
+**Output**: `DiscoveredStrategy` — signal combination, performance stats, regime affinity.
+**Persistence**: `SupabaseStrategyDiscoveryEngine` → `discovered_strategies` table.
+
+### 12.4 KnowledgeBase
+
+**Purpose**: Centralized repository of system insights — facts the system has learned from its own experience. Queryable by topic, ticker, or regime.
+
+**Service**: `IKnowledgeBase` → `SupabaseKnowledgeBase`.
+**Output**: `KnowledgeEntry` — topic, content, confidence, source, tags.
+**Persistence**: `knowledge_entries` table.
+
+### 12.5 HistoricalCaseRepository
+
+**Purpose**: Stores complete decision records (prediction + context + outcome) for historical similarity matching. Used by `HistoricalSimilarityEngine` in the Trade Decision pipeline.
+
+**Service**: `IHistoricalCaseRepository` → `SupabaseHistoricalCaseRepository`.
+**Output**: `HistoricalCase` — full decision snapshot including signals, regime, outcome.
+**Persistence**: `historical_cases` table.
+
+---
+
+## 13. Trade Decision Pipeline
+
+The Trade Decision pipeline transforms raw predictions into fully-qualified trade decisions with grades, explanations, and portfolio context.
+
+### Components (all in `Services/TradeDecision/`):
+
+1. **TradeDecisionEngine** — orchestrator. Takes a prediction + market data, runs it through EV calculation, risk-reward analysis, trade filters, grading, and explanation generation. Returns a `TradeDecisionResult`.
+
+2. **EVService** — calculates expected value using prediction confidence, historical accuracy by setup type, and risk-reward ratio. Returns `EVCalculation` with raw EV, risk-adjusted EV, and Kelly fraction.
+
+3. **RiskRewardService** — computes target price, stop price, risk-reward ratio, max position size, and drawdown estimates. Returns `RiskRewardAnalysis`.
+
+4. **Trade Filters** (`ITradeFilter` pattern):
+   - `VolatilityFilter` — blocks trades in extreme volatility.
+   - `LiquidityFilter` — blocks illiquid tickers.
+   - `CorrelationFilter` — blocks trades too correlated with existing portfolio.
+
+5. **TradeGradeService** — assigns letter grades (A+ through F) based on EV, confidence, risk, and filter results. Returns `TradeGrade` with component scores.
+
+6. **DecisionExplanationService** — generates human-readable explanations of why a trade was graded the way it was, what factors contributed, and what risks exist.
+
+7. **PortfolioDecisionEngine** — adds portfolio-level context: existing exposure, sector concentration, correlation with current holdings. Returns `PortfolioDecisionResult`.
+
+8. **HistoricalSimilarityEngine** — finds past predictions with similar signal profiles and compares outcomes. Returns `SimilarityResult` with matched cases and statistical summary.
+
+---
+
+## 14. Complete DI Registration Summary
+
+All services are registered as `AddSingleton` in `Program.cs`. Key registrations for the new architecture:
+
+```
+// Discovery
+IDiscoveryEventRepository → SupabaseDiscoveryEventRepository
+IDiscoveryEngine → DiscoveryEngine
+NewsDiscoveryProvider, MoverDiscoveryProvider, CongressDiscoveryProvider (as IDiscoveryProvider)
+
+// Evidence
+IEvidenceRepository → SupabaseEvidenceRepository
+IEvidenceAggregator → EvidenceAggregator
+IEvidenceService → EvidenceService
+
+// Research Universe
+IResearchUniverseRepository → SupabaseResearchUniverseRepository
+IResearchUniverseService → ResearchUniverseService
+ResearchUniverseConfig (default thresholds)
+IResearchUniverseEngine → ResearchUniverseEngine
+
+// Opportunity Learning
+OpportunityLearningConfig
+IOpportunityLearningRepository → SupabaseOpportunityLearningRepository
+IOpportunityLearningService → OpportunityLearningService
+
+// Market Intelligence
+IMarketRegimeEngine → MarketRegimeEngine
+IAdaptiveLearningEngine → AdaptiveLearningEngine
+IStrategyDiscoveryEngine → StrategyDiscoveryEngine
+IKnowledgeBase → SupabaseKnowledgeBase
+IHistoricalCaseRepository → SupabaseHistoricalCaseRepository
+
+// Trade Decision
+EVService, RiskRewardService, TradeGradeService, DecisionExplanationService
+ITradeFilter → VolatilityFilter, LiquidityFilter, CorrelationFilter
+TradeDecisionEngine, PortfolioDecisionEngine, HistoricalSimilarityEngine
+```
+
+---
+
+## 15. Migration Notes
+
+### What changed for existing functionality:
+
+1. **Morning Scan candidate source**: `DailyResearchRunService.GetResearchCandidatesAsync()` now pulls from Research Universe instead of watchlist. Falls back to watchlist if Research Universe is empty — zero regression risk during bootstrap.
+
+2. **DynamicPickOrchestrator**: Added `IEvidenceService` and `IOpportunityLearningService` dependencies. After predictions are generated, evidence records are created (wrapped in try/catch — non-blocking). Opportunity scan runs as part of learning update.
+
+3. **OutcomeEvaluator**: Added `IEvidenceService` dependency. After evaluating outcomes, evidence records are created for each evaluation (wrapped in try/catch — non-blocking).
+
+4. **No existing job behavior changed**: All existing jobs (morning scan, EOD, learning update) continue to work identically. The new evidence recording and opportunity scanning are additive and non-blocking.
+
+5. **No existing tables modified**: All new functionality uses new tables only.
+
+6. **Watchlist still works**: The watchlist system is unchanged. It continues to function for display, manual tracking, and as a fallback for morning scan candidates.
 
 Beyond these code-level signals, no further intended phases, integrations, or feature plans could be confirmed from the source.

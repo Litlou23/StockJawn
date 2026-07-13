@@ -13,7 +13,18 @@
 `id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`
 
 ### prediction_candidates
-`id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `created_at`
+`id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `score_debug_json`, `bullish_score`, `bearish_score`, `winning_direction`, `direction_confidence`, `created_at`
+
+**score_debug_json structure** (JSON text, envelope `{"Breakdown": {...}}`):
+- `BullishScore`, `BearishScore`, `WinningDirection`, `DirectionConfidence`
+- `RawConfidence`, `CalibratedConfidence`, `DataQualityFactor`, `CalibrationFactor`
+- `RiskScore`, `DecisionMargin` (normalized: `(W-L)/(W+L)`, 0=conflicted, 1=clear), `ClearDirection` (bool)
+- `OppositionPenalty` (1.0 = no penalty, floor 0.6)
+- `ConfidenceCap` (reason string if capped, e.g. `"Risk 75 ≥ 75 (dir clear, boost 3)"`)
+- Legacy net scores: `TrendScore`, `MomentumScore`, `VolumeScore`, `VolatilitySetupScore`, `MarketContextScore`, `CatalystScore`, `LearningScore`
+- Per-bucket bull/bear splits: `TrendBullish`/`TrendBearish`, `MomentumBullish`/`MomentumBearish`, `VolumeBullish`/`VolumeBearish`, etc.
+- `AlignedBuckets`, `ConflictingBuckets`, `ConfirmationMultiplier`
+- Research Universe integration: `ResearchUniverseInterestScore`, `ResearchUniverseEvidenceCount`, `ResearchUniverseState`, `HasResearchAsset`, `HistoricalVolatility`, `HistoricalAtrPercent`
 
 ### prediction_inputs
 `id`, `prediction_id`, `input_type`, `input_data`, `created_at`
@@ -26,6 +37,9 @@
 
 ### research_scoring_weights
 `id`, `signal_name`, `weight`, `updated_at`, `reason`
+
+**Special weight overrides:**
+- `risk_cap_boost` — auto-managed by Stage 3c self-tuning. Integer 0-15, added to risk-confidence caps when direction is clear. Max movement ±2 pts/day. Loosens caps when calibration error shows underconfidence, tightens when overconfident.
 
 ### learning_insights
 `id`, `run_id`, `insight_type`, `insight_text`, `action_suggested`, `created_at`
@@ -42,8 +56,46 @@
 ### portfolio_positions
 `id`, `portfolio_id` (FK → portfolio_challenges.id), `prediction_id`, `ticker`, `asset_type` (stock/option), `entry_date`, `exit_date`, `entry_price`, `exit_price`, `quantity`, `dollars_invested`, `dollars_returned`, `profit_loss`, `percent_gain`, `reason_entered`, `reason_exited`, `status` (open/closed/cancelled), `created_at`, `updated_at`
 
+### cap_tuning_stats
+`id`, `cap_reason` (UNIQUE — e.g. "Risk 75 ≥ 75 (dir clear, boost 0)"), `sample_size`, `accuracy`, `avg_confidence`, `avg_risk`, `avg_opposition_ratio`, `recommended_cap`, `current_cap`, `cap_delta`, `is_effective`, `analysis_notes`, `computed_at`, `applied_at`
+
+Used by the self-tuning confidence cap system (LearningEngine Stage 3c). Nightly learning job groups resolved predictions by their `ConfidenceCap` reason from `score_debug_json`, measures direct calibration error (`accuracy - predictedProb`), and persists results here. Drives the `risk_cap_boost` weight override.
+
+### research_timeline_events
+`id`, `ticker`, `timestamp`, `event_type` (EvidenceAdded/Discovered/StatePromotion/ThesisUpdated/PredictionGenerated/PredictionOutcome/ScoreChange/Archived/VolumeSpike/CatalystEvent), `description`, `source`, `related_entity_id`, `related_entity_type`, `interest_score_snapshot`, `research_state_snapshot`, `thesis_snapshot`, `created_at`
+
+Immutable "Git history" for each stock's research journey. Append-only — never updated or deleted. Used by Learning Engine to reconstruct thesis evolution.
+
+### historical_research_profiles
+`id`, `ticker`, `research_asset_id`, `built_at`, `historical_volatility`, `atr_percent`, `high_52_week`, `low_52_week`, `price_position_in_52_week_range`, `avg_earnings_move_percent`, `avg_analyst_upgrade_move_percent`, `avg_sec_filing_move_percent`, `avg_daily_volume_30d`, `avg_daily_volume_90d`, `sector`, `industry`, `relative_strength_30d`, `previous_prediction_count`, `previous_prediction_accuracy`, `avg_previous_confidence`, `pattern_summary`, `last_updated`, `refresh_count`, `last_refresh_reason`
+
+Historical profile built when a stock first enters the Research Universe. Refreshable on a configurable schedule (default 90 days) or after significant corporate events (earnings, filings, regulatory events, insider activity). Unique on `ticker`.
+
+### discovery_checkpoints
+`id`, `checkpoint_name` (UNIQUE), `checkpoint_value`, `updated_at`
+
+Persistent key-value store for discovery cycle checkpoints. The continuous discovery engine stores its last-processed timestamp here so it survives app restarts. Simple upsert on `checkpoint_name`.
+
 ### pg_cron jobs
 Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM cron.job`
+
+## Research Universe → Prediction Pipeline Integration
+
+The Morning Scan pipeline now consumes Research Universe data during prediction generation:
+
+**Data flow:** `DailyResearchRunService.GetResearchCandidatesAsync()` returns full `ResearchAsset` objects (not just tickers) → `PredictionGenerator.GeneratePredictionsForWatchlistAsync` receives an asset lookup dictionary → `GeneratePredictionForTickerAsync` receives the `ResearchAsset` → builds `ResearchUniverseContext` (includes `HistoricalResearchProfile` data) → passes to `ScoringEngine.Evaluate` → `EvaluationContext.ResearchUniverse` is available to all evaluators.
+
+**What's consumed during scoring:**
+- `InterestScore`, `EvidenceCount`, `ResearchState` → boost `DataQualityFactor` in `ConfidenceEngine` (configurable via `research_universe_weight` scoring weight, default 1.0)
+- `HistoricalVolatility` → caps confidence on highly volatile stocks (>40% annualized)
+- `HistoricalAtrPercent` → sanity-checks live ATR in `ComputeAtrPriceForecast` (warns if live/historical ratio > 2x or < 0.5x)
+- `PreviousPredictionAccuracy`, `PreviousPredictionCount` → available on `ResearchUniverseContext` for future use
+
+**What's NOT consumed yet (stored for future use):**
+- `CurrentThesis` — reserved for Learning and explanation improvements
+- `ResearchTimeline` — reserved for Learning and explanation improvements
+
+**Backward compatibility:** All new parameters are optional with null defaults. Watchlist-fallback tickers (when Research Universe is empty) pass through with `HasResearchAsset = false` and receive no research universe scoring adjustments.
 
 ## Deployment
 

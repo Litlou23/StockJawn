@@ -235,6 +235,7 @@ export default function PortfolioPage() {
   const [activeTab, setActiveTab] = useState<'portfolio' | 'decisions'>('portfolio');
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [showAllChallenges, setShowAllChallenges] = useState(false);
+  const [selectedChallengeId, setSelectedChallengeId] = useState<string | null>(null);
   const [closeModal, setCloseModal] = useState<PortfolioPosition | null>(null);
   const [closePrice, setClosePrice] = useState('');
   const [closeReason, setCloseReason] = useState('Manual close');
@@ -246,16 +247,16 @@ export default function PortfolioPage() {
     setTimeout(() => setToast(null), 3000);
   }, []);
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (challengeId?: string) => {
     try {
-      const [s, c] = await Promise.all([fetchSummary(), fetchChallenges()]);
+      const [s, c] = await Promise.all([fetchSummary(challengeId ?? selectedChallengeId ?? undefined), fetchChallenges()]);
       setSummary(s);
       setChallenges(c);
       setError(null);
     } catch {
       setError('Failed to load portfolio data');
     }
-  }, []);
+  }, [selectedChallengeId]);
 
   const loadDecisionLog = useCallback(async () => {
     setDecisionLogLoading(true);
@@ -282,6 +283,22 @@ export default function PortfolioPage() {
   }, [activeTab, decisionLog.length, loadDecisionLog]);
 
   // --- Action handlers ---
+
+  const handleSwitchChallenge = async (challengeId: string) => {
+    setSelectedChallengeId(challengeId);
+    setLoading(true);
+    setActiveTab('portfolio');
+    try {
+      const [s, c] = await Promise.all([fetchSummary(challengeId), fetchChallenges()]);
+      setSummary(s);
+      setChallenges(c);
+      setError(null);
+    } catch {
+      setError('Failed to load portfolio data');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleStatusChange = async (status: string) => {
     if (!summary) return;
@@ -508,15 +525,19 @@ export default function PortfolioPage() {
             ) : (
               <div className="flex flex-col gap-2">
                 {challenges.map((c) => (
-                  <div key={c.id} className={`flex items-center justify-between rounded-lg border px-3 py-2.5 ${
-                    c.id === summary.challengeId ? 'border-green-500/30 bg-green-500/5' : 'border-zinc-800 bg-zinc-950'
-                  }`}>
+                  <button
+                    key={c.id}
+                    onClick={() => handleSwitchChallenge(c.id)}
+                    className={`flex w-full items-center justify-between rounded-lg border px-3 py-2.5 text-left transition hover:border-zinc-600 ${
+                      c.id === summary.challengeId ? 'border-green-500/30 bg-green-500/5' : 'border-zinc-800 bg-zinc-950'
+                    }`}
+                  >
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="text-sm font-semibold text-zinc-100">{c.name}</span>
                         <StatusBadge status={c.status} />
                         {c.id === summary.challengeId && (
-                          <span className="rounded bg-green-500/10 px-1.5 py-0.5 text-[9px] font-medium text-green-400">ACTIVE</span>
+                          <span className="rounded bg-green-500/10 px-1.5 py-0.5 text-[9px] font-medium text-green-400">VIEWING</span>
                         )}
                       </div>
                       <div className="mt-1 flex gap-3 text-[10px] text-zinc-500">
@@ -527,7 +548,7 @@ export default function PortfolioPage() {
                       </div>
                     </div>
                     <span className="text-[10px] text-zinc-600">{timeAgo(c.createdAt)}</span>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}

@@ -95,15 +95,6 @@ export const navEntries: NavEntry[] = [
     ],
   },
   {
-    label: 'Options',
-    icon: OptionsIcon,
-    children: [
-      { href: '/options-research', label: 'Options Lookup' },
-      { href: '/options-lab', label: 'Options Simulator' },
-      { href: '/paper-options', label: 'Practice Options' },
-    ],
-  },
-  {
     label: 'Portfolio',
     icon: PortfolioIcon,
     href: '/portfolio',

@@ -8,6 +8,8 @@ import { getPickById } from '@/services/picksService';
 import { getResultByPickId } from '@/services/resultsService';
 import { getOptionsSignalsForTicker } from '@/services/signalsService';
 
+export const dynamic = 'force-dynamic';
+
 export default async function PickDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const pick = await getPickById(id);

@@ -4,6 +4,8 @@ import ResultSnapshot from '@/components/ResultSnapshot';
 import { getPickHistory } from '@/services/picksService';
 import { getResultByPickId } from '@/services/resultsService';
 
+export const dynamic = 'force-dynamic';
+
 export default async function HistoryPage() {
   const picks = await getPickHistory();
   const results = await Promise.all(picks.map((p) => getResultByPickId(p.id)));

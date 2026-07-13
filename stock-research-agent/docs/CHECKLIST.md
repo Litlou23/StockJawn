@@ -14,7 +14,6 @@ These items block the portfolio growth objective. Without them, the system canno
 
 - [ ] **Position sizing engine** — Calculate how much of the portfolio to allocate per trade based on confidence, expected value, and current balance. Without this, every trade is an arbitrary bet. *(Portfolio AI)*
 - [ ] **Portfolio equity curve** — Visualize portfolio value over time. Infrastructure complete (tables, balance engine, orchestrator integration). Remaining: periodic `portfolio_snapshots` table for historical equity curve data, frontend chart. *(Performance Analytics / Portfolio AI)*
-- [ ] **Portfolio equity curve** — Visualize portfolio value over time to measure progress toward the $100→$1,000 goal. *(Performance Analytics)*
 - [ ] **Budget-aware option selection** — Filter options contracts the portfolio can actually afford. A $100 account cannot buy a $500 premium contract. *(Options Intelligence)*
 - [ ] **Expected value calculations** — Every prediction should compute `(probability × potential gain) - ((1 - probability) × potential loss)`. Select trades by EV, not confidence alone. *(Prediction Engine)*
 - [ ] **Concurrent position limits** — Prevent the portfolio from going all-in on correlated trades. *(Portfolio AI)*
@@ -73,4 +72,4 @@ Move items here as they ship, with the date and any relevant notes.
 
 ---
 
-*Cross-references: [PRODUCT_VISION.md](PRODUCT_VISION.md) · [ROADMAP.md](ROADMAP.md) · [PRODUCT_IDEAS.md](PRODUCT_IDEAS.md) · [EXPERIMENTS.md](EXPERIMENTS.md) · [DECISIONS.md](DECISIONS.md) · [GLOSSARY.md](GLOSSARY.md) · [DATA_MODEL.md](DATA_MODEL.md) · [AGENTS.md](../AGENTS.md)*
+*Cross-references: [PRODUCT_VISION.md](PRODUCT_VISION.md) · [ROADMAP.md](ROADMAP.md) · [PRODUCT_IDEAS.md](PRODUCT_IDEAS.md) · [EXPERIMENTS.md](EXPERIMENTS.md) · [ADRs](adr/) · [GLOSSARY.md](GLOSSARY.md) · [DATA_MODEL.md](DATA_MODEL.md) · [ProjectState.md](ProjectState.md)*

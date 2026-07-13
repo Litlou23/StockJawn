@@ -16,7 +16,7 @@
 `id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`
 
 ### prediction_candidates
-`id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `created_at`
+`id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `score_debug_json`, `bullish_score`, `bearish_score`, `winning_direction`, `direction_confidence`, `created_at`
 
 ### prediction_inputs
 `id`, `prediction_id`, `input_type`, `input_data`, `created_at`
@@ -38,6 +38,9 @@
 
 ### paper_option_outcomes
 `id`, `paper_candidate_id`, `evaluation_time`, `current_underlying_price`, `current_bid`, `current_ask`, `current_mid`, `current_iv`, `current_delta`, `current_open_interest`, `current_volume`, `paper_pnl_per_contract`, `paper_pnl_percent`, `underlying_move_percent`, `iv_change`, `outcome_summary`, `created_at`
+
+### cap_tuning_stats
+`id`, `cap_reason` (UNIQUE), `sample_size`, `accuracy`, `avg_confidence`, `avg_risk`, `avg_opposition_ratio`, `recommended_cap`, `current_cap`, `cap_delta`, `is_effective`, `analysis_notes`, `computed_at`, `applied_at`
 
 ### pg_cron jobs
 Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM cron.job`

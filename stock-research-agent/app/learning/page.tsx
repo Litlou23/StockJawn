@@ -136,7 +136,7 @@ async function fetchFromApi<T>(path: string): Promise<T | null> {
   const isLocal = base.startsWith('https://localhost');
   if (isLocal) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try {
-    const res = await fetch(`${base}${path}`, { next: { revalidate: 60 } });
+    const res = await fetch(`${base}${path}`, { cache: 'no-store' });
     if (!res.ok) return null;
     return (await res.json()) as T;
   } catch {
@@ -216,8 +216,8 @@ export default async function LearningPage() {
             <div className="mt-3 space-y-2">
               {allDirectionSignals
                 .sort((a, b) => b.accuracy - a.accuracy)
-                .map((s) => (
-                  <div key={s.signalName} className="flex items-center gap-3">
+                .map((s, idx) => (
+                  <div key={`${s.signalName}-${idx}`} className="flex items-center gap-3">
                     <span className="w-28 text-xs text-zinc-400">{s.signalName.replace(/_/g, ' ')}</span>
                     <div className="flex-1">
                       <div className="h-2 rounded-full bg-zinc-800">
@@ -243,8 +243,8 @@ export default async function LearningPage() {
               The system gradually adjusts signal weights based on performance (max 1% per day).
             </p>
             <div className="mt-3 space-y-1.5">
-              {weights.map((w) => (
-                <div key={w.signalName} className="flex items-center justify-between text-xs">
+              {weights.map((w, idx) => (
+                <div key={`${w.signalName}-wt-${idx}`} className="flex items-center justify-between text-xs">
                   <span className="text-zinc-400">{w.signalName.replace(/_/g, ' ')}</span>
                   <div className="flex items-center gap-3">
                     <span className="text-zinc-600">base {w.baseWeight.toFixed(1)}</span>
@@ -265,8 +265,8 @@ export default async function LearningPage() {
             <h2 className="text-sm font-semibold text-zinc-100">Confidence Calibration</h2>
             <p className="mt-1 text-xs text-zinc-500">{report.confidenceCalibration.summary}</p>
             <div className="mt-3 space-y-1.5">
-              {report.confidenceCalibration.buckets.map((b) => (
-                <div key={b.range} className="flex items-center justify-between text-xs">
+              {report.confidenceCalibration.buckets.map((b, idx) => (
+                <div key={`${b.range}-${idx}`} className="flex items-center justify-between text-xs">
                   <span className="text-zinc-400">Confidence {b.range}</span>
                   <div className="flex items-center gap-3">
                     <span className="text-zinc-600">{b.count} predictions</span>
@@ -451,8 +451,8 @@ export default async function LearningPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/50">
-                      {modelPerf.scoringBuckets.map((b) => (
-                        <tr key={b.name}>
+                      {modelPerf.scoringBuckets.map((b, idx) => (
+                        <tr key={`${b.name}-${idx}`}>
                           <td className="py-1.5 text-zinc-300">{b.name.replace(/_/g, ' ')}</td>
                           <td className="py-1.5 text-right">
                             <AccuracyBadge value={b.overallAccuracy} />
@@ -488,8 +488,8 @@ export default async function LearningPage() {
                   Performance of each ensemble profile. The system blends these weighted by accuracy.
                 </p>
                 <div className="mt-3 grid gap-3 sm:grid-cols-3">
-                  {modelPerf.ensembleModels.map((m) => (
-                    <div key={m.modelName} className="rounded-lg bg-zinc-800/50 p-3">
+                  {modelPerf.ensembleModels.map((m, idx) => (
+                    <div key={`${m.modelName}-${idx}`} className="rounded-lg bg-zinc-800/50 p-3">
                       <div className="text-xs font-medium text-zinc-200">{m.modelName.replace(/_/g, ' ')}</div>
                       <div className="mt-2 text-2xl font-bold text-zinc-100">{m.accuracy.toFixed(1)}%</div>
                       <div className="mt-1 flex items-center justify-between text-[10px] text-zinc-500">
@@ -510,8 +510,8 @@ export default async function LearningPage() {
                 <h2 className="text-sm font-semibold text-zinc-100">Catalyst Intelligence</h2>
                 <p className="mt-1 text-xs text-zinc-500">Accuracy by catalyst event type.</p>
                 <div className="mt-3 space-y-2">
-                  {modelPerf.catalystTypes.map((c) => (
-                    <div key={c.eventType} className="flex items-center gap-3">
+                  {modelPerf.catalystTypes.map((c, idx) => (
+                    <div key={`${c.eventType}-${idx}`} className="flex items-center gap-3">
                       <span className="w-32 truncate text-xs text-zinc-400">{c.eventType.replace(/_/g, ' ')}</span>
                       <div className="flex-1">
                         <div className="h-2 rounded-full bg-zinc-800">

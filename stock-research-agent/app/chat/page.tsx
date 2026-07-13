@@ -4,6 +4,8 @@ import TopPicksPanel from '@/components/TopPicksPanel';
 import ChatWindow from '@/components/chat/ChatWindow';
 import { buildTodayMarketContext } from '@/services/contextBuilder';
 
+export const dynamic = 'force-dynamic';
+
 export default async function ChatPage() {
   const { report, topPicks, marketContext } = await buildTodayMarketContext();
 

@@ -1,6 +1,8 @@
 import AppShell from '@/components/AppShell';
 import { getSignalWeightsFromDb } from '@/services/persistence/picksRepository';
 
+export const dynamic = 'force-dynamic';
+
 export default async function SettingsPage() {
   const signalWeights = await getSignalWeightsFromDb();
 

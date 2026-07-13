@@ -1,7 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Evidence;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.OpportunityLearning;
 using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.Supabase;
@@ -12,70 +14,48 @@ namespace StockResearchAgent.Api.Services.ResearchEngine;
 /// Dynamic pick orchestrator — the daily loop entry point for the
 /// /stock-lab and /paper-options pages.
 ///
-///   Stock signal engine -> paper stock candidate -> option contract scanner
-///   -> paper option candidate -> stock outcome evaluator -> option outcome
-///   evaluator -> learning engine.
-///
-/// Wraps the existing PredictionGenerator / OutcomeEvaluator / LearningEngine
-/// (which keep working unchanged) with a new paper_stock_candidates layer
-/// and automatic linked option-candidate generation. No invented data —
-/// stock prices come from Twelve Data, option prices from MarketData.app,
-/// and if either is unavailable the candidate is saved with
-/// status='unavailable' / data_availability='unavailable'.
+/// Delegates to focused services:
+///   StockCandidateService  — build, evaluate, learn from stock candidates
+///   OptionCandidateService — generate option candidates + audit trail
+///   PortfolioLifecycleService — open/close portfolio positions
 /// </summary>
 public class DynamicPickOrchestrator
 {
-    private const int LearningMinConfidenceForOptions = 15;
-    private const int LearningMaxRiskForOptions = 90;
-    private const int ActionableShadowMinConfidence = 40;
-    private const int ActionableShadowMaxRisk = 75;
-    private const int LiveEligibleMinConfidence = 60;
-    private const int LiveEligibleMaxRisk = 65;
-    private const int MaxOptionCandidatesPerRun = 25;
-    private const int MaxOptionCandidatesPerTickerPerRun = 1;
-    private const string ThresholdPolicyVersion = "learning_options_v1";
-
     private readonly DailyResearchRunService _dailyService;
     private readonly ResearchRepository _researchRepo;
-    private readonly PaperStockCandidateRepository _stockRepo;
+    private readonly StockCandidateService _stockCandidates;
+    private readonly OptionCandidateService _optionCandidates;
+    private readonly PortfolioLifecycleService _portfolioLifecycle;
     private readonly OptionsDataRepository _optionsRepo;
-    private readonly CandidateGenerationAuditRepository _auditRepo;
-    private readonly PaperOptionsService _paperOptions;
-    private readonly MarketDataOptionsProvider _optionsProvider;
-    private readonly MarketDataService _marketData;
+    private readonly PaperStockCandidateRepository _stockRepo;
     private readonly LearningEngine _learning;
-    private readonly TradeSetupEngine _setupEngine;
-    private readonly PortfolioBalanceEngine _portfolio;
-    private readonly PortfolioChallengeRepository _portfolioRepo;
+    private readonly IEvidenceService _evidence;
+    private readonly IOpportunityLearningService _opportunityLearning;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
 
     public DynamicPickOrchestrator(
         DailyResearchRunService dailyService,
         ResearchRepository researchRepo,
+        StockCandidateService stockCandidates,
+        OptionCandidateService optionCandidates,
+        PortfolioLifecycleService portfolioLifecycle,
         PaperStockCandidateRepository stockRepo,
         OptionsDataRepository optionsRepo,
-        CandidateGenerationAuditRepository auditRepo,
-        PaperOptionsService paperOptions,
-        MarketDataOptionsProvider optionsProvider,
-        MarketDataService marketData,
         LearningEngine learning,
-        TradeSetupEngine setupEngine,
-        PortfolioBalanceEngine portfolio,
-        PortfolioChallengeRepository portfolioRepo,
+        IEvidenceService evidence,
+        IOpportunityLearningService opportunityLearning,
         ILogger<DynamicPickOrchestrator> logger)
     {
         _dailyService = dailyService;
         _researchRepo = researchRepo;
+        _stockCandidates = stockCandidates;
+        _optionCandidates = optionCandidates;
+        _portfolioLifecycle = portfolioLifecycle;
         _stockRepo = stockRepo;
         _optionsRepo = optionsRepo;
-        _auditRepo = auditRepo;
-        _paperOptions = paperOptions;
-        _optionsProvider = optionsProvider;
-        _marketData = marketData;
         _learning = learning;
-        _setupEngine = setupEngine;
-        _portfolio = portfolio;
-        _portfolioRepo = portfolioRepo;
+        _evidence = evidence;
+        _opportunityLearning = opportunityLearning;
         _logger = logger;
     }
 
@@ -104,15 +84,44 @@ public class DynamicPickOrchestrator
         // 2. Load the just-saved predictions for this run.
         var runPredictions = await _researchRepo.GetPredictionsByRunAsync(scan.RunId);
 
+        // 2b. Record evidence from predictions into the Evidence Engine.
+        try
+        {
+            var evidenceRecorded = 0;
+            foreach (var pred in runPredictions)
+            {
+                await _evidence.RecordAsync(new EvidenceRecord
+                {
+                    Ticker = pred.Ticker,
+                    EvidenceType = EvidenceType.Research,
+                    Source = "morning-scan",
+                    Weight = pred.PredictionType == PredictionType.bullish ? 1.0
+                           : pred.PredictionType == PredictionType.bearish ? -1.0 : 0.0,
+                    Importance = pred.ConfidenceScore,
+                    Summary = $"Prediction: {pred.PredictionType} conf={pred.ConfidenceScore} risk={pred.RiskScore}. {pred.PredictionReason[..Math.Min(200, pred.PredictionReason.Length)]}",
+                    RelatedEventId = pred.Id,
+                });
+                evidenceRecorded++;
+            }
+            if (evidenceRecorded > 0)
+                _logger.LogInformation("[dynamic] Recorded {Count} evidence items from predictions", evidenceRecorded);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Evidence recording failed (non-blocking)");
+            errors.Add($"evidence-recording: {ex.Message}");
+        }
+
         _logger.LogInformation("[dynamic] Wrapping {Count} predictions as paper stock candidates", runPredictions.Count);
 
-        var directionalRankings = BuildDirectionalRankings(runPredictions);
-        var stockBuilds = new List<StockCandidateBuild>();
+        // 3. Build stock candidates via extracted service
+        var directionalRankings = StockCandidateService.BuildDirectionalRankings(runPredictions);
+        var stockBuilds = new List<StockCandidateService.StockCandidateBuild>();
         var stockSaveFailures = 0;
         foreach (var pred in runPredictions)
         {
             directionalRankings.TryGetValue(pred.Id, out var ranking);
-            var candidate = await BuildStockCandidateFromPredictionAsync(
+            var candidate = await _stockCandidates.BuildStockCandidateFromPredictionAsync(
                 pred,
                 scan.RunId,
                 ranking?.Percentile ?? 0,
@@ -125,19 +134,17 @@ public class DynamicPickOrchestrator
                     "This likely means the database schema is out of sync with the code. Check for missing columns.",
                     pred.Ticker, pred.Id);
             }
-            // Classify as a trade setup (non-blocking — failures don't break the pipeline)
+            // Classify as a trade setup (non-blocking)
             try
             {
-                var setup = await _setupEngine.ClassifySetupAsync(pred, saved?.Id);
-                if (setup is not null)
-                    await _setupEngine.SaveSetupAsync(setup);
+                await _stockCandidates.ClassifyAndSaveSetupAsync(pred, saved?.Id);
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "[dynamic] Setup classification failed for {Ticker}", pred.Ticker);
             }
 
-            stockBuilds.Add(new StockCandidateBuild(pred, candidate, saved, ranking));
+            stockBuilds.Add(new StockCandidateService.StockCandidateBuild(pred, candidate, saved, ranking));
         }
 
         if (stockSaveFailures > 0)
@@ -148,173 +155,26 @@ public class DynamicPickOrchestrator
             errors.Add(msg);
         }
 
-        // 4. Option generation in learning mode with per-run and per-ticker caps.
-        var optionAttempts = stockBuilds
-            .Where(b => b.SavedCandidate is not null && b.SavedCandidate.QualifiesForOptions)
-            .OrderByDescending(b => b.SavedCandidate!.ScorePercentileInRun)
-            .ThenByDescending(b => b.Prediction.ConfidenceScore)
-            .ThenBy(b => b.Prediction.RiskScore)
-            .ThenByDescending(b => b.SavedCandidate!.DataAvailability == "real")
-            .ToList();
-
-        var selectedForOptions = new List<StockCandidateBuild>();
-        var tickerCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        foreach (var build in optionAttempts)
-        {
-            if (selectedForOptions.Count >= MaxOptionCandidatesPerRun) break;
-            var ticker = build.SavedCandidate!.Ticker;
-            tickerCounts.TryGetValue(ticker, out var currentPerTicker);
-            if (currentPerTicker >= MaxOptionCandidatesPerTickerPerRun) continue;
-            selectedForOptions.Add(build);
-            tickerCounts[ticker] = currentPerTicker + 1;
-        }
-
-        var selectedIds = selectedForOptions
-            .Select(b => b.Prediction.Id)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var optionsGenerated = 0;
-        var blockedOptionCandidates = 0;
-        var auditRows = new List<CandidateGenerationAuditEntry>();
-
-        foreach (var build in stockBuilds)
-        {
-            var savedStock = build.SavedCandidate;
-            var optionCreated = false;
-            var paperOptionCandidateId = (string?)null;
-            var optionBlockReason = savedStock?.ExclusionReason;
-            var optionChainAvailable = false;
-            var marketDataAvailable = savedStock is not null && savedStock.EntryPrice is > 0;
-
-            if (savedStock is not null && savedStock.QualifiesForOptions)
-            {
-                if (!selectedIds.Contains(build.Prediction.Id))
-                {
-                    optionBlockReason = "max_candidates_reached";
-                    blockedOptionCandidates++;
-                }
-                else
-                {
-                    try
-                    {
-                        var resp = await _paperOptions.GenerateCandidatesAsync(new GenerateCandidatesRequest
-                        {
-                            PredictionId = savedStock.PredictionId ?? "",
-                            DurationPreference = ChooseDuration(savedStock),
-                            AutoSave = true,
-                            PaperStockCandidateId = savedStock.Id,
-                            CandidateMode = savedStock.CandidateMode,
-                            QualityTier = savedStock.QualityTier,
-                            IsActionable = savedStock.IsActionable,
-                            ThresholdPolicyVersion = savedStock.ThresholdPolicyVersion,
-                            InclusionReason = savedStock.InclusionReason,
-                            ExclusionReason = savedStock.ExclusionReason,
-                            ScorePercentileInRun = savedStock.ScorePercentileInRun,
-                        });
-
-                        optionChainAvailable = resp?.OptionChainAvailable == true;
-                        marketDataAvailable = resp?.MarketDataAvailable == true || marketDataAvailable;
-
-                        if (resp?.SavedCandidate is not null)
-                        {
-                            optionCreated = true;
-                            paperOptionCandidateId = resp.SavedCandidate.Id;
-                            optionsGenerated++;
-                            optionBlockReason = null;
-                        }
-                        else
-                        {
-                            optionBlockReason = resp?.BlockReason ?? "unknown_error";
-                            blockedOptionCandidates++;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "[dynamic] Option generation failed for {Ticker}", savedStock.Ticker);
-                        errors.Add($"option-gen {savedStock.Ticker}: {ex.Message}");
-                        optionBlockReason = "unknown_error";
-                        blockedOptionCandidates++;
-                    }
-                }
-            }
-            else if (savedStock is not null)
-            {
-                optionBlockReason = savedStock.ExclusionReason ?? "confidence_below_learning_threshold";
-            }
-
-            auditRows.Add(new CandidateGenerationAuditEntry
-            {
-                RunId = build.Prediction.RunId,
-                Ticker = build.Prediction.Ticker,
-                PredictionCandidateId = build.Prediction.Id,
-                PaperStockCandidateId = savedStock?.Id,
-                PaperOptionCandidateId = paperOptionCandidateId,
-                PredictionType = build.Prediction.PredictionType.ToString(),
-                ConfidenceScore = build.Prediction.ConfidenceScore,
-                RiskScore = build.Prediction.RiskScore,
-                ScorePercentileInRun = build.Ranking?.Percentile ?? 0,
-                StockCandidateCreated = savedStock is not null,
-                OptionCandidateCreated = optionCreated,
-                CandidateMode = savedStock?.CandidateMode ?? DetermineCandidateMode(build.Prediction),
-                QualityTier = savedStock?.QualityTier ?? DetermineQualityTier(build.Prediction.ConfidenceScore),
-                OptionBlockReason = optionBlockReason,
-                MarketDataAvailable = marketDataAvailable,
-                OptionChainAvailable = optionChainAvailable,
-                ThresholdPolicyVersion = ThresholdPolicyVersion,
-            });
-        }
-
-        foreach (var audit in auditRows)
-            await _auditRepo.SaveAsync(audit);
+        // 4. Option generation via extracted service
+        var optionResult = await _optionCandidates.GenerateOptionCandidatesAsync(stockBuilds, scan.RunId, errors);
 
         var savedStockCandidates = stockBuilds
             .Where(b => b.SavedCandidate is not null)
             .Select(b => b.SavedCandidate!)
             .ToList();
 
-        // 5. Auto-open portfolio positions for actionable candidates.
-        var portfolioPositionsOpened = 0;
-        var activeChallenge = await _portfolioRepo.GetActiveChallengeAsync();
-        if (activeChallenge is not null)
-        {
-            var actionableCandidates = savedStockCandidates
-                .Where(c => c.IsActionable
-                    && c.Status == PaperStockStatus.open
-                    && c.EntryPrice is > 0
-                    && PredictionCategoryHelper.IsDirectional(c.PredictionType))
-                .ToList();
-
-            foreach (var c in actionableCandidates)
-            {
-                try
-                {
-                    var pos = await _portfolio.AutoOpenPositionAsync(
-                        activeChallenge.Id,
-                        c.PredictionId,
-                        c.Ticker,
-                        c.EntryPrice!.Value,
-                        PositionAssetType.stock,
-                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}");
-
-                    if (pos is not null) portfolioPositionsOpened++;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[dynamic] Portfolio position open failed for {Ticker}", c.Ticker);
-                    errors.Add($"portfolio-open {c.Ticker}: {ex.Message}");
-                }
-            }
-
-            if (portfolioPositionsOpened > 0)
-                _logger.LogInformation("[dynamic] Opened {Count} portfolio positions from actionable candidates",
-                    portfolioPositionsOpened);
-        }
+        // 5. Auto-open portfolio positions via extracted service
+        var actionableCandidates = savedStockCandidates
+            .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)
+            .ToList();
+        var portfolioPositionsOpened = await _portfolioLifecycle.OpenPositionsForCandidatesAsync(
+            actionableCandidates, errors);
 
         var optionEligible = savedStockCandidates.Count(c => c.QualifiesForOptions);
         var report = $"Generated {savedStockCandidates.Count} paper stock candidates from {runPredictions.Count} predictions" +
                      (stockSaveFailures > 0 ? $" (WARNING: {stockSaveFailures} FAILED TO SAVE)" : "") +
                      $". {optionEligible} were learning-eligible for options. " +
-                     $"Saved {optionsGenerated} paper option candidates and blocked {blockedOptionCandidates}." +
+                     $"Saved {optionResult.OptionsGenerated} paper option candidates and blocked {optionResult.BlockedCandidates}." +
                      (portfolioPositionsOpened > 0 ? $" Opened {portfolioPositionsOpened} portfolio positions." : "");
 
         return new DynamicMorningResult
@@ -323,7 +183,7 @@ public class DynamicPickOrchestrator
             PredictionsGenerated = scan.PredictionsGenerated,
             StockCandidatesGenerated = savedStockCandidates.Count,
             StockCandidatesQualifiedForOptions = optionEligible,
-            OptionCandidatesGenerated = optionsGenerated,
+            OptionCandidatesGenerated = optionResult.OptionsGenerated,
             Report = report,
             Errors = errors,
             StockCandidates = savedStockCandidates,
@@ -340,13 +200,13 @@ public class DynamicPickOrchestrator
         var errors = new List<string>();
         var stockEvaluated = 0;
 
-        // 1. Evaluate open paper stock candidates
+        // 1. Evaluate open paper stock candidates via extracted service
         var openStock = await _stockRepo.GetOpenCandidatesAsync();
         foreach (var c in openStock)
         {
             try
             {
-                var ok = await EvaluateStockCandidateAsync(c);
+                var ok = await _stockCandidates.EvaluateStockCandidateAsync(c);
                 if (ok) stockEvaluated++;
             }
             catch (Exception ex)
@@ -357,119 +217,19 @@ public class DynamicPickOrchestrator
         }
 
         // 2. Evaluate active trade setups
-        var setupsEvaluated = 0;
-        try
-        {
-            var activeSetups = await _researchRepo.GetActiveTradeSetupsAsync();
-            foreach (var setupRow in activeSetups)
-            {
-                try
-                {
-                    var ticker = setupRow["ticker"]?.ToString();
-                    if (string.IsNullOrEmpty(ticker)) continue;
-
-                    var quote = await _marketData.GetQuoteAsync(ticker);
-                    if (quote is null || quote.Price <= 0) continue;
-
-                    var setupId = setupRow["id"]?.ToString() ?? "";
-                    var createdStr = setupRow["created_at"]?.ToString();
-                    var createdAt = DateTimeOffset.TryParse(createdStr, out var ca) ? ca : DateTimeOffset.UtcNow;
-                    var daysHeld = (int)(DateTimeOffset.UtcNow - createdAt).TotalDays;
-
-                    // Reconstruct a minimal TradeSetup for evaluation
-                    var setup = new TradeSetup
-                    {
-                        Id = setupId,
-                        Ticker = ticker,
-                        Direction = setupRow["direction"]?.ToString() ?? "neutral",
-                        EntryPrice = setupRow["entry_price"] is JsonNode ep ? ep.GetValue<double>() : null,
-                        TargetPrice = setupRow["target_price"] is JsonNode tp ? tp.GetValue<double>() : null,
-                        StopPrice = setupRow["stop_price"] is JsonNode sp ? sp.GetValue<double>() : null,
-                        InvalidationPrice = setupRow["invalidation_price"] is JsonNode ip ? ip.GetValue<double>() : null,
-                        MaxHoldingDays = setupRow["max_holding_days"] is JsonNode mh ? mh.GetValue<int>() : 5,
-                    };
-
-                    // For now, use current price as both high and low since entry
-                    // (we don't track intraday high/low yet)
-                    var outcome = TradeSetupEngine.EvaluateSetup(
-                        setup, quote.Price, quote.Price, quote.Price, daysHeld);
-
-                    if (outcome is not null)
-                    {
-                        var status = outcome.Resolution.ToString();
-                        await _researchRepo.UpdateTradeSetupStatusAsync(setupId, status, outcome);
-                        setupsEvaluated++;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "[dynamic] Setup evaluation failed for one setup");
-                }
-            }
-            if (setupsEvaluated > 0)
-                _logger.LogInformation("[dynamic] Evaluated {Count} trade setups", setupsEvaluated);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "[dynamic] Trade setup evaluation batch failed");
-            errors.Add($"setup-eval: {ex.Message}");
-        }
+        var setupsEvaluated = await _stockCandidates.EvaluateActiveTradeSetupsAsync(errors);
 
         // 3. Evaluate open paper option candidates (existing service)
-        var optionOutcomes = await _paperOptions.EvaluateAllOpenAsync();
+        var optionOutcomes = await _optionCandidates.EvaluateAllOpenOptionsAsync();
 
-        // 4. Also run the original prediction outcome evaluator so the
-        //    existing learning loop keeps producing prediction_outcomes rows.
+        // 4. Run the original prediction outcome evaluator
         var eod = await _dailyService.RunEndOfDayReviewAsync();
         errors.AddRange(eod.Errors);
 
-        // 4. Auto-close portfolio positions whose paper stock candidates have
-        //    reached their evaluation window. Positions are NOT closed until
-        //    the candidate's timeframe has elapsed (e.g. a 1_week prediction
-        //    stays open for at least 120 hours / 5 trading days).
-        var portfolioPositionsClosed = 0;
-        var portfolioPositionsSkipped = 0;
-        foreach (var c in openStock)
-        {
-            if (c.PredictionId is null) continue;
-
-            // ── Timeframe gate: don't close positions before their window ──
-            var ageHours = (DateTimeOffset.UtcNow - c.CreatedAt).TotalHours;
-            var minHours = MinEvalHours.GetValueOrDefault(c.Timeframe, 6);
-            if (ageHours < minHours)
-            {
-                _logger.LogDebug("[dynamic] {Ticker}: portfolio position too young to close ({Age:F1}h < {Min}h for {Tf})",
-                    c.Ticker, ageHours, minHours, c.Timeframe);
-                portfolioPositionsSkipped++;
-                continue;
-            }
-
-            try
-            {
-                var portfolioPositions = await _portfolioRepo.GetOpenPositionsByPredictionIdAsync(c.PredictionId);
-                if (portfolioPositions.Count == 0) continue;
-
-                var quote = await _marketData.GetQuoteAsync(c.Ticker);
-                if (quote is null || quote.Price <= 0) continue;
-
-                foreach (var pos in portfolioPositions)
-                {
-                    var closed = await _portfolio.ClosePositionAsync(new ClosePositionRequest
-                    {
-                        PositionId = pos.Id,
-                        ExitPrice = quote.Price,
-                        ReasonExited = $"EOD auto-close. {c.Ticker} current price ${quote.Price:F2}.",
-                    });
-
-                    if (closed is not null) portfolioPositionsClosed++;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[dynamic] Portfolio position close failed for prediction {PredId}", c.PredictionId);
-                errors.Add($"portfolio-close {c.Ticker}: {ex.Message}");
-            }
-        }
+        // 5. Auto-close portfolio positions via extracted service
+        var (portfolioPositionsClosed, portfolioPositionsSkipped) =
+            await _portfolioLifecycle.ClosePositionsForCandidatesAsync(
+                openStock, StockCandidateService.MinEvalHours, errors);
 
         var report = $"Evaluated {stockEvaluated} paper stock candidates, " +
                      $"{optionOutcomes.Count} paper option candidates, " +
@@ -489,9 +249,7 @@ public class DynamicPickOrchestrator
     }
 
     // -----------------------------------------------------------------------
-    // 3. Learning update — wraps the existing engine, plus exposes counts
-    // for stock_learning_stats / option_learning_stats which already
-    // populate during EOD evaluation.
+    // 3. Learning update
     // -----------------------------------------------------------------------
 
     public async Task<DynamicLearningResult> RunDynamicLearningUpdateAsync()
@@ -499,16 +257,33 @@ public class DynamicPickOrchestrator
         _logger.LogInformation("[dynamic] Starting dynamic learning update...");
         var errors = new List<string>();
 
-        // 1. Existing signal performance + weight adjustment + insights
         var existing = await _dailyService.RunLearningUpdateAsync();
         errors.AddRange(existing.Errors);
 
-        // 2. Count what's been written to the new stat tables
+        // Opportunity Learning scan (non-blocking)
+        int opportunityRecords = 0;
+        try
+        {
+            var oppResult = await _opportunityLearning.ScanForMissedOpportunitiesAsync();
+            opportunityRecords = oppResult.RecordsCreated;
+            if (oppResult.Errors.Count > 0)
+                errors.AddRange(oppResult.Errors.Select(e => $"opportunity: {e}"));
+            _logger.LogInformation(
+                "[dynamic] Opportunity scan: {Scanned} tickers, {Created} records, {Missed} missed",
+                oppResult.TickersScanned, oppResult.RecordsCreated, oppResult.CompletelyMissed);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Opportunity scan failed (non-blocking)");
+            errors.Add($"opportunity-scan: {ex.Message}");
+        }
+
         var stockStats = await _stockRepo.GetAllLearningStatsAsync();
         var optionStats = await _optionsRepo.GetAllOptionLearningStatsAsync();
 
         var report = $"{existing.Report} " +
-                     $"Stock learning rows: {stockStats.Count}. Option learning rows: {optionStats.Count}.";
+                     $"Stock learning rows: {stockStats.Count}. Option learning rows: {optionStats.Count}. " +
+                     $"Opportunity records: {opportunityRecords}.";
 
         return new DynamicLearningResult
         {
@@ -554,21 +329,12 @@ public class DynamicPickOrchestrator
         var latestMorningRunTask = _researchRepo.GetLatestResearchRunAsync(ResearchRunType.morning_scan.ToString());
 
         await Task.WhenAll(
-            stockTodayTask,
-            optionTodayTask,
-            openStockTask,
-            openOptionTask,
-            stockEvaluatedTodayTask,
-            optionEvaluatedTodayTask,
-            stockOutcomesTotalTask,
-            optionOutcomesTotalTask,
-            stockEvaluatedLast7DaysTask,
-            optionEvaluatedLast7DaysTask,
-            totalStockCandidatesTask,
-            totalOptionCandidatesTask,
-            optionStatsTask,
-            stockStatsTask,
-            latestMorningRunTask);
+            stockTodayTask, optionTodayTask, openStockTask, openOptionTask,
+            stockEvaluatedTodayTask, optionEvaluatedTodayTask,
+            stockOutcomesTotalTask, optionOutcomesTotalTask,
+            stockEvaluatedLast7DaysTask, optionEvaluatedLast7DaysTask,
+            totalStockCandidatesTask, totalOptionCandidatesTask,
+            optionStatsTask, stockStatsTask, latestMorningRunTask);
 
         var stockToday = stockTodayTask.Result;
         var optionToday = optionTodayTask.Result;
@@ -584,7 +350,7 @@ public class DynamicPickOrchestrator
             ? await _stockRepo.GetCandidatesByRunAsync(latestMorningRun.Id)
             : [];
         var latestRunAudits = latestMorningRun is not null
-            ? await _auditRepo.GetByRunAsync(latestMorningRun.Id)
+            ? await _optionCandidates.GetAuditsByRunAsync(latestMorningRun.Id)
             : [];
         var latestRunOptionCreated = latestRunAudits.Count(a => a.OptionCandidateCreated);
         var latestRunBlockedOptions = latestRunAudits.Count(a => !a.OptionCandidateCreated && !string.IsNullOrWhiteSpace(a.OptionBlockReason));
@@ -597,7 +363,6 @@ public class DynamicPickOrchestrator
         var blockBreakdown = topBlockReason;
         var latestRunOptionEligible = latestRunStockCandidates.Count(c => c.QualifiesForOptions);
 
-        // Best/worst signals from option_learning_stats (need >= 3 samples)
         var ranked = optionStats
             .Concat(stockStats.Select(s => new OptionLearningStat
             {
@@ -614,18 +379,16 @@ public class DynamicPickOrchestrator
         var best = ranked.FirstOrDefault();
         var worst = ranked.LastOrDefault();
 
-        // Insight of the day — pick the highest-confidence-impact phrase.
         string? insight = null;
         if (best is not null)
             insight = $"{best.StatType}:{best.StatKey} winning {best.WinRate * 100:F0}% over {best.TotalCandidates}";
 
         var recentStockCandidates = await _stockRepo.GetRecentCandidatesAsync(500);
         var recentStockOutcomes = await _stockRepo.GetRecentOutcomesAsync(500);
-        var qualityTierPerformance = BuildQualityTierPerformance(recentStockCandidates, recentStockOutcomes);
-        var confidenceCalibration = BuildConfidenceCalibration(recentStockCandidates, recentStockOutcomes);
+        var qualityTierPerformance = StockCandidateService.BuildQualityTierPerformance(recentStockCandidates, recentStockOutcomes);
+        var confidenceCalibration = StockCandidateService.BuildConfidenceCalibration(recentStockCandidates, recentStockOutcomes);
 
-        // Portfolio challenge summary (if one exists)
-        var portfolioSummary = await _portfolio.GetSummaryAsync();
+        var portfolioSummary = await _portfolioLifecycle.GetSummaryAsync();
 
         var totalCandidates = totalStockCandidatesTask.Result + totalOptionCandidatesTask.Result;
         var totalOutcomes = stockOutcomesTotalTask.Result + optionOutcomesTotalTask.Result;
@@ -635,11 +398,7 @@ public class DynamicPickOrchestrator
 
         _logger.LogInformation(
             "[dynamic-summary] stockToday={StockToday} optionToday={OptionToday} openStock={OpenStock} openOption={OpenOption} evaluatedToday={EvaluatedToday}",
-            stockToday,
-            optionToday,
-            openStockTask.Result,
-            openOptionTask.Result,
-            evaluatedToday);
+            stockToday, optionToday, openStockTask.Result, openOptionTask.Result, evaluatedToday);
 
         return new DynamicDashboardSummary
         {
@@ -689,703 +448,4 @@ public class DynamicPickOrchestrator
 
     private static string FormatUtc(DateTimeOffset value)
         => value.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ");
-
-    // -----------------------------------------------------------------------
-    // Helpers: build a paper stock candidate from a prediction
-    // -----------------------------------------------------------------------
-
-    private async Task<PaperStockCandidate> BuildStockCandidateFromPredictionAsync(
-        PredictionCandidate pred, string runId, double percentileInRun, bool isTopQuartileDirectional)
-    {
-        var warnings = new List<string>(pred.MissingDataWarnings);
-
-        var dataAvailability = pred.MissingDataWarnings.Count == 0
-            ? "real"
-            : (pred.EntryReferencePrice is null or 0 ? "unavailable" : "partial");
-
-        // Try to enrich entry/target/stop with current quote.
-        double? entry = pred.EntryReferencePrice;
-        double? target = null, stop = null;
-
-        if (entry is null or 0)
-        {
-            var quote = await _marketData.GetQuoteAsync(pred.Ticker);
-            entry = quote?.Price;
-            if (quote is null)
-                warnings.Add("Twelve Data quote unavailable at candidate creation time.");
-        }
-
-        if (entry is double e and > 0)
-        {
-            // Simple deterministic target/stop bands based on prediction direction.
-            // Bullish: +2%/+5% targets, -2% stop. Bearish: mirror.
-            switch (pred.PredictionType)
-            {
-                case PredictionType.bullish:
-                    target = Math.Round(e * 1.03, 2);
-                    stop = Math.Round(e * 0.98, 2);
-                    break;
-                case PredictionType.bearish:
-                    target = Math.Round(e * 0.97, 2);
-                    stop = Math.Round(e * 1.02, 2);
-                    break;
-            }
-        }
-
-        // Deterministic component scores. We derive them from the prediction's
-        // own context (we don't call OpenAI for the score itself).
-        var catalystScore = ScoreCatalyst(pred);
-        var trendScore = ScoreTrend(pred);
-        var volumeScore = ScoreVolume(pred);
-        var marketContextScore = 50; // placeholder until we wire a market regime signal
-        var histAcc = await ScoreHistoricalAccuracyAsync(pred);
-        var riskPenalty = pred.RiskScore;            // 0..100
-        var missingPenalty = pred.MissingDataWarnings.Count * 10;
-
-        var total = Math.Round(
-            (catalystScore * 0.25)
-            + (trendScore * 0.20)
-            + (volumeScore * 0.15)
-            + (marketContextScore * 0.10)
-            + (histAcc * 0.15)
-            + (pred.ConfidenceScore * 0.15)
-            - (riskPenalty * 0.10)
-            - missingPenalty,
-            1);
-
-        var timeframe = pred.TimeWindow switch
-        {
-            "1_day" => StockTimeframe.one_day,
-            "2_day" => StockTimeframe.two_day,
-            "1_week" => StockTimeframe.one_week,
-            "1_month" => StockTimeframe.one_month,
-            "3_month" => StockTimeframe.three_month,
-            "6_month" => StockTimeframe.six_month,
-            "1_year" => StockTimeframe.one_year,
-            _ => StockTimeframe.one_day,
-        };
-
-        var candidateMode = DetermineCandidateMode(pred);
-        var qualityTier = DetermineQualityTier(pred.ConfidenceScore);
-        var isActionable = candidateMode != CandidateMode.learning;
-        var qualifies = PredictionCategoryHelper.IsDirectional(pred.PredictionType)
-                     && _optionsProvider.IsConfigured
-                     && entry is double and > 0
-                     && pred.RiskScore <= LearningMaxRiskForOptions
-                     && (pred.ConfidenceScore >= LearningMinConfidenceForOptions || isTopQuartileDirectional);
-
-        var status = (entry is null or 0)
-            ? PaperStockStatus.unavailable
-            : !PredictionCategoryHelper.IsDirectional(pred.PredictionType)
-                ? PaperStockStatus.watch_only
-                : PaperStockStatus.open;
-
-        var exclusionReason = DetermineOptionBlockReason(
-            pred,
-            hasMarketData: entry is > 0,
-            isTopQuartileDirectional: isTopQuartileDirectional,
-            optionsProviderConfigured: _optionsProvider.IsConfigured);
-
-        var reason = $"Prediction conf={pred.ConfidenceScore}, risk={pred.RiskScore}. " +
-                     $"Bull={pred.BullishScore:F1}, Bear={pred.BearishScore:F1}, dir={pred.WinningDirection ?? "n/a"}. " +
-                     $"Deterministic total {total} (catalyst={catalystScore}, trend={trendScore}, " +
-                     $"volume={volumeScore}, market={marketContextScore}, histAcc={histAcc}, " +
-                     $"missingPenalty={missingPenalty}). Mode={candidateMode}, tier={qualityTier}, " +
-                     $"run percentile={percentileInRun:F1}. " +
-                     $"{(qualifies ? "Qualifies" : "Does not qualify")} for learning-mode options.";
-
-        return new PaperStockCandidate
-        {
-            PredictionId = pred.Id,
-            RunId = runId,
-            Ticker = pred.Ticker,
-            PredictionType = pred.PredictionType,
-            Timeframe = timeframe,
-            EntryPrice = entry,
-            ReferencePrice = pred.EntryReferencePrice,
-            TargetPrice = target,
-            StopPrice = stop,
-            CatalystScore = catalystScore,
-            TrendScore = trendScore,
-            VolumeScore = volumeScore,
-            MarketContextScore = marketContextScore,
-            HistoricalAccuracyScore = histAcc,
-            RiskPenalty = riskPenalty,
-            MissingDataPenalty = missingPenalty,
-            TotalScore = total,
-            ConfidenceScore = pred.ConfidenceScore,
-            RiskScore = pred.RiskScore,
-            CatalystType = InferCatalystType(pred),
-            SelectionReason = reason,
-            Warnings = warnings,
-            DataAvailability = dataAvailability,
-            CandidateMode = candidateMode,
-            QualityTier = qualityTier,
-            IsActionable = isActionable,
-            ThresholdPolicyVersion = ThresholdPolicyVersion,
-            InclusionReason = qualifies
-                ? $"learning-mode eligible: conf={pred.ConfidenceScore}, risk={pred.RiskScore}, percentile={percentileInRun:F1}"
-                : $"paper stock candidate retained for evaluation; option path blocked by {exclusionReason ?? "policy"}",
-            ExclusionReason = qualifies ? null : exclusionReason,
-            ScorePercentileInRun = percentileInRun,
-            BullishScore = pred.BullishScore,
-            BearishScore = pred.BearishScore,
-            WinningDirection = pred.WinningDirection,
-            Status = status,
-            QualifiesForOptions = qualifies,
-        };
-    }
-
-    private static double ScoreCatalyst(PredictionCandidate pred)
-    {
-        // Higher importance + news source mentions = stronger catalyst.
-        var hasNews = pred.DataSourcesUsed.Any(s => s == "rss-news");
-        var score = pred.ImportanceScore * (hasNews ? 1.0 : 0.7);
-        return Math.Round(Math.Clamp(score, 0, 100), 1);
-    }
-
-    private static double ScoreTrend(PredictionCandidate pred)
-    {
-        // Predictions sourced from twelve-data carry trend info via the
-        // prediction reason; we proxy with confidence × bullish/bearish.
-        var hasTechnical = pred.DataSourcesUsed.Any(s => s == "twelve-data");
-        var base_ = hasTechnical ? 60 : 40;
-        return Math.Round(Math.Clamp(base_ + (pred.ConfidenceScore - 50) * 0.6, 0, 100), 1);
-    }
-
-    private static double ScoreVolume(PredictionCandidate pred)
-    {
-        // Without a direct volume signal here, we infer from missing-data flags.
-        var penalty = pred.MissingDataWarnings.Any(w => w.ToLower().Contains("volume")) ? 30 : 0;
-        return Math.Round(Math.Clamp(60.0 - penalty, 0.0, 100.0), 1);
-    }
-
-    private async Task<double> ScoreHistoricalAccuracyAsync(PredictionCandidate pred)
-    {
-        // Pull this ticker's historical accuracy from stock_learning_stats.
-        var stats = await _stockRepo.GetAllLearningStatsAsync();
-        var byTicker = stats.FirstOrDefault(s => s.StatType == "ticker" && s.StatKey == pred.Ticker);
-        if (byTicker is null || byTicker.TotalCandidates < 3) return 50; // neutral until we have data
-        return Math.Round(byTicker.Accuracy * 100, 1);
-    }
-
-    private static string? InferCatalystType(PredictionCandidate pred)
-    {
-        var text = (pred.PredictionReason + " " + pred.BullishCase + " " + pred.BearishCase).ToLower();
-        if (text.Contains("earnings")) return "earnings";
-        if (text.Contains("guidance")) return "guidance";
-        if (text.Contains("upgrade") || text.Contains("downgrade")) return "rating_change";
-        if (text.Contains("merger") || text.Contains("acquisition")) return "ma";
-        if (text.Contains("fda") || text.Contains("approval")) return "regulatory";
-        if (pred.DataSourcesUsed.Any(s => s == "rss-news")) return "news";
-        return null;
-    }
-
-    private static Dictionary<string, DirectionalRanking> BuildDirectionalRankings(List<PredictionCandidate> runPredictions)
-    {
-        var directional = runPredictions
-            .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType))
-            .OrderByDescending(p => p.ConfidenceScore)
-            .ThenBy(p => p.RiskScore)
-            .ThenBy(p => p.Ticker)
-            .ToList();
-
-        var topQuartileCount = directional.Count == 0
-            ? 0
-            : Math.Max(1, (int)Math.Ceiling(directional.Count * 0.25));
-
-        var map = new Dictionary<string, DirectionalRanking>(StringComparer.OrdinalIgnoreCase);
-        for (var i = 0; i < directional.Count; i++)
-        {
-            var percentile = directional.Count == 1
-                ? 100
-                : Math.Round(100.0 * (directional.Count - 1 - i) / (directional.Count - 1), 1);
-            map[directional[i].Id] = new DirectionalRanking(percentile, i < topQuartileCount);
-        }
-
-        return map;
-    }
-
-    private static CandidateMode DetermineCandidateMode(PredictionCandidate pred)
-    {
-        if (PredictionCategoryHelper.IsDirectional(pred.PredictionType)
-            && pred.ConfidenceScore >= LiveEligibleMinConfidence
-            && pred.RiskScore <= LiveEligibleMaxRisk)
-            return CandidateMode.live_eligible;
-
-        if (PredictionCategoryHelper.IsDirectional(pred.PredictionType)
-            && pred.ConfidenceScore >= ActionableShadowMinConfidence
-            && pred.RiskScore <= ActionableShadowMaxRisk)
-            return CandidateMode.actionable_shadow;
-
-        return CandidateMode.learning;
-    }
-
-    private static QualityTier DetermineQualityTier(int confidenceScore) => confidenceScore switch
-    {
-        <= 14 => QualityTier.very_weak,
-        <= 24 => QualityTier.weak,
-        <= 39 => QualityTier.medium,
-        <= 59 => QualityTier.strong_paper,
-        _ => QualityTier.production_candidate,
-    };
-
-    private static string? DetermineOptionBlockReason(
-        PredictionCandidate pred,
-        bool hasMarketData,
-        bool isTopQuartileDirectional,
-        bool optionsProviderConfigured)
-    {
-        if (!PredictionCategoryHelper.IsDirectional(pred.PredictionType))
-            return "non_directional_prediction";
-        if (!hasMarketData)
-            return "missing_market_data";
-        if (!optionsProviderConfigured)
-            return "missing_option_chain";
-        if (pred.RiskScore > LearningMaxRiskForOptions)
-            return "risk_too_high";
-        if (pred.ConfidenceScore < LearningMinConfidenceForOptions && !isTopQuartileDirectional)
-            return "confidence_below_learning_threshold";
-        return null;
-    }
-
-    private static List<QualityTierPerformance> BuildQualityTierPerformance(
-        List<PaperStockCandidate> candidates,
-        List<PaperStockOutcome> outcomes)
-    {
-        var outcomeMap = outcomes
-            .GroupBy(o => o.PaperStockCandidateId)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
-
-        return candidates
-            .GroupBy(c => c.QualityTier.ToString())
-            .OrderBy(g => g.Key)
-            .Select(g =>
-            {
-                var withOutcomes = g
-                    .Select(c => outcomeMap.TryGetValue(c.Id, out var o) ? o : null)
-                    .Where(o => o is not null)
-                    .ToList();
-                var returns = withOutcomes
-                    .Select(o => o!.PercentMove)
-                    .Where(v => v.HasValue)
-                    .Select(v => v!.Value)
-                    .OrderBy(v => v)
-                    .ToList();
-                var wins = withOutcomes.Count(o => o!.DirectionCorrect == true);
-
-                return new QualityTierPerformance
-                {
-                    QualityTier = g.Key,
-                    CandidateCount = g.Count(),
-                    WinRate = withOutcomes.Count > 0 ? Math.Round(100.0 * wins / withOutcomes.Count, 1) : null,
-                    AverageReturn = returns.Count > 0 ? Math.Round(returns.Average(), 2) : null,
-                    MedianReturn = returns.Count > 0 ? Math.Round(returns[returns.Count / 2], 2) : null,
-                };
-            })
-            .ToList();
-    }
-
-    private static List<ConfidenceCalibrationBucket> BuildConfidenceCalibration(
-        List<PaperStockCandidate> candidates,
-        List<PaperStockOutcome> outcomes)
-    {
-        var outcomeMap = outcomes
-            .GroupBy(o => o.PaperStockCandidateId)
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
-
-        var buckets = new (string Label, Func<int, bool> Match)[]
-        {
-            ("0-14", c => c <= 14),
-            ("15-24", c => c >= 15 && c <= 24),
-            ("25-39", c => c >= 25 && c <= 39),
-            ("40-59", c => c >= 40 && c <= 59),
-            ("60+", c => c >= 60),
-        };
-
-        return buckets.Select(bucket =>
-        {
-            var inBucket = candidates.Where(c => bucket.Match(c.ConfidenceScore)).ToList();
-            var evaluated = inBucket
-                .Select(c => outcomeMap.TryGetValue(c.Id, out var o) ? o : null)
-                .Where(o => o is not null)
-                .ToList();
-            var wins = evaluated.Count(o => o!.DirectionCorrect == true);
-
-            return new ConfidenceCalibrationBucket
-            {
-                BucketLabel = bucket.Label,
-                CandidateCount = inBucket.Count,
-                SuccessRate = evaluated.Count > 0 ? Math.Round(100.0 * wins / evaluated.Count, 1) : null,
-            };
-        }).ToList();
-    }
-
-    private static DurationPreference ChooseDuration(PaperStockCandidate stock)
-    {
-        // High-confidence + low-risk + short timeframe -> one week.
-        // Otherwise lean two_week.
-        if (stock.ConfidenceScore >= 75 && stock.RiskScore <= 40 && stock.Timeframe != StockTimeframe.one_week)
-            return DurationPreference.one_week;
-        if (stock.RiskScore >= 60)
-            return DurationPreference.two_week;
-        return DurationPreference.system_recommended;
-    }
-
-    private sealed record DirectionalRanking(double Percentile, bool IsTopQuartile);
-
-    private sealed record StockCandidateBuild(
-        PredictionCandidate Prediction,
-        PaperStockCandidate BuiltCandidate,
-        PaperStockCandidate? SavedCandidate,
-        DirectionalRanking? Ranking);
-
-    // -----------------------------------------------------------------------
-    // Helpers: evaluate one paper stock candidate
-    // -----------------------------------------------------------------------
-
-    /// <summary>
-    /// Minimum hours before a paper stock candidate should be evaluated,
-    /// based on its timeframe. Matches the prediction evaluator's logic.
-    /// </summary>
-    private static readonly Dictionary<StockTimeframe, int> MinEvalHours = new()
-    {
-        [StockTimeframe.one_day] = 6,
-        [StockTimeframe.two_day] = 30,
-        [StockTimeframe.one_week] = 120,      // 5 trading days
-        [StockTimeframe.one_month] = 504,      // 21 trading days
-        [StockTimeframe.three_month] = 1512,   // 63 trading days
-        [StockTimeframe.six_month] = 3024,     // 126 trading days
-        [StockTimeframe.one_year] = 6048,      // 252 trading days
-    };
-
-    /// <summary>
-    /// Maximum hours before a candidate expires (not evaluated, just closed).
-    /// </summary>
-    private static readonly Dictionary<StockTimeframe, int> MaxEvalHours = new()
-    {
-        [StockTimeframe.one_day] = 48,
-        [StockTimeframe.two_day] = 96,
-        [StockTimeframe.one_week] = 240,
-        [StockTimeframe.one_month] = 1008,
-        [StockTimeframe.three_month] = 3024,
-        [StockTimeframe.six_month] = 6048,
-        [StockTimeframe.one_year] = 12096,
-    };
-
-    private async Task<bool> EvaluateStockCandidateAsync(PaperStockCandidate c)
-    {
-        if (c.Status == PaperStockStatus.watch_only || c.Status == PaperStockStatus.unavailable)
-            return false;
-
-        if (!PredictionCategoryHelper.IsDirectional(c.PredictionType))
-            return false;
-
-        // ── Timeframe gate: don't evaluate too early ──
-        var ageHours = (DateTimeOffset.UtcNow - c.CreatedAt).TotalHours;
-        var minHours = MinEvalHours.GetValueOrDefault(c.Timeframe, 6);
-        var maxHours = MaxEvalHours.GetValueOrDefault(c.Timeframe, 240);
-
-        if (ageHours < minHours)
-        {
-            _logger.LogDebug("[dynamic] {Ticker}: too early to evaluate ({Age:F1}h < {Min}h for {Tf})",
-                c.Ticker, ageHours, minHours, c.Timeframe);
-            return false;
-        }
-
-        if (ageHours > maxHours)
-        {
-            _logger.LogInformation("[dynamic] {Ticker}: expired ({Age:F0}h > {Max}h for {Tf})",
-                c.Ticker, ageHours, maxHours, c.Timeframe);
-            await _stockRepo.UpdateCandidateStatusAsync(c.Id, PaperStockStatus.expired);
-            return false;
-        }
-
-        if (c.EntryPrice is null or 0)
-        {
-            await _stockRepo.SaveOutcomeAsync(new PaperStockOutcome
-            {
-                PaperStockCandidateId = c.Id,
-                PredictionId = c.PredictionId,
-                Ticker = c.Ticker,
-                EvaluationTime = DateTimeOffset.UtcNow,
-                OutcomeSummary = "No entry price recorded — cannot evaluate.",
-                Lesson = "Entry price was missing at candidate creation time.",
-                Warnings = ["entry_price_missing"],
-            });
-            await _stockRepo.UpdateCandidateStatusAsync(c.Id, PaperStockStatus.unavailable);
-            return true;
-        }
-
-        var quote = await _marketData.GetQuoteAsync(c.Ticker);
-        if (quote is null)
-        {
-            await _stockRepo.SaveOutcomeAsync(new PaperStockOutcome
-            {
-                PaperStockCandidateId = c.Id,
-                PredictionId = c.PredictionId,
-                Ticker = c.Ticker,
-                EvaluationTime = DateTimeOffset.UtcNow,
-                OutcomeSummary = "Twelve Data quote unavailable — outcome not computed.",
-                Warnings = ["market_data_unavailable"],
-            });
-            return false; // do not mark evaluated — try again next run
-        }
-
-        var entry = c.EntryPrice!.Value;
-        var exit = quote.Price;
-        var move = (exit - entry) / entry * 100;
-
-        bool? directionCorrect = c.PredictionType switch
-        {
-            PredictionType.bullish => move > 0,
-            PredictionType.bearish => move < 0,
-            _ => null,
-        };
-
-        bool targetHit = c.TargetPrice is not null && (
-            (c.PredictionType == PredictionType.bullish && quote.High >= c.TargetPrice) ||
-            (c.PredictionType == PredictionType.bearish && quote.Low <= c.TargetPrice));
-
-        bool stopHit = c.StopPrice is not null && (
-            (c.PredictionType == PredictionType.bullish && quote.Low <= c.StopPrice) ||
-            (c.PredictionType == PredictionType.bearish && quote.High >= c.StopPrice));
-
-        var invalidation = (c.PredictionType == PredictionType.bullish && move < -3)
-                        || (c.PredictionType == PredictionType.bearish && move > 3);
-
-        double outcomeScore = 50;
-        if (directionCorrect == true) outcomeScore += Math.Min(Math.Abs(move) * 8, 40);
-        else if (directionCorrect == false) outcomeScore -= Math.Min(Math.Abs(move) * 8, 40);
-        if (targetHit) outcomeScore += 5;
-        if (stopHit) outcomeScore -= 10;
-        outcomeScore = Math.Clamp(outcomeScore, 0, 100);
-
-        var maxFavorable = c.PredictionType == PredictionType.bullish
-            ? ((quote.High - entry) / entry) * 100
-            : ((entry - quote.Low) / entry) * 100;
-        var maxAdverse = c.PredictionType == PredictionType.bullish
-            ? ((entry - quote.Low) / entry) * 100
-            : ((quote.High - entry) / entry) * 100;
-
-        var lesson = BuildStockLesson(c, move, directionCorrect, targetHit, stopHit);
-        var failureReason = directionCorrect == false
-            ? BuildFailureReason(c) : null;
-
-        var outcome = new PaperStockOutcome
-        {
-            PaperStockCandidateId = c.Id,
-            PredictionId = c.PredictionId,
-            Ticker = c.Ticker,
-            EvaluationTime = DateTimeOffset.UtcNow,
-            ExitPrice = exit,
-            HighAfter = quote.High,
-            LowAfter = quote.Low,
-            PercentMove = Math.Round(move, 2),
-            DirectionCorrect = directionCorrect,
-            TargetHit = targetHit,
-            StopHit = stopHit,
-            InvalidationHit = invalidation,
-            OutcomeScore = outcomeScore,
-            OutcomeSummary = $"{c.Ticker} moved {move:F2}%. Direction {(directionCorrect == true ? "correct" : directionCorrect == false ? "wrong" : "n/a")}. " +
-                             $"Target hit: {targetHit}. Stop hit: {stopHit}. " +
-                             $"Max favorable: {maxFavorable:F2}%, max adverse: {maxAdverse:F2}%.",
-            Lesson = lesson,
-            FailureReason = failureReason,
-        };
-
-        await _stockRepo.SaveOutcomeAsync(outcome);
-        await _stockRepo.UpdateCandidateStatusAsync(c.Id, PaperStockStatus.evaluated);
-        await UpdateStockLearningStatsAsync(c, outcome);
-        return true;
-    }
-
-    /// <summary>
-    /// Identifies which signal buckets were the likely culprits for a wrong prediction.
-    /// Uses responsibility-weighted attribution: buckets that contributed more to the
-    /// wrong prediction get more blame.
-    /// </summary>
-    private static string BuildFailureReason(PaperStockCandidate c)
-    {
-        bool predBullish = c.PredictionType == PredictionType.bullish;
-        var buckets = new (string Name, double NetScore)[]
-        {
-            ("Trend", c.TrendScore),
-            ("Volume", c.VolumeScore),
-            ("Market context", c.MarketContextScore),
-            ("Catalyst", c.CatalystScore),
-        };
-
-        // Buckets that agreed with the wrong prediction (culprits)
-        var culprits = buckets
-            .Where(b => Math.Abs(b.NetScore) >= 3
-                && (predBullish ? b.NetScore > 0 : b.NetScore < 0))
-            .OrderByDescending(b => Math.Abs(b.NetScore))
-            .ToList();
-
-        // Buckets that correctly disagreed (they were right)
-        var correctDissenters = buckets
-            .Where(b => Math.Abs(b.NetScore) >= 3
-                && (predBullish ? b.NetScore < 0 : b.NetScore > 0))
-            .OrderByDescending(b => Math.Abs(b.NetScore))
-            .ToList();
-
-        var parts = new List<string>();
-
-        if (culprits.Count > 0)
-        {
-            var topCulprit = culprits[0];
-            parts.Add($"Biggest culprit: {topCulprit.Name} ({topCulprit.NetScore:+0;-0})");
-            if (culprits.Count > 1)
-                parts.Add($"Also contributed: {string.Join(", ", culprits.Skip(1).Select(b => $"{b.Name} ({b.NetScore:+0;-0})"))}");
-        }
-
-        if (correctDissenters.Count > 0)
-            parts.Add($"Correctly disagreed: {string.Join(", ", correctDissenters.Select(b => $"{b.Name} ({b.NetScore:+0;-0})"))}");
-
-        return parts.Count > 0 ? string.Join(". ", parts) + "." : "No clear signal culprit identified.";
-    }
-
-    private async Task UpdateStockLearningStatsAsync(PaperStockCandidate c, PaperStockOutcome o)
-    {
-        var direction = o.DirectionCorrect == true;
-        var move = o.PercentMove ?? 0;
-        var keys = new (string Type, string Key)[]
-        {
-            ("ticker", c.Ticker),
-            ("timeframe", c.Timeframe.ToString()),
-            ("prediction_type", c.PredictionType.ToString()),
-            ("confidence_bucket", ConfBucket(c.ConfidenceScore)),
-            ("catalyst_type", c.CatalystType ?? "none"),
-            ("trend_signal", TrendBucket(c.TrendScore)),
-            ("volume_signal", VolumeBucket(c.VolumeScore)),
-        };
-
-        foreach (var (t, k) in keys)
-        {
-            if (string.IsNullOrWhiteSpace(k)) continue;
-            await _stockRepo.UpsertLearningStatAsync(t, k, direction, move, o.OutcomeScore);
-        }
-
-        // ── Per-ticker per-bucket accuracy with responsibility-weighted attribution ──
-        await UpdateTickerBucketStatsAsync(c, o);
-    }
-
-    private async Task UpdateTickerBucketStatsAsync(PaperStockCandidate c, PaperStockOutcome o)
-    {
-        var direction = o.DirectionCorrect == true;
-        var move = o.PercentMove ?? 0;
-
-        // Net scores per bucket (positive = bullish contribution, negative = bearish)
-        var bucketScores = new (string Name, double NetScore)[]
-        {
-            ("trend", c.TrendScore),
-            ("momentum", 0), // not stored on candidate — skip for now
-            ("volume", c.VolumeScore),
-            ("volatility", 0), // not stored on candidate — skip for now
-            ("market_context", c.MarketContextScore),
-            ("catalyst", c.CatalystScore),
-        };
-
-        // Try to extract full breakdown from prediction's ScoreDebugJson if available
-        ScoringBreakdown? breakdown = null;
-        if (c.PredictionId is not null)
-        {
-            try
-            {
-                var prediction = await _researchRepo.GetPredictionByIdAsync(c.PredictionId);
-                if (prediction?.ScoreDebugJson is not null)
-                {
-                    breakdown = ScoringBreakdownEnvelope.Parse(prediction.ScoreDebugJson);
-                }
-            }
-            catch { /* best effort */ }
-        }
-
-        if (breakdown is not null)
-        {
-            bucketScores =
-            [
-                ("trend", breakdown.TrendScore),
-                ("momentum", breakdown.MomentumScore),
-                ("volume", breakdown.VolumeScore),
-                ("volatility", breakdown.VolatilitySetupScore),
-                ("market_context", breakdown.MarketContextScore),
-                ("catalyst", breakdown.CatalystScore),
-                ("research_signal", breakdown.ResearchSignalScore),
-            ];
-        }
-
-        // Determine which buckets supported the prediction direction
-        bool predBullish = c.PredictionType == PredictionType.bullish;
-
-        // Calculate total positive evidence (buckets that agreed with the prediction)
-        double totalPositiveEvidence = 0;
-        foreach (var (_, net) in bucketScores)
-        {
-            bool bucketAgreed = predBullish ? net > 0 : net < 0;
-            if (bucketAgreed) totalPositiveEvidence += Math.Abs(net);
-        }
-
-        if (totalPositiveEvidence < 1) return; // no buckets meaningfully contributed
-
-        foreach (var (name, net) in bucketScores)
-        {
-            if (Math.Abs(net) < 3) continue; // ignore near-neutral buckets
-
-            bool bucketAgreed = predBullish ? net > 0 : net < 0;
-            string tickerBucketKey = $"{c.Ticker}|{name}";
-
-            if (bucketAgreed)
-            {
-                // Bucket supported the prediction — it shares responsibility for the outcome
-                // Weight by contribution: responsibility = |net| / totalPositiveEvidence
-                await _stockRepo.UpsertLearningStatAsync(
-                    "ticker_bucket", tickerBucketKey, direction, move, o.OutcomeScore);
-            }
-            else
-            {
-                // Bucket disagreed with prediction direction
-                // If prediction was wrong, this bucket was RIGHT — credit it
-                // If prediction was right, this bucket was wrong — penalize it
-                await _stockRepo.UpsertLearningStatAsync(
-                    "ticker_bucket", tickerBucketKey, !direction, move, o.OutcomeScore);
-            }
-        }
-    }
-
-    private static string ConfBucket(int conf) => conf switch
-    {
-        < 50 => "low",
-        < 65 => "mid",
-        < 80 => "high",
-        _ => "very_high",
-    };
-
-    private static string TrendBucket(double s) => s switch
-    {
-        < 40 => "weak",
-        < 70 => "ok",
-        _ => "strong",
-    };
-
-    private static string VolumeBucket(double s) => s switch
-    {
-        < 40 => "low",
-        < 70 => "ok",
-        _ => "high",
-    };
-
-    private static string BuildStockLesson(PaperStockCandidate c, double move, bool? direction, bool target, bool stop)
-    {
-        if (direction == true && target)
-            return $"{c.Ticker} {c.PredictionType} target hit ({move:F1}%). Score this setup type higher.";
-        if (direction == true)
-            return $"{c.Ticker} {c.PredictionType} directionally right ({move:F1}%) but target unmet. Setup remains valid.";
-        if (direction == false && stop)
-            return $"{c.Ticker} {c.PredictionType} stop hit ({move:F1}%). Penalize this setup type.";
-        if (direction == false)
-            return $"{c.Ticker} {c.PredictionType} wrong direction ({move:F1}%). Reconsider this catalyst type.";
-        return $"{c.Ticker} moved {move:F1}% — no direction verdict.";
-    }
 }

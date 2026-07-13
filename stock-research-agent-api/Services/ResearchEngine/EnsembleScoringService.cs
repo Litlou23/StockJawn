@@ -1,4 +1,5 @@
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 using StockResearchAgent.Api.Services.Supabase;
 using ResearchSignal = StockResearchAgent.Api.Models.ResearchSignal;
 
@@ -20,6 +21,7 @@ namespace StockResearchAgent.Api.Services.ResearchEngine;
 public class EnsembleScoringService
 {
     private readonly ResearchRepository _repo;
+    private readonly IScoringEngine _scoringEngine;
     private readonly ILogger<EnsembleScoringService> _logger;
 
     // Each model is a named weight profile applied over the base scoring engine
@@ -45,9 +47,13 @@ public class EnsembleScoringService
         },
     };
 
-    public EnsembleScoringService(ResearchRepository repo, ILogger<EnsembleScoringService> logger)
+    public EnsembleScoringService(
+        ResearchRepository repo,
+        IScoringEngine scoringEngine,
+        ILogger<EnsembleScoringService> logger)
     {
         _repo = repo;
+        _scoringEngine = scoringEngine;
         _logger = logger;
     }
 
@@ -76,7 +82,9 @@ public class EnsembleScoringService
         BenchmarkContext benchmark,
         Dictionary<string, double> baseWeights,
         List<string> lessons,
-        List<ResearchSignal>? researchSignals = null)
+        List<ResearchSignal>? researchSignals = null,
+        MarketIntelligenceContext? intelligence = null,
+        ResearchUniverseContext? researchUniverse = null)
     {
         var modelAccuracies = await GetModelAccuraciesAsync();
         var modelScores = new List<ModelScore>();
@@ -93,8 +101,8 @@ public class EnsembleScoringService
                     adjustedWeights[key] = multiplier;
             }
 
-            var result = ScoringEngine.Score(snapshot, indicators, benchmark,
-                adjustedWeights, lessons, researchSignals);
+            var result = _scoringEngine.Evaluate(
+                snapshot, indicators, benchmark, adjustedWeights, lessons, researchSignals, intelligence, researchUniverse);
 
             var accuracy = modelAccuracies.GetValueOrDefault(modelName, 0.5);
             // Weight = accuracy squared to amplify good models
@@ -157,8 +165,6 @@ public class EnsembleScoringService
 
     private static ScoringEngine.ScoringResult BlendResults(List<ModelScore> scores)
     {
-        const double minEdgeMargin = 15;
-
         var totalWeight = scores.Sum(s => s.ModelWeight);
         if (totalWeight == 0) totalWeight = 1;
 
@@ -167,26 +173,43 @@ public class EnsembleScoringService
         var blendedConf = scores.Sum(s => s.Result.Confidence * s.ModelWeight) / totalWeight;
         var blendedRisk = scores.Sum(s => s.Result.Risk * s.ModelWeight) / totalWeight;
 
-        var margin = blendedBull - blendedBear;
-        var direction = margin >= minEdgeMargin ? "bullish"
-            : -margin >= minEdgeMargin ? "bearish"
-            : "neutral";
-
-        // Use the primary (highest-weight) model's breakdown for detailed fields
+        // Use the primary (highest-weight) model's result as base — including its
+        // direction and prediction type from ScoringEngine (no independent formula).
         var primary = scores.OrderByDescending(s => s.ModelWeight).First().Result;
+
+        // Override direction only if models unanimously disagree with primary
+        var direction = primary.WinningDirection;
+        var predType = primary.PredictionType;
+        var nonPrimaryVotes = scores
+            .Where(s => s.ModelName != scores.OrderByDescending(x => x.ModelWeight).First().ModelName)
+            .Select(s => s.Result.WinningDirection)
+            .ToList();
+        if (nonPrimaryVotes.Count > 0 && nonPrimaryVotes.All(d => d != primary.WinningDirection && d != "neutral"))
+        {
+            // All non-primary models disagree — use blended scores for direction
+            // but still delegate to ScoringEngine's margin constant (10)
+            var margin = blendedBull - blendedBear;
+            direction = margin >= 10 ? "bullish"
+                : -margin >= 10 ? "bearish"
+                : "neutral";
+            if (direction == "neutral") predType = "neutral_no_edge";
+        }
 
         return new ScoringEngine.ScoringResult
         {
             BullishScore = Math.Round(blendedBull, 2),
             BearishScore = Math.Round(blendedBear, 2),
-            DirectionalScore = Math.Round(margin, 2),
+            DirectionalScore = Math.Round(blendedBull - blendedBear, 2),
             WinningDirection = direction,
-            DirectionMargin = Math.Round(Math.Abs(margin), 2),
+            DirectionMargin = Math.Round(Math.Abs(blendedBull - blendedBear), 2),
             Confidence = (int)Math.Round(Math.Clamp(blendedConf, 0, 95)),
             Risk = (int)Math.Round(Math.Clamp(blendedRisk, 0, 100)),
-            PredictionType = primary.PredictionType,
+            PredictionType = predType,
             Breakdown = primary.Breakdown,
             Signals = primary.Signals,
+            Evidence = primary.Evidence,
+            Thesis = primary.Thesis,
+            Reasoning = primary.Reasoning,
         };
     }
 

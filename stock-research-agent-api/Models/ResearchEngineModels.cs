@@ -203,6 +203,9 @@ public record ScoringBreakdown
     public int ConflictingBuckets { get; init; }
     public double RiskAdjustment { get; init; }
     public double CalibrationFactor { get; init; }
+    public double OppositionPenalty { get; init; }
+    public double DecisionMargin { get; init; }
+    public bool ClearDirection { get; init; }
     // Legacy net scores (bullish - bearish) for backward compat
     public double TrendScore { get; init; }
     public double MomentumScore { get; init; }
@@ -242,6 +245,20 @@ public record ScoringBreakdown
     public List<string> IndicatorsSkipped { get; init; } = [];
     public string? ConfidenceCap { get; init; }
     public List<string> ActionabilityReasons { get; init; } = [];
+
+    // ── Research Universe integration fields ──────────────────────
+    /// <summary>Interest score from Research Universe (0-100). 0 when no ResearchAsset.</summary>
+    public int ResearchUniverseInterestScore { get; init; }
+    /// <summary>Evidence count from Research Universe. 0 when no ResearchAsset.</summary>
+    public int ResearchUniverseEvidenceCount { get; init; }
+    /// <summary>Research lifecycle state. "Discovered" when no ResearchAsset.</summary>
+    public string ResearchUniverseState { get; init; } = "Discovered";
+    /// <summary>Whether a real ResearchAsset was available for this prediction.</summary>
+    public bool HasResearchAsset { get; init; }
+    /// <summary>Historical volatility from profile (annualized %). Null if no profile.</summary>
+    public double? HistoricalVolatility { get; init; }
+    /// <summary>Historical ATR% from profile. Null if no profile.</summary>
+    public double? HistoricalAtrPercent { get; init; }
 }
 
 // ---------------------------------------------------------------------------
@@ -544,6 +561,9 @@ public record LearningUpdateResult
     public int InsightsGenerated { get; init; }
     public int WeightsAdjusted { get; init; }
     public int ObservationsCreated { get; init; }
+    public int KnowledgeCasesIndexed { get; init; }
+    public int KnowledgePatternsDetected { get; init; }
+    public int KnowledgeRulesGenerated { get; init; }
     public string Report { get; init; } = "";
     public string? AiSummary { get; init; }
     public List<string> Errors { get; init; } = [];

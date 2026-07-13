@@ -5,7 +5,7 @@
 > There are no Entity Framework migrations — schema changes are manual via Supabase dashboard.
 >
 > This document should be updated whenever tables are added, removed, or structurally changed.
-> See [DECISIONS.md](DECISIONS.md) ADR-002 for why Supabase was chosen.
+> See [ADR-002](adr/002-supabase-database.md) for why Supabase was chosen.
 
 ---
 
@@ -187,12 +187,11 @@ portfolio_challenges → portfolio_positions (open → closed)
 
 ## Planned Tables
 
-These tables are designed but not yet created. See [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md).
-
 | Table | Purpose | Status |
 |---|---|---|
-| `research_signals` | Normalized signals from all providers (JSONB metadata) | Designed, not created |
 | `congress_trades` | Parsed congressional trade filings | Designed, not created |
+
+> **Note:** `research_signals` was previously listed here but is now documented above with full schema. The backend code (`ResearchSignalRepository`) is ready; the Supabase migration to create the table has not yet been run. See [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md).
 
 ---
 
@@ -211,8 +210,8 @@ These tables are designed but not yet created. See [research-signal-architecture
 
 ## Access Pattern
 
-All database access goes through the Supabase REST API. The backend uses repository classes that wrap HTTP calls to the Supabase PostgREST endpoint. There is no ORM, no connection pooling, and no raw SQL in application code. See [DECISIONS.md](DECISIONS.md) ADR-002.
+All database access goes through the Supabase REST API. The backend uses repository classes that wrap HTTP calls to the Supabase PostgREST endpoint. There is no ORM, no connection pooling, and no raw SQL in application code. See [ADR-002](adr/002-supabase-database.md) and [ADR-012](adr/012-postgrest-persistence-layer.md).
 
 ---
 
-*Cross-references: [PRODUCT_VISION.md](PRODUCT_VISION.md) · [ROADMAP.md](ROADMAP.md) · [CHECKLIST.md](CHECKLIST.md) · [PRODUCT_IDEAS.md](PRODUCT_IDEAS.md) · [DECISIONS.md](DECISIONS.md) · [GLOSSARY.md](GLOSSARY.md) · [AGENTS.md](../AGENTS.md)*
+*Cross-references: [PRODUCT_VISION.md](PRODUCT_VISION.md) · [ROADMAP.md](ROADMAP.md) · [CHECKLIST.md](CHECKLIST.md) · [PRODUCT_IDEAS.md](PRODUCT_IDEAS.md) · [ADRs](adr/) · [GLOSSARY.md](GLOSSARY.md) · [ProjectState.md](ProjectState.md)*
