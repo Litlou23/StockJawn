@@ -281,6 +281,7 @@ export default function PredictionsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [showOpposingCase, setShowOpposingCase] = useState<string | null>(null);
   const [tab, setTab] = useState<FilterTab>('all');
   const [category, setCategory] = useState<CategoryTab>('stock_picks');
 
@@ -841,16 +842,33 @@ export default function PredictionsPage() {
                         )}
                       </div>
 
-                      {p.bullishCase && (
-                        <div className="mb-3 rounded-lg border border-green-500/10 bg-green-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-green-400">Why It Might Go Up</div>
-                          <p className="leading-relaxed text-zinc-300">{p.bullishCase}</p>
-                        </div>
-                      )}
-                      {p.bearishCase && (
-                        <div className="mb-3 rounded-lg border border-red-500/10 bg-red-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-red-400">Why It Might Go Down</div>
-                          <p className="leading-relaxed text-zinc-300">{p.bearishCase}</p>
+                      {(p.bullishCase || p.bearishCase) && (
+                        <div className="mb-3">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setShowOpposingCase(showOpposingCase === `scan-${p.id}` ? null : `scan-${p.id}`); }}
+                            className="flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                          >
+                            <svg className={`h-3 w-3 transition-transform ${showOpposingCase === `scan-${p.id}` ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                            Show Bull/Bear Analysis
+                          </button>
+                          {showOpposingCase === `scan-${p.id}` && (
+                            <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              {p.bullishCase && (
+                                <div className="rounded-lg border border-green-500/10 bg-green-500/5 p-2.5">
+                                  <div className="mb-1 text-[10px] font-medium text-green-400">Bull Case</div>
+                                  <p className="leading-relaxed text-zinc-400">{p.bullishCase}</p>
+                                </div>
+                              )}
+                              {p.bearishCase && (
+                                <div className="rounded-lg border border-red-500/10 bg-red-500/5 p-2.5">
+                                  <div className="mb-1 text-[10px] font-medium text-red-400">Bear Case</div>
+                                  <p className="leading-relaxed text-zinc-400">{p.bearishCase}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -883,61 +901,32 @@ export default function PredictionsPage() {
 
             return (
               <div key={p.id} className="rounded-xl border border-zinc-800 bg-zinc-900 transition-colors hover:border-zinc-700">
+                {/* Collapsed header — clean single row */}
                 <button
                   onClick={() => setExpandedId(isExpanded ? null : p.id)}
-                  className="flex w-full items-start gap-3 px-4 py-3 text-left"
+                  className="flex w-full items-center gap-3 px-4 py-3 text-left"
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-bold text-zinc-100">{p.ticker}</span>
-                      {predictionBadge(p.predictionType)}
-                      {verdictBadge(wasCorrect)}
-                      {confidenceBar(p.confidenceScore)}
-                      <span className="text-[10px] text-zinc-600">{p.timeWindow.replace(/_/g, ' ')}</span>
-                    </div>
+                  {/* Left: ticker + type */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold text-zinc-100">{p.ticker}</span>
+                    {predictionBadge(p.predictionType)}
+                  </div>
 
-                    <p className="mt-1.5 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
-
-                    {(researchSignals[p.ticker]?.length ?? 0) > 0 && (
-                      <div className="mt-1.5">
-                        <ResearchSignalBadges signals={researchSignals[p.ticker]} />
-                      </div>
-                    )}
-
-                    {o && (
-                      <div className="mt-2 flex flex-wrap gap-4 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-[11px]">
-                        <div>
-                          <span className="text-zinc-600">Entry </span>
-                          <span className="font-medium text-zinc-300">{formatPrice(o.startPrice)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-600">Close </span>
-                          <span className="font-medium text-zinc-300">{formatPrice(o.closePrice)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-600">High </span>
-                          <span className="font-medium text-zinc-300">{formatPrice(o.highAfterPrediction)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-600">Low </span>
-                          <span className="font-medium text-zinc-300">{formatPrice(o.lowAfterPrediction)}</span>
-                        </div>
-                        <div>
-                          <span className="text-zinc-600">Move </span>
-                          <span className={`font-bold ${pctColor(o.percentMove)}`}>{formatPct(o.percentMove)}</span>
-                        </div>
-                        {o.outcomeScore != null && (
-                          <div>
-                            <span className="text-zinc-600">Score </span>
-                            <span className="font-medium text-zinc-300">{o.outcomeScore.toFixed(0)}</span>
-                          </div>
-                        )}
-                      </div>
+                  {/* Center: result or status */}
+                  <div className="flex flex-1 items-center gap-2">
+                    {o ? (
+                      <>
+                        <span className={`text-sm font-semibold ${pctColor(o.percentMove)}`}>{formatPct(o.percentMove)}</span>
+                        {verdictBadge(wasCorrect)}
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-blue-400">Open</span>
                     )}
                   </div>
 
-                  <div className="flex shrink-0 flex-col items-end gap-1">
-                    <span className="text-[10px] text-zinc-600">{formatDate(p.createdAt)}</span>
+                  {/* Right: confidence + time + chevron */}
+                  <div className="flex shrink-0 items-center gap-3">
+                    {confidenceBar(p.confidenceScore)}
                     <span className="text-[10px] text-zinc-600">{relativeTime(p.createdAt)}</span>
                     <svg
                       className={`h-3.5 w-3.5 text-zinc-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
@@ -948,42 +937,75 @@ export default function PredictionsPage() {
                   </div>
                 </button>
 
+                {/* Expanded detail — organized sections */}
                 {isExpanded && (
-                  <div className="border-t border-zinc-800 px-4 py-4 text-xs">
-                    <div className="mb-4">
-                      <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Prediction Details</h3>
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <div className="rounded-lg border border-green-500/10 bg-green-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-green-400">Why It Might Go Up</div>
-                          <p className="leading-relaxed text-zinc-300">{p.bullishCase || '—'}</p>
-                        </div>
-                        <div className="rounded-lg border border-red-500/10 bg-red-500/5 p-3">
-                          <div className="mb-1 text-[10px] font-semibold text-red-400">Why It Might Go Down</div>
-                          <p className="leading-relaxed text-zinc-300">{p.bearishCase || '—'}</p>
-                        </div>
+                  <div className="border-t border-zinc-800 px-4 py-3 space-y-3 text-xs">
+
+                    {/* The Call */}
+                    <div>
+                      <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">The Call</div>
+                      <p className="leading-relaxed text-zinc-300">{p.predictionReason}</p>
+                      <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+                        <span className="text-zinc-500">Window: <span className="text-zinc-300">{p.timeWindow.replace(/_/g, ' ')}</span></span>
+                        {p.entryReferencePrice != null && (
+                          <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
+                        )}
+                        <span className="text-zinc-500">Signal: <span className="text-zinc-300">{p.confidenceScore}</span></span>
+                        <span className="text-zinc-500">Risk: <span className="text-zinc-300">{p.riskScore}</span></span>
                       </div>
                     </div>
 
-                    <div className="mb-4 flex flex-wrap gap-4 text-[11px]">
-                      <div>
-                        <span className="text-zinc-600">Signal Strength: </span>
-                        <span className="font-medium text-zinc-300">{p.confidenceScore}/100</span>
+                    {/* Research signals */}
+                    {(researchSignals[p.ticker]?.length ?? 0) > 0 && (
+                      <div className="rounded-lg border border-zinc-700/50 bg-zinc-950 p-3">
+                        <ResearchSignalPanel signals={researchSignals[p.ticker]} />
                       </div>
-                      <div>
-                        <span className="text-zinc-600">Risk: </span>
-                        <span className="font-medium text-zinc-300">{p.riskScore}/100</span>
-                      </div>
-                      <div>
-                        <span className="text-zinc-600">Significance: </span>
-                        <span className="font-medium text-zinc-300">{p.importanceScore}/100</span>
-                      </div>
-                      {p.entryReferencePrice != null && (
+                    )}
+
+                    {/* Primary case (the side the system chose) + opposing case toggle */}
+                    {(() => {
+                      const isBullish = p.predictionType === 'bullish';
+                      const primaryLabel = isBullish ? 'Why It Goes Up' : 'Why It Goes Down';
+                      const primaryText = isBullish ? p.bullishCase : p.bearishCase;
+                      const primaryColor = isBullish ? 'border-green-500/20 bg-green-500/5' : 'border-red-500/20 bg-red-500/5';
+                      const primaryTextColor = isBullish ? 'text-green-400' : 'text-red-400';
+                      const opposingLabel = isBullish ? 'Bear Case' : 'Bull Case';
+                      const opposingText = isBullish ? p.bearishCase : p.bullishCase;
+                      const opposingColor = isBullish ? 'text-red-400' : 'text-green-400';
+                      const showOpp = showOpposingCase === p.id;
+
+                      return (
                         <div>
-                          <span className="text-zinc-600">Starting Price: </span>
-                          <span className="font-medium text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span>
+                          {/* Primary case — always shown */}
+                          <div className={`rounded-lg border ${primaryColor} p-2.5`}>
+                            <div className="mb-1 flex items-center gap-2">
+                              <span className={`text-[10px] font-semibold uppercase tracking-wide ${primaryTextColor}`}>{primaryLabel}</span>
+                              <span className={`rounded px-1.5 py-0.5 text-[9px] font-bold ${primaryTextColor} bg-zinc-900/50`}>PRIMARY</span>
+                            </div>
+                            <p className="leading-relaxed text-zinc-300">{primaryText || '—'}</p>
+                          </div>
+
+                          {/* Opposing case — collapsed by default */}
+                          {opposingText && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); setShowOpposingCase(showOpp ? null : p.id); }}
+                              className="mt-1.5 flex items-center gap-1 text-[10px] text-zinc-500 hover:text-zinc-300 transition-colors"
+                            >
+                              <svg className={`h-3 w-3 transition-transform ${showOpp ? 'rotate-90' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                              </svg>
+                              {opposingLabel}
+                            </button>
+                          )}
+                          {showOpp && opposingText && (
+                            <div className="mt-1 rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
+                              <div className={`mb-1 text-[10px] font-medium ${opposingColor}`}>{opposingLabel}</div>
+                              <p className="leading-relaxed text-zinc-400">{opposingText}</p>
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </div>
+                      );
+                    })()}
 
                     {/* Price prediction visual bar */}
                     {p.entryReferencePrice != null && p.projectedPriceLow != null && p.projectedPriceHigh != null && p.predictedPrice != null && (() => {
@@ -1000,8 +1022,9 @@ export default function PredictionsPage() {
                       const zoneWidthPct = ((high - low) / range) * 100;
 
                       return (
-                        <div className="mb-4 mt-1">
-                          <div className="relative h-9 overflow-hidden rounded-lg bg-zinc-900">
+                        <div>
+                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">Price Target</div>
+                          <div className="relative h-9 overflow-hidden rounded-lg bg-zinc-950">
                             <div className="absolute h-full rounded bg-violet-500/15" style={{ left: `${zoneLowPct}%`, width: `${zoneWidthPct}%` }} />
                             <div className="absolute top-1/2 h-6 w-0.5 -translate-y-1/2 rounded bg-zinc-400" style={{ left: `${entryPct}%` }} title={`Entry $${entry.toFixed(2)}`} />
                             <div className="absolute top-1/2 h-6 w-1 -translate-y-1/2 rounded bg-violet-400" style={{ left: `${predPct}%` }} title={`Predicted $${predicted.toFixed(2)}`} />
@@ -1010,156 +1033,102 @@ export default function PredictionsPage() {
                             <div className="absolute bottom-0.5 text-[9px] text-zinc-600" style={{ left: `${zoneLowPct}%` }}>${low.toFixed(0)}</div>
                             <div className="absolute bottom-0.5 text-[9px] text-zinc-600" style={{ left: `${zoneLowPct + zoneWidthPct}%`, transform: 'translateX(-100%)' }}>${high.toFixed(0)}</div>
                           </div>
-                          <div className="mt-1 flex items-center justify-between text-[10px]">
-                            <span className="text-zinc-600">Start</span>
-                            <span className="font-medium text-violet-400">
-                              Predicted {p.predictedMovePercent != null
-                                ? `${p.predictedMovePercent > 0 ? '+' : ''}${p.predictedMovePercent.toFixed(1)}%`
-                                : ''}
-                            </span>
-                            <span className="text-zinc-600">Range</span>
-                          </div>
-                          <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+                          <div className="mt-1 flex flex-wrap gap-3 text-[11px]">
+                            {p.predictedMovePercent != null && (
+                              <span className="font-medium text-violet-400">
+                                Predicted {p.predictedMovePercent > 0 ? '+' : ''}{p.predictedMovePercent.toFixed(1)}%
+                              </span>
+                            )}
                             {p.targetPrice != null && (
                               <span className="text-zinc-500">Goal: <span className="font-medium text-green-400">${p.targetPrice.toFixed(2)}</span></span>
                             )}
                             {p.stopPrice != null && (
-                              <span className="text-zinc-500">Exit At: <span className="font-medium text-red-400">${p.stopPrice.toFixed(2)}</span></span>
+                              <span className="text-zinc-500">Exit: <span className="font-medium text-red-400">${p.stopPrice.toFixed(2)}</span></span>
                             )}
                             {p.riskRewardRatio != null && (
-                              <span className="text-zinc-500">Risk/Reward: <span className={`font-medium ${p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}`}>{p.riskRewardRatio.toFixed(1)}</span></span>
-                            )}
-                            {p.invalidationPrice != null && (
-                              <span className="text-zinc-500">Breakdown: <span className="font-medium text-orange-400">${p.invalidationPrice.toFixed(2)}</span></span>
+                              <span className="text-zinc-500">R/R: <span className={`font-medium ${p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}`}>{p.riskRewardRatio.toFixed(1)}</span></span>
                             )}
                           </div>
                         </div>
                       );
                     })()}
 
-                    {p.dataSourcesUsed.length > 0 && (
-                      <div className="mb-3">
-                        <span className="text-[10px] text-zinc-600">Data sources: </span>
-                        {p.dataSourcesUsed.map((s) => (
-                          <span key={s} className="mr-1 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{s}</span>
-                        ))}
-                      </div>
-                    )}
-
-                    {(researchSignals[p.ticker]?.length ?? 0) > 0 && (
-                      <div className="mb-3 rounded-lg border border-zinc-700/50 bg-zinc-950 p-3">
-                        <ResearchSignalPanel signals={researchSignals[p.ticker]} />
-                      </div>
-                    )}
-
-                    {p.missingDataWarnings.length > 0 && (
-                      <div className="mb-3">
-                        {p.missingDataWarnings.map((w, i) => (
-                          <p key={i} className="text-[10px] text-yellow-500/80">! {w}</p>
-                        ))}
-                      </div>
-                    )}
-
-                    {p.pricePredictionWarnings?.length > 0 && (
-                      <div className="mb-3">
-                        {p.pricePredictionWarnings.map((w, i) => (
-                          <p key={i} className="text-[10px] text-orange-500/80">! {w}</p>
-                        ))}
-                      </div>
-                    )}
-
+                    {/* What Happened (outcome) */}
                     {o && (
-                      <div className="mt-3">
-                        <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Actual Outcome</h3>
-
-                        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-                          <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5 text-center">
-                            <div className="text-[10px] text-zinc-600">Entry</div>
-                            <div className="text-sm font-medium text-zinc-200">{formatPrice(o.startPrice)}</div>
-                          </div>
-                          {o.projectedPriceLow != null && o.projectedPriceHigh != null && (
-                            <div className={`rounded-lg border p-2.5 text-center ${o.wasInProjectedZone ? 'border-violet-500/30 bg-violet-500/10' : 'border-orange-500/20 bg-orange-500/5'}`}>
-                              <div className="text-[10px] text-violet-400">Projected Zone</div>
-                              <div className="text-sm font-bold text-violet-300">${o.projectedPriceLow.toFixed(2)}–${o.projectedPriceHigh.toFixed(2)}</div>
-                              <div className={`text-[9px] ${o.wasInProjectedZone ? 'text-green-400' : 'text-orange-400'}`}>
-                                {o.wasInProjectedZone ? 'IN ZONE' : 'OUTSIDE'}
-                              </div>
-                            </div>
-                          )}
-                          {o.predictedPrice != null && (
-                            <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-2.5 text-center">
-                              <div className="text-[10px] text-violet-400">Predicted</div>
-                              <div className="text-sm font-bold text-violet-300">${o.predictedPrice.toFixed(2)}</div>
-                            </div>
-                          )}
-                          <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5 text-center">
-                            <div className="text-[10px] text-zinc-600">Actual Close</div>
-                            <div className="text-sm font-medium text-zinc-200">{formatPrice(o.closePrice)}</div>
-                          </div>
-                          <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5 text-center">
-                            <div className="text-[10px] text-zinc-600">Move</div>
-                            <div className={`text-sm font-bold ${pctColor(o.percentMove)}`}>{formatPct(o.percentMove)}</div>
-                          </div>
+                      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                        <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-zinc-500">What Happened</div>
+                        <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                          <span className="text-zinc-400">
+                            {formatPrice(o.startPrice)} → {formatPrice(o.closePrice)}
+                          </span>
+                          <span className={`font-semibold ${pctColor(o.percentMove)}`}>{formatPct(o.percentMove)}</span>
+                          {verdictBadge(o.directionCorrect)}
                           {o.priceAccuracyPercent != null && (
-                            <div className={`rounded-lg border p-2.5 text-center ${o.priceAccuracyPercent >= 98 ? 'border-green-500/20 bg-green-500/5' : o.priceAccuracyPercent >= 95 ? 'border-yellow-500/20 bg-yellow-500/5' : 'border-red-500/20 bg-red-500/5'}`}>
-                              <div className="text-[10px] text-zinc-600">Price Accuracy</div>
-                              <div className={`text-sm font-bold ${o.priceAccuracyPercent >= 98 ? 'text-green-400' : o.priceAccuracyPercent >= 95 ? 'text-yellow-400' : 'text-red-400'}`}>{o.priceAccuracyPercent.toFixed(1)}%</div>
-                            </div>
+                            <span className={`text-[10px] ${o.priceAccuracyPercent >= 98 ? 'text-green-400' : o.priceAccuracyPercent >= 95 ? 'text-yellow-400' : 'text-red-400'}`}>
+                              {o.priceAccuracyPercent.toFixed(1)}% price accuracy
+                            </span>
                           )}
-                          <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5 text-center">
-                            <div className="text-[10px] text-zinc-600">Verdict</div>
-                            <div className="mt-0.5">{verdictBadge(o.directionCorrect)}</div>
-                          </div>
                         </div>
 
+                        {/* Key outcome details */}
                         <div className="mt-2 flex flex-wrap gap-3 text-[10px]">
+                          {o.projectedPriceLow != null && o.projectedPriceHigh != null && (
+                            <span className="text-zinc-500">
+                              Zone ${o.projectedPriceLow.toFixed(2)}–${o.projectedPriceHigh.toFixed(2)}: {' '}
+                              <span className={o.wasInProjectedZone ? 'text-green-400' : 'text-orange-400'}>
+                                {o.wasInProjectedZone ? 'In zone' : 'Outside'}
+                              </span>
+                            </span>
+                          )}
                           {o.targetHit != null && (
                             <span className="text-zinc-500">
-                              Goal: <span className={o.targetHit ? 'font-bold text-green-400' : 'text-zinc-400'}>{o.targetHit ? 'Reached!' : 'Not reached'}</span>
+                              Goal: <span className={o.targetHit ? 'font-bold text-green-400' : 'text-zinc-400'}>{o.targetHit ? 'Reached' : 'Missed'}</span>
                             </span>
                           )}
                           {o.stopHit != null && (
                             <span className="text-zinc-500">
-                              Safety Exit: <span className={o.stopHit ? 'font-bold text-red-400' : 'text-zinc-400'}>{o.stopHit ? 'Hit' : 'Held'}</span>
-                            </span>
-                          )}
-                          {o.invalidationHit != null && (
-                            <span className="text-zinc-500">
-                              Broke Down: <span className={o.invalidationHit ? 'text-red-400' : 'text-green-400'}>{o.invalidationHit ? 'Yes' : 'No'}</span>
+                              Stop: <span className={o.stopHit ? 'font-bold text-red-400' : 'text-zinc-400'}>{o.stopHit ? 'Hit' : 'Held'}</span>
                             </span>
                           )}
                           {o.maxFavorablePercent != null && (
-                            <span className="text-zinc-500">
-                              Max favorable: <span className="text-green-400">+{o.maxFavorablePercent.toFixed(2)}%</span>
-                            </span>
+                            <span className="text-green-400/70">Best +{o.maxFavorablePercent.toFixed(2)}%</span>
                           )}
                           {o.maxAdversePercent != null && (
-                            <span className="text-zinc-500">
-                              Max adverse: <span className="text-red-400">-{o.maxAdversePercent.toFixed(2)}%</span>
-                            </span>
+                            <span className="text-red-400/70">Worst -{o.maxAdversePercent.toFixed(2)}%</span>
                           )}
                         </div>
 
                         {o.outcomeSummary && (
-                          <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-3">
-                            <div className="mb-1 text-[10px] font-semibold text-zinc-400">Outcome Summary</div>
-                            <p className="text-[11px] leading-relaxed text-zinc-300">{o.outcomeSummary}</p>
-                          </div>
+                          <p className="mt-2 leading-relaxed text-zinc-300">{o.outcomeSummary}</p>
                         )}
-
                         {o.lesson && (
-                          <div className="mt-2 rounded-lg border border-amber-500/10 bg-amber-500/5 p-3">
-                            <div className="mb-1 text-[10px] font-semibold text-amber-400">Lesson Learned</div>
-                            <p className="text-[11px] leading-relaxed text-zinc-300">{o.lesson}</p>
-                          </div>
+                          <p className="mt-1.5 text-amber-400/80">{o.lesson}</p>
                         )}
                       </div>
                     )}
 
                     {!o && (
-                      <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-4 text-center">
-                        <p className="text-[11px] text-zinc-500">No outcome yet — this prediction hasn&apos;t been evaluated.</p>
-                        <p className="mt-0.5 text-[10px] text-zinc-600">Run EOD Review to evaluate open predictions.</p>
+                      <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-center">
+                        <p className="text-[11px] text-zinc-500">No outcome yet — run EOD Review to evaluate.</p>
+                      </div>
+                    )}
+
+                    {/* Footer: data sources + warnings */}
+                    {(p.dataSourcesUsed.length > 0 || p.missingDataWarnings.length > 0 || p.pricePredictionWarnings?.length > 0) && (
+                      <div className="space-y-1">
+                        {p.dataSourcesUsed.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                            {p.dataSourcesUsed.map((s) => (
+                              <span key={s} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">{s}</span>
+                            ))}
+                          </div>
+                        )}
+                        {p.missingDataWarnings.map((w, i) => (
+                          <p key={`m${i}`} className="text-[10px] text-yellow-500/60">{w}</p>
+                        ))}
+                        {p.pricePredictionWarnings?.map((w, i) => (
+                          <p key={`p${i}`} className="text-[10px] text-orange-500/60">{w}</p>
+                        ))}
                       </div>
                     )}
                   </div>

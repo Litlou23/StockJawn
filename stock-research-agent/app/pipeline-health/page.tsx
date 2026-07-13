@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import AppShell from '@/components/AppShell';
 
 interface PipelineHealth {
   status: 'healthy' | 'degraded' | 'critical';
@@ -46,6 +47,7 @@ export default function PipelineHealthPage() {
   const cfg = health && health.status in STATUS_CONFIG ? STATUS_CONFIG[health.status] : null;
 
   return (
+    <AppShell>
     <div className="mx-auto max-w-4xl space-y-6 p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -190,6 +192,7 @@ export default function PipelineHealthPage() {
         </div>
       ) : null}
     </div>
+    </AppShell>
   );
 }
 

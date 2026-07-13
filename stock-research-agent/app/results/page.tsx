@@ -85,8 +85,7 @@ function relativeTime(dateStr: string) {
 }
 
 export default function ResultsPage() {
-  const [predictions, setPredictions] = useState<Prediction[]>([]);
-  const [outcomes, setOutcomes] = useState<Outcome[]>([]);
+  const [merged, setMerged] = useState<{ prediction: Prediction; outcome?: Outcome }[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -94,13 +93,14 @@ export default function ResultsPage() {
   const [sortBy, setSortBy] = useState<'confidence_desc' | 'confidence_asc' | 'move_desc' | 'move_asc' | 'newest' | 'oldest' | 'ticker'>('confidence_desc');
 
   useEffect(() => {
-    Promise.all([
-      fetch('/api/research/predictions?limit=500').then((r) => r.ok ? r.json() : { predictions: [] }),
-      fetch('/api/research/outcomes').then((r) => r.ok ? r.json() : { outcomes: [] }),
-    ])
-      .then(([predData, outcomeData]) => {
-        setPredictions(predData.predictions ?? []);
-        setOutcomes(outcomeData.outcomes ?? []);
+    fetch('/api/research/predictions-with-outcomes?limit=1000')
+      .then((r) => r.ok ? r.json() : { items: [] })
+      .then((data) => {
+        const items = (data.items ?? []).map((item: { prediction: Prediction; outcome?: Outcome | null }) => ({
+          prediction: item.prediction,
+          outcome: item.outcome ?? undefined,
+        }));
+        setMerged(items);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -122,9 +122,6 @@ export default function ResultsPage() {
     );
   }
 
-  const outcomeMap = new Map(outcomes.map((o) => [o.predictionId, o]));
-
-  const merged = predictions.map((p) => ({ prediction: p, outcome: outcomeMap.get(p.id) }));
   const evaluated = merged.filter((e) => e.outcome);
   const open = merged.filter((e) => !e.outcome && e.prediction.status === 'open');
 
@@ -170,7 +167,7 @@ export default function ResultsPage() {
     tickerStats.set(t, prev);
   }
 
-  const isAiPowered = predictions.some((p) => p.dataSourcesUsed?.includes('openai-analysis'));
+  const isAiPowered = merged.some((e) => e.prediction.dataSourcesUsed?.includes('openai-analysis'));
 
   return (
     <AppShell>
@@ -179,7 +176,7 @@ export default function ResultsPage() {
           <div>
             <h1 className="text-lg font-bold text-zinc-100">Results</h1>
             <p className="text-sm text-zinc-500">
-              {predictions.length} predictions · {totalDirectional} directional evaluated
+              {merged.length} predictions · {totalDirectional} directional evaluated
               {isAiPowered && <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-400">AI-Powered</span>}
             </p>
           </div>
@@ -278,45 +275,36 @@ export default function ResultsPage() {
                   key={p.id}
                   className="rounded-xl border border-zinc-800 bg-zinc-900 transition-colors hover:border-zinc-700"
                 >
-                  {/* Header row — always visible */}
+                  {/* Header — always visible */}
                   <button
                     onClick={() => setExpandedId(isExpanded ? null : p.id)}
-                    className="flex w-full items-start gap-3 px-4 py-3 text-left"
+                    className="flex w-full items-center gap-3 px-4 py-3 text-left"
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-semibold text-zinc-100">{p.ticker}</span>
-                        {typeBadge(p.predictionType)}
-                        {confidenceMeter(p.confidenceScore)}
-                        <span className="text-[10px] text-zinc-500">{p.timeWindow.replace(/_/g, ' ')}</span>
-                        <span className={`text-[10px] ${p.status === 'open' ? 'text-blue-400' : p.status === 'evaluated' ? 'text-green-400' : 'text-zinc-500'}`}>
-                          {p.status}
-                        </span>
-                        {outcome && directionBadge(outcome.directionCorrect ?? null)}
-                      </div>
-                      {/* AI thesis / prediction reason */}
-                      <p className="mt-1.5 text-xs leading-relaxed text-zinc-300">
-                        {p.predictionReason}
-                      </p>
-                      {/* Outcome summary row */}
-                      {outcome && (
-                        <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px]">
-                          <span className="text-zinc-500">
-                            Starting Price: {outcome.startPrice ? `$${outcome.startPrice.toFixed(2)}` : '—'}
-                          </span>
-                          <span className="text-zinc-500">
-                            Closing Price: {outcome.closePrice ? `$${outcome.closePrice.toFixed(2)}` : '—'}
-                          </span>
-                          <span className={`font-medium ${returnColor(outcome.percentMove)}`}>
+                    {/* Left: ticker + badge */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-zinc-100">{p.ticker}</span>
+                      {typeBadge(p.predictionType)}
+                    </div>
+
+                    {/* Center: result or status */}
+                    <div className="flex flex-1 items-center gap-2">
+                      {outcome ? (
+                        <>
+                          <span className={`text-sm font-semibold ${returnColor(outcome.percentMove)}`}>
                             {formatReturn(outcome.percentMove)}
                           </span>
-                          {outcome.outcomeScore !== null && (
-                            <span className="text-zinc-400">Accuracy: {outcome.outcomeScore.toFixed(0)}</span>
-                          )}
-                        </div>
+                          {directionBadge(outcome.directionCorrect ?? null)}
+                        </>
+                      ) : (
+                        <span className={`text-[11px] ${p.status === 'open' ? 'text-blue-400' : 'text-zinc-500'}`}>
+                          {p.status === 'open' ? 'Open' : p.status}
+                        </span>
                       )}
                     </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1">
+
+                    {/* Right: confidence + time + chevron */}
+                    <div className="flex shrink-0 items-center gap-3">
+                      {confidenceMeter(p.confidenceScore)}
                       <span className="text-[10px] text-zinc-600">{relativeTime(p.createdAt)}</span>
                       <svg
                         className={`h-3.5 w-3.5 text-zinc-600 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
@@ -329,66 +317,79 @@ export default function ResultsPage() {
 
                   {/* Expanded detail */}
                   {isExpanded && (
-                    <div className="border-t border-zinc-800 px-4 py-3 text-xs">
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        {/* Bull case */}
-                        <div>
-                          <div className="mb-1 font-medium text-green-400">Why It Might Go Up</div>
+                    <div className="border-t border-zinc-800 px-4 py-3 space-y-3 text-xs">
+
+                      {/* The Call */}
+                      <div>
+                        <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">The Call</div>
+                        <p className="leading-relaxed text-zinc-300">{p.predictionReason}</p>
+                        <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
+                          <span className="text-zinc-500">Window: <span className="text-zinc-300">{p.timeWindow.replace(/_/g, ' ')}</span></span>
+                          {p.entryReferencePrice && (
+                            <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
+                          )}
+                          <span className="text-zinc-500">Signal: <span className="text-zinc-300">{p.confidenceScore}</span></span>
+                          <span className="text-zinc-500">Risk: <span className="text-zinc-300">{p.riskScore}</span></span>
+                        </div>
+                      </div>
+
+                      {/* Bull vs Bear — side by side */}
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
+                          <div className="mb-1 text-[10px] font-medium text-green-400">Bull Case</div>
                           <p className="leading-relaxed text-zinc-400">{p.bullishCase}</p>
                         </div>
-                        {/* Bear case */}
-                        <div>
-                          <div className="mb-1 font-medium text-red-400">Why It Might Go Down</div>
+                        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
+                          <div className="mb-1 text-[10px] font-medium text-red-400">Bear Case</div>
                           <p className="leading-relaxed text-zinc-400">{p.bearishCase}</p>
                         </div>
                       </div>
 
-                      {/* Invalidation + scores */}
-                      <div className="mt-3 flex flex-wrap gap-4 text-[11px]">
-                        <div>
-                          <span className="text-zinc-500">Wrong If: </span>
+                      {/* Invalidation */}
+                      {p.invalidationRule && (
+                        <div className="text-[11px]">
+                          <span className="text-zinc-500">Wrong if: </span>
                           <span className="text-zinc-300">{p.invalidationRule}</span>
                         </div>
-                      </div>
+                      )}
 
-                      <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
-                        <span className="text-zinc-500">Signal Strength: <span className="text-zinc-300">{p.confidenceScore}/100</span></span>
-                        <span className="text-zinc-500">Risk: <span className="text-zinc-300">{p.riskScore}</span></span>
-                        <span className="text-zinc-500">Significance: <span className="text-zinc-300">{p.importanceScore}</span></span>
-                        {p.entryReferencePrice && (
-                          <span className="text-zinc-500">Starting Price: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
-                        )}
-                      </div>
+                      {/* What Happened (outcome) */}
+                      {outcome && (
+                        <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
+                          <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">What Happened</div>
+                          <div className="flex flex-wrap items-center gap-3 text-[11px]">
+                            <span className="text-zinc-400">
+                              ${outcome.startPrice?.toFixed(2) ?? '—'} → ${outcome.closePrice?.toFixed(2) ?? '—'}
+                            </span>
+                            <span className={`font-semibold ${returnColor(outcome.percentMove)}`}>
+                              {formatReturn(outcome.percentMove)}
+                            </span>
+                            {directionBadge(outcome.directionCorrect ?? null)}
+                          </div>
+                          {outcome.outcomeSummary && (
+                            <p className="mt-1.5 leading-relaxed text-zinc-300">{outcome.outcomeSummary}</p>
+                          )}
+                          {outcome.lesson && (
+                            <p className="mt-1.5 text-amber-400/80">{outcome.lesson}</p>
+                          )}
+                        </div>
+                      )}
 
-                      {/* Data sources */}
+                      {/* Data sources — collapsed to a single line */}
                       {p.dataSourcesUsed.length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1">
+                        <div className="flex flex-wrap gap-1">
                           {p.dataSourcesUsed.map((s) => (
-                            <span key={s} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{s}</span>
+                            <span key={s} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">{s}</span>
                           ))}
                         </div>
                       )}
 
-                      {/* Missing warnings */}
+                      {/* Warnings */}
                       {p.missingDataWarnings.length > 0 && (
-                        <div className="mt-2">
+                        <div>
                           {p.missingDataWarnings.map((w, i) => (
-                            <p key={i} className="text-[10px] text-yellow-500/80">{w}</p>
+                            <p key={i} className="text-[10px] text-yellow-500/60">{w}</p>
                           ))}
-                        </div>
-                      )}
-
-                      {/* Outcome detail */}
-                      {outcome?.outcomeSummary && (
-                        <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
-                          <div className="mb-1 text-[10px] font-medium text-zinc-400">What Happened</div>
-                          <p className="text-[11px] leading-relaxed text-zinc-300">{outcome.outcomeSummary}</p>
-                        </div>
-                      )}
-                      {outcome?.lesson && (
-                        <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950 p-2.5">
-                          <div className="mb-1 text-[10px] font-medium text-amber-400">Lesson Learned</div>
-                          <p className="text-[11px] leading-relaxed text-zinc-300">{outcome.lesson}</p>
                         </div>
                       )}
                     </div>

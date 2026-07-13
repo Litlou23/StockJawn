@@ -10,7 +10,7 @@ export async function GET() {
   if (isLocal) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
   try {
-    const res = await fetch(`${base}/api/research/outcomes?limit=200`, { cache: 'no-store' });
+    const res = await fetch(`${base}/api/research/outcomes?limit=1000`, { cache: 'no-store' });
     if (!res.ok) return NextResponse.json({ count: 0, outcomes: [] });
     const data = await res.json();
     return NextResponse.json(data);
