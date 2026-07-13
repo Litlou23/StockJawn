@@ -79,6 +79,34 @@ public class ResearchRepository
         return row is not null ? MapResearchRun(row) : null;
     }
 
+    /// <summary>
+    /// Marks any research runs stuck in 'started' for longer than the given
+    /// threshold as 'failed'. Returns the number of runs cleaned up.
+    /// Prevents ghost runs from accumulating when the process dies mid-execution.
+    /// </summary>
+    public async Task<int> CleanupStuckRunsAsync(TimeSpan staleThreshold)
+    {
+        if (!_db.IsConfigured) return 0;
+        var cutoff = DateTimeOffset.UtcNow.Subtract(staleThreshold);
+        var stuckRuns = await _db.SelectAsync("research_runs",
+            $"status=eq.started&started_at=lt.{cutoff:o}");
+        var cleaned = 0;
+        foreach (var run in stuckRuns)
+        {
+            var id = run["id"]?.ToString();
+            if (id is null) continue;
+            await _db.UpdateAsync("research_runs", $"id=eq.{id}", new
+            {
+                status = "failed",
+                completed_at = DateTimeOffset.UtcNow.ToString("o"),
+                summary = "Auto-cleaned: run was stuck in 'started' and presumed killed by process recycle",
+                errors = new[] { "stuck_run_auto_cleanup" },
+            });
+            cleaned++;
+        }
+        return cleaned;
+    }
+
     // -----------------------------------------------------------------------
     // Market Snapshots
     // -----------------------------------------------------------------------

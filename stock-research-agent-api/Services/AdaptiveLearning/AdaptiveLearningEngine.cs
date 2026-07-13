@@ -217,7 +217,6 @@ public class AdaptiveLearningEngine : IAdaptiveLearningEngine
 
         // Confidence band
         var conf = obs.Prediction.ConfidenceScore;
-        if (conf is not null)
         {
             var band = conf switch
             {
@@ -236,7 +235,6 @@ public class AdaptiveLearningEngine : IAdaptiveLearningEngine
 
         // Risk band
         var risk = obs.Prediction.RiskScore;
-        if (risk is not null)
         {
             var band = risk switch
             {

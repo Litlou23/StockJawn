@@ -417,6 +417,10 @@ public record PredictionOutcome
     public double? OutcomeScore { get; init; }
     public string? OutcomeSummary { get; init; }
     public string? Lesson { get; init; }
+    /// <summary>"win", "loss", or "pending".</summary>
+    public string? Outcome { get; init; }
+    public double? ReturnPercent { get; init; }
+    public int? HoldingPeriodDays { get; init; }
     // Watch-only / abstention evaluation fields
     public bool? AbstentionCorrect { get; init; }
     public double? MissedAlphaPercent { get; init; }

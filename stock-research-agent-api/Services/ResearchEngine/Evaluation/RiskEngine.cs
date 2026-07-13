@@ -1,3 +1,5 @@
+using StockResearchAgent.Api.Models;
+
 namespace StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 
 public class RiskEngine : IRiskEngine

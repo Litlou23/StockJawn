@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.Watchlist;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
+using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.ResearchSignals;
 
 namespace StockResearchAgent.Api.Controllers;
@@ -166,27 +167,53 @@ public class WatchlistJobController : ControllerBase
                 if (universe.Length == 0)
                 {
                     _jobStatus.MarkCompleted("run-weekly-research", "0 tickers discovered");
-                    return;
+                }
+                else
+                {
+                    // Collect research signals (congress, etc.) before scoring
+                    var signalResult = await signalService.CollectAllSignalsAsync();
+                    _logger.LogInformation("[jobs] Research signals: {Persisted} persisted, {Expired} expired, {Errors} errors",
+                        signalResult.Persisted, signalResult.Expired, signalResult.Errors.Count);
+
+                    // Pass discovery context so scoring can use news/earnings data
+                    var discoveryContext = discovery.Universe.Select(t =>
+                        new DynamicWatchlistService.TickerDiscoveryContext(
+                            t.Ticker, t.DiscoveryScore, t.HasUpcomingEarnings, t.EarningsDate,
+                            t.RssMentions, t.FinnhubMentions, t.TopReason)).ToList();
+
+                    var result = await watchlistService.BuildDynamicWatchlistAsync(universe, discoveryContext: discoveryContext);
+
+                    _jobStatus.MarkCompleted("run-weekly-research",
+                        $"{result.ActiveWatchlistCount} active, {result.Added.Count} added, {result.ArchivedItems.Count} archived");
+
+                    _logger.LogInformation("[jobs] Weekly research completed: {Active} active, {Added} added, {Archived} archived",
+                        result.ActiveWatchlistCount, result.Added.Count, result.ArchivedItems.Count);
                 }
 
-                // Collect research signals (congress, etc.) before scoring
-                var signalResult = await signalService.CollectAllSignalsAsync();
-                _logger.LogInformation("[jobs] Research signals: {Persisted} persisted, {Expired} expired, {Errors} errors",
-                    signalResult.Persisted, signalResult.Expired, signalResult.Errors.Count);
+                // ── Chain: trigger morning scan after weekly research ────────
+                // On Mondays the morning scan cron is disabled (Tue-Fri only).
+                // Instead we chain it here so it always runs on a fresh watchlist
+                // and never collides with weekly research.
+                _logger.LogInformation("[jobs] Weekly research done — chaining morning scan");
+                _jobStatus.MarkStarted("morning_scan");
+                try
+                {
+                    var orchestrator = scope.ServiceProvider.GetRequiredService<DynamicPickOrchestrator>();
+                    var scanResult = await orchestrator.RunDynamicMorningPicksAsync();
 
-                // Pass discovery context so scoring can use news/earnings data
-                var discoveryContext = discovery.Universe.Select(t =>
-                    new DynamicWatchlistService.TickerDiscoveryContext(
-                        t.Ticker, t.DiscoveryScore, t.HasUpcomingEarnings, t.EarningsDate,
-                        t.RssMentions, t.FinnhubMentions, t.TopReason)).ToList();
+                    if (scanResult.Errors.Count > 0)
+                        _jobStatus.MarkFailed("morning_scan", string.Join("; ", scanResult.Errors.Take(5)));
+                    else
+                        _jobStatus.MarkCompleted("morning_scan", scanResult.Report);
 
-                var result = await watchlistService.BuildDynamicWatchlistAsync(universe, discoveryContext: discoveryContext);
-
-                _jobStatus.MarkCompleted("run-weekly-research",
-                    $"{result.ActiveWatchlistCount} active, {result.Added.Count} added, {result.ArchivedItems.Count} archived");
-
-                _logger.LogInformation("[jobs] Weekly research completed: {Active} active, {Added} added, {Archived} archived",
-                    result.ActiveWatchlistCount, result.Added.Count, result.ArchivedItems.Count);
+                    _logger.LogInformation("[jobs] Chained morning scan completed: {Predictions} predictions",
+                        scanResult.PredictionsGenerated);
+                }
+                catch (Exception scanEx)
+                {
+                    _logger.LogError(scanEx, "[jobs] Chained morning scan failed");
+                    _jobStatus.MarkFailed("morning_scan", scanEx.Message);
+                }
             }
             catch (Exception ex)
             {

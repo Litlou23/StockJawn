@@ -76,8 +76,18 @@ Historical profile built when a stock first enters the Research Universe. Refres
 
 Persistent key-value store for discovery cycle checkpoints. The continuous discovery engine stores its last-processed timestamp here so it survives app restarts. Simple upsert on `checkpoint_name`.
 
+### theoretical_option_simulations
+`id`, `prediction_id` (FK → prediction_candidates.id), `ticker`, `strategy_type` (long_call_proxy/long_put_proxy/bull_call_spread_proxy/bear_put_spread_proxy/iron_condor_proxy), `starting_stock_price`, `ending_stock_price`, `stock_move_percent`, `assumptions_json`, `estimated_payoff`, `estimated_return_percent`, `max_profit`, `max_loss`, `breakevens_json`, `direction_matched_prediction`, `warnings_json`, `created_at`
+
+Theoretical options payoff simulations — NOT real option quotes. Used by `TheoreticalOptionsSimulator` to estimate what-if scenarios.
+
+### portfolio_decision_log (VIEW)
+Joins `portfolio_positions` ← `paper_stock_candidates` ← `prediction_outcomes` for a unified decision audit trail. Read-only view.
+
 ### pg_cron jobs
 Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM cron.job`
+
+**Monday chaining:** On Mondays, `weekly-research-monday` (13:00 UTC) runs first to refresh the watchlist, then chains directly to the morning scan via `DynamicPickOrchestrator.RunDynamicMorningPicksAsync()` in the same background task. The `research-morning-scan` cron is Tue-Fri only (`0 13 * * 2-5`) to avoid collision. The chaining code is in `WatchlistController.cs` `RunWeeklyResearch` method.
 
 ## Research Universe → Prediction Pipeline Integration
 

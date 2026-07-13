@@ -58,6 +58,18 @@ public class DailyResearchRunService
         _logger.LogInformation("[research-engine] Starting morning scan...");
         var errors = new List<string>();
 
+        // Clean up any runs stuck in 'started' for >20 min (process was likely killed)
+        try
+        {
+            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(20));
+            if (cleaned > 0)
+                _logger.LogWarning("[research-engine] Cleaned up {Count} stuck research run(s)", cleaned);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[research-engine] Stuck-run cleanup failed (non-blocking)");
+        }
+
         ResearchRun? run;
         if (existingRunId is not null)
         {
@@ -226,6 +238,18 @@ public class DailyResearchRunService
     {
         _logger.LogInformation("[research-engine] Starting end-of-day review...");
         var errors = new List<string>();
+
+        // Clean up any runs stuck in 'started' for >20 min (process was likely killed)
+        try
+        {
+            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(20));
+            if (cleaned > 0)
+                _logger.LogWarning("[research-engine] Cleaned up {Count} stuck research run(s)", cleaned);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[research-engine] Stuck-run cleanup failed (non-blocking)");
+        }
 
         ResearchRun? run;
         if (existingRunId is not null)

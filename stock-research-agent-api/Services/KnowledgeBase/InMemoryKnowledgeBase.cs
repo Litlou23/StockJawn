@@ -12,15 +12,16 @@ public class InMemoryKnowledgeBase : IKnowledgeBase
 {
     private readonly ConcurrentDictionary<string, KnowledgeEntry> _entries = new();
 
-    public void Record(KnowledgeEntry entry)
+    public Task RecordAsync(KnowledgeEntry entry)
     {
         _entries.AddOrUpdate(
             entry.Key,
             entry,
             (_, existing) => MergeEntry(existing, entry));
+        return Task.CompletedTask;
     }
 
-    public List<KnowledgeEntry> Query(KnowledgeBaseQuery query)
+    public Task<List<KnowledgeEntry>> QueryAsync(KnowledgeBaseQuery query)
     {
         var results = _entries.Values.AsEnumerable();
 
@@ -46,40 +47,40 @@ public class InMemoryKnowledgeBase : IKnowledgeBase
                     c.Type == LearningConditionType.Sector &&
                     c.Value.Equals(query.Sector, StringComparison.OrdinalIgnoreCase)));
 
-        return results
+        return Task.FromResult(results
             .OrderByDescending(e => e.Confidence)
             .Take(query.Limit)
-            .ToList();
+            .ToList());
     }
 
-    public List<KnowledgeEntry> GetAll(KnowledgeCategory? category = null)
+    public Task<List<KnowledgeEntry>> GetAllAsync(KnowledgeCategory? category = null)
     {
         var results = _entries.Values.AsEnumerable();
         if (category is not null)
             results = results.Where(e => e.Category == category);
-        return results.OrderByDescending(e => e.Confidence).ToList();
+        return Task.FromResult(results.OrderByDescending(e => e.Confidence).ToList());
     }
 
-    public List<KnowledgeEntry> GetStrongest(int limit = 20)
+    public Task<List<KnowledgeEntry>> GetStrongestAsync(int limit = 20)
     {
-        return _entries.Values
+        return Task.FromResult(_entries.Values
             .OrderByDescending(e => e.Confidence)
             .ThenByDescending(e => e.SampleSize)
             .Take(limit)
-            .ToList();
+            .ToList());
     }
 
-    public KnowledgeBaseStats GetStats()
+    public Task<KnowledgeBaseStats> GetStatsAsync()
     {
         var all = _entries.Values.ToList();
-        return new KnowledgeBaseStats
+        return Task.FromResult(new KnowledgeBaseStats
         {
             TotalEntries = all.Count,
             HighConfidenceEntries = all.Count(e => e.Confidence >= 0.7),
             EntriesByCategory = all.GroupBy(e => e.Category)
                 .ToDictionary(g => g.Key, g => g.Count()),
             Summary = $"{all.Count} knowledge entries, {all.Count(e => e.Confidence >= 0.7)} high-confidence.",
-        };
+        });
     }
 
     private static KnowledgeEntry MergeEntry(KnowledgeEntry existing, KnowledgeEntry incoming)

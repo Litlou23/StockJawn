@@ -169,7 +169,7 @@ public class PredictionGenerator
                     HistoricalVolatility = historicalProfile.HistoricalVolatility,
                     HistoricalAtrPercent = historicalProfile.AtrPercent,
                     PreviousPredictionAccuracy = historicalProfile.PreviousPredictionAccuracy,
-                    PreviousPredictionCount = historicalProfile.PreviousPredictionCount ?? 0,
+                    PreviousPredictionCount = historicalProfile.PreviousPredictionCount,
                 }
                 : null;
 
@@ -441,7 +441,8 @@ public class PredictionGenerator
 
         foreach (var snapshot in snapshots)
         {
-            assetLookup?.TryGetValue(snapshot.Ticker, out var asset);
+            ResearchAsset? asset = null;
+            assetLookup?.TryGetValue(snapshot.Ticker, out asset);
             var (pred, inputs) = await GeneratePredictionForTickerAsync(snapshot.Ticker, runId, snapshot, asset);
             if (pred is not null)
             {

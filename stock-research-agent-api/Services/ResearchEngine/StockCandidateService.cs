@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;

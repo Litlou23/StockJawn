@@ -1,6 +1,7 @@
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Providers.StockFit;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
