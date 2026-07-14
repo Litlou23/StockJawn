@@ -411,11 +411,18 @@ public class PredictionGenerator
         return (prediction, inputs);
     }
 
-    public async Task<(List<PredictionCandidate> Predictions, List<PredictionInput> AllInputs)>
+    /// <summary>
+    /// A neutral prediction that should be superseded after the replacement is persisted.
+    /// Keyed by ticker+timeWindow so the correct replacement ID can be resolved post-sort.
+    /// </summary>
+    public record PendingSupersession(string NeutralPredictionId, string ReplacementTicker, string ReplacementTimeWindow, string Reason);
+
+    public async Task<(List<PredictionCandidate> Predictions, List<PredictionInput> AllInputs, List<PendingSupersession> Supersessions)>
         GeneratePredictionsForWatchlistAsync(string[] watchlist, string runId, List<MarketSnapshot> snapshots, Dictionary<string, ResearchAsset>? assetLookup = null)
     {
         var predictions = new List<PredictionCandidate>();
         var allInputs = new List<PredictionInput>();
+        var pendingSupersessions = new List<PendingSupersession>();
 
         // ── Dedup: fetch recent predictions (any status) created today and build
         // ticker→time_windows lookup. This prevents duplicates within the same day
@@ -430,11 +437,13 @@ public class PredictionGenerator
             .DistinctBy(p => p.Id)
             .ToList();
 
-        var existingTimeWindowsByTicker = allExisting
+        // Build ticker → (time_window → prediction) lookup for supersession checks
+        var existingByTickerAndWindow = allExisting
             .GroupBy(p => p.Ticker.ToUpperInvariant())
             .ToDictionary(
                 g => g.Key,
-                g => new HashSet<string>(g.Select(p => p.TimeWindow), StringComparer.OrdinalIgnoreCase));
+                g => g.GroupBy(p => p.TimeWindow, StringComparer.OrdinalIgnoreCase)
+                      .ToDictionary(wg => wg.Key, wg => wg.First(), StringComparer.OrdinalIgnoreCase));
 
         // Track within-batch additions to prevent intra-batch duplicates
         var batchTracker = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
@@ -447,15 +456,38 @@ public class PredictionGenerator
             if (pred is not null)
             {
                 var tickerKey = pred.Ticker.ToUpperInvariant();
+                var isNewDirectional = PredictionCategoryHelper.IsDirectional(pred.PredictionType);
 
                 // Check against existing DB predictions
-                if (existingTimeWindowsByTicker.TryGetValue(tickerKey, out var existingWindows)
-                    && existingWindows.Contains(pred.TimeWindow))
+                if (existingByTickerAndWindow.TryGetValue(tickerKey, out var windowMap)
+                    && windowMap.TryGetValue(pred.TimeWindow, out var existingPred))
                 {
-                    _logger.LogInformation(
-                        "[prediction] {Ticker}: skipping — prediction already exists today with time_window={TimeWindow}",
-                        pred.Ticker, pred.TimeWindow);
-                    continue;
+                    var isExistingNeutral = !PredictionCategoryHelper.IsDirectional(existingPred.PredictionType);
+
+                    // Neutral → directional supersession: the new directional prediction
+                    // replaces the neutral one that was holding the dedup slot.
+                    // Supersession is deferred until after persistence so we have the
+                    // replacement's DB-assigned ID.
+                    if (isExistingNeutral && isNewDirectional && existingPred.Status == "open")
+                    {
+                        var reason = $"Neutral {existingPred.PredictionType} superseded by directional {pred.PredictionType} prediction";
+                        pendingSupersessions.Add(new PendingSupersession(
+                            existingPred.Id, pred.Ticker, pred.TimeWindow, reason));
+
+                        _logger.LogInformation(
+                            "[prediction] {Ticker}: will supersede neutral prediction {OldId} ({OldType}) with directional {NewType} for time_window={TimeWindow}",
+                            pred.Ticker, existingPred.Id, existingPred.PredictionType, pred.PredictionType, pred.TimeWindow);
+
+                        // Update the lookup so subsequent batch items see the new prediction
+                        windowMap[pred.TimeWindow] = pred;
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "[prediction] {Ticker}: skipping — prediction already exists today with time_window={TimeWindow}",
+                            pred.Ticker, pred.TimeWindow);
+                        continue;
+                    }
                 }
 
                 // Check against earlier items in this batch
@@ -479,7 +511,7 @@ public class PredictionGenerator
         }
 
         predictions.Sort((a, b) => b.ConfidenceScore.CompareTo(a.ConfidenceScore));
-        return (predictions, allInputs);
+        return (predictions, allInputs, pendingSupersessions);
     }
 
     // -----------------------------------------------------------------------

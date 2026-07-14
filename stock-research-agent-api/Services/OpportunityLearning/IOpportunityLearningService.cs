@@ -52,6 +52,7 @@ public record OpportunityScanResult
     public int PartiallyCaptured { get; init; }
     public int CompletelyMissed { get; init; }
     public int WrongDirection { get; init; }
+    public int NeutralPrediction { get; init; }
     public int Skipped { get; init; }
     public List<string> Errors { get; init; } = [];
     public string Summary { get; init; } = "";

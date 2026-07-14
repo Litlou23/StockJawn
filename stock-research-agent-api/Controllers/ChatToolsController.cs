@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
+using StockResearchAgent.Api.Services.Discovery;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.Supabase;
 
@@ -23,6 +24,7 @@ public class ChatToolsController : ControllerBase
     private readonly LearningEngine _learning;
     private readonly TradeSetupEngine _setupEngine;
     private readonly JobStatusTracker _jobStatus;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<ChatToolsController> _logger;
 
     public ChatToolsController(
@@ -34,6 +36,7 @@ public class ChatToolsController : ControllerBase
         LearningEngine learning,
         TradeSetupEngine setupEngine,
         JobStatusTracker jobStatus,
+        IServiceScopeFactory scopeFactory,
         ILogger<ChatToolsController> logger)
     {
         _researchRepo = researchRepo;
@@ -44,6 +47,7 @@ public class ChatToolsController : ControllerBase
         _learning = learning;
         _setupEngine = setupEngine;
         _jobStatus = jobStatus;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
@@ -1176,47 +1180,39 @@ public class ChatToolsController : ControllerBase
     {
         try
         {
-            // Forward to the jobs controller endpoint internally
-            var baseUrl = $"{Request.Scheme}://{Request.Host}";
-            var jobSecret = HttpContext.RequestServices.GetRequiredService<IConfiguration>()["JOB_RUN_SECRET"] ?? "";
-            using var client = new HttpClient();
-            client.DefaultRequestHeaders.Add("X-Job-Secret", jobSecret);
-            var resp = await client.PostAsync($"{baseUrl}/api/research-jobs/run-discovery",
-                new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
+            _jobStatus.MarkStarted("discovery");
 
-            if (!resp.IsSuccessStatusCode)
+            // Run discovery directly instead of HTTP self-call
+            _ = Task.Run(async () =>
             {
-                return Ok(new
+                try
                 {
-                    tool_name = "run_discovery",
-                    as_of = Now(),
-                    summary = $"Discovery trigger returned {resp.StatusCode}.",
-                    data = new { triggered = false },
-                    warnings = new List<string>(),
-                });
-            }
+                    using var scope = _scopeFactory.CreateScope();
+                    var engine = scope.ServiceProvider.GetRequiredService<IDiscoveryEngine>();
+                    var result = await engine.RunDiscoveryAsync();
 
-            // Wait briefly for the background Task.Run to call MarkStarted,
-            // then poll until it transitions to completed/failed.
+                    _jobStatus.MarkCompleted("discovery",
+                        $"{result.TotalEventsDiscovered} events from {result.ProviderResults.Count} providers, {result.NewAssetsCreated} new assets");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[chat-tools] Discovery failed");
+                    _jobStatus.MarkFailed("discovery", ex.Message);
+                }
+            });
+
+            // Poll until completed/failed
             var maxWait = TimeSpan.FromSeconds(90);
             var pollInterval = TimeSpan.FromSeconds(2);
             var started = DateTimeOffset.UtcNow;
-            var seenRunning = false;
 
-            // Give the background task a moment to start
             await Task.Delay(500);
 
             while (DateTimeOffset.UtcNow - started < maxWait)
             {
                 var status = _jobStatus.GetStatus("discovery");
 
-                if (status?.State == "running")
-                {
-                    seenRunning = true;
-                }
-                // Only treat completed/failed as final if we saw it transition
-                // through running first (avoids stale state from a prior run)
-                else if (seenRunning && status?.State == "completed")
+                if (status?.State == "completed")
                 {
                     return Ok(new
                     {
@@ -1227,7 +1223,7 @@ public class ChatToolsController : ControllerBase
                         warnings = new List<string>(),
                     });
                 }
-                else if (seenRunning && status?.State == "failed")
+                else if (status?.State == "failed")
                 {
                     return Ok(new
                     {
@@ -1242,7 +1238,6 @@ public class ChatToolsController : ControllerBase
                 await Task.Delay(pollInterval);
             }
 
-            // Timed out waiting — still running
             var lastStatus = _jobStatus.GetStatus("discovery");
             return Ok(new
             {

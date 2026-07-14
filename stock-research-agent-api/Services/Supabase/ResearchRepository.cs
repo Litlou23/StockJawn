@@ -200,6 +200,12 @@ public class ResearchRepository
         return await _db.UpdateAsync("prediction_candidates", $"id=eq.{id}", new { status });
     }
 
+    public async Task<bool> SupersedePredictionAsync(string id, string supersededBy, string reason)
+    {
+        return await _db.UpdateAsync("prediction_candidates", $"id=eq.{id}",
+            new { status = "superseded", superseded_by = supersededBy, supersession_reason = reason });
+    }
+
     public async Task<PredictionStatsAggregate> GetPredictionStatsAsync()
     {
         var totalTask = _db.CountAsync("prediction_candidates");
@@ -514,6 +520,39 @@ public class ResearchRepository
         return true;
     }
 
+    // -----------------------------------------------------------------------
+    // Supersession Learning
+    // -----------------------------------------------------------------------
+
+    public async Task<List<PredictionCandidate>> GetSupersededPredictionsAsync(int limit = 200)
+    {
+        var rows = await _db.SelectAsync("prediction_candidates",
+            filter: "status=eq.superseded&superseded_by=not.is.null",
+            order: "created_at.desc", limit: limit);
+        return rows.Select(MapPrediction).ToList();
+    }
+
+    public async Task<bool> SaveSupersessionLearningRecordsAsync(List<object> records)
+    {
+        if (records.Count == 0) return true;
+        await _db.InsertAsync("supersession_learning", records, returnRows: false);
+        return true;
+    }
+
+    public async Task<List<JsonObject>> GetSupersessionLearningRecordsAsync(int limit = 500)
+    {
+        return await _db.SelectAsync("supersession_learning",
+            order: "created_at.desc", limit: limit);
+    }
+
+    public async Task<bool> HasSupersessionRecordAsync(string originalId, string replacementId)
+    {
+        var rows = await _db.SelectAsync("supersession_learning",
+            filter: $"original_prediction_id=eq.{originalId}&replacement_prediction_id=eq.{replacementId}",
+            select: "id", limit: 1);
+        return rows.Count > 0;
+    }
+
     public async Task<EnhancedLearningReport?> GetLatestLearningReportAsync()
     {
         var rows = await _db.SelectAsync("learning_reports",
@@ -824,6 +863,8 @@ public class ResearchRepository
         MissingDataWarnings = GetStringList(r, "missing_data_warnings"),
         DowngradeReasons = GetStringList(r, "downgrade_reasons"),
         Status = r["status"]?.ToString() ?? "open",
+        SupersededBy = r["superseded_by"]?.ToString(),
+        SupersessionReason = r["supersession_reason"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };
 

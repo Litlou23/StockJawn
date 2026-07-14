@@ -134,33 +134,25 @@ export async function GET() {
     );
   }
 
-  // 6. FMP (Financial Modeling Prep) — direct API ping
+  // 6. FMP (Financial Modeling Prep) — check via .NET API pipeline-health
   {
-    const fmpKey = process.env.FMP_API_KEY;
-    if (fmpKey) {
-      checks.push(
-        await checkService('FMP (Financial Modeling Prep)', async () => {
-          const res = await fetch(
-            `https://financialmodelingprep.com/stable/earnings-calendar?from=${new Date().toISOString().slice(0, 10)}&to=${new Date().toISOString().slice(0, 10)}&apikey=${fmpKey}`,
-            { signal: AbortSignal.timeout(10000) }
-          );
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-          const data = await res.json();
-          const count = Array.isArray(data) ? data.length : 0;
-          return {
-            message: `Connected — ${count} earnings today`,
-            details: { earningsToday: count },
-          };
-        })
-      );
-    } else {
-      checks.push({
-        name: 'FMP (Financial Modeling Prep)',
-        status: 'not_configured',
-        latencyMs: null,
-        message: 'FMP_API_KEY not set',
-      });
-    }
+    checks.push(
+      await checkService('FMP (Financial Modeling Prep)', async () => {
+        const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || process.env.API_BASE_URL;
+        if (!apiBase) throw new Error('API_BASE_URL not configured — cannot check FMP status');
+        const res = await fetch(`${apiBase}/api/pipeline-health`, { signal: AbortSignal.timeout(10000) });
+        if (!res.ok) throw new Error(`API returned ${res.status}`);
+        const data = await res.json();
+        const providers = data?.checks?.providers as Record<string, { configured: boolean }> | undefined;
+        const fmp = providers?.['fmp'];
+        if (!fmp) throw new Error('FMP provider not found in API health response');
+        if (!fmp.configured) throw new Error('FMP_API_KEY not set on API server');
+        return {
+          message: 'Configured on API server',
+          details: { configured: true, source: 'pipeline-health' },
+        };
+      })
+    );
   }
 
   // 7. RSS feeds (direct connectivity test)

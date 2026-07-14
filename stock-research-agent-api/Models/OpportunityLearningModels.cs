@@ -47,6 +47,9 @@ public enum MissedOpportunityReason
 
     /// <summary>Asset was archived before the move happened.</summary>
     ArchivedTooEarly,
+
+    /// <summary>Prediction was neutral/non-directional — no direction was expressed.</summary>
+    NeutralPrediction,
 }
 
 /// <summary>
@@ -85,6 +88,9 @@ public enum OpportunityCaptureStatus
 
     /// <summary>We had no awareness of this ticker at all.</summary>
     CompletelyMissed,
+
+    /// <summary>We had a neutral/non-directional prediction — direction was intentionally not expressed.</summary>
+    NeutralPrediction,
 }
 
 /// <summary>
@@ -235,6 +241,9 @@ public record OpportunityAnalytics
 
     /// <summary>How many we completely missed (zero awareness).</summary>
     public int CompletelyMissed { get; init; }
+
+    /// <summary>How many had a neutral/non-directional prediction (direction not expressed).</summary>
+    public int NeutralPrediction { get; init; }
 
     /// <summary>Capture rate: Captured / Total.</summary>
     public double CaptureRate { get; init; }

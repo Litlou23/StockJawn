@@ -95,7 +95,7 @@ export interface MarketSnapshotAvailability {
 export type PredictionType = 'bullish' | 'bearish' | 'neutral' | 'watch_only';
 export type PredictionAssetType = 'stock' | 'option_watch_candidate';
 export type PredictionTimeWindow = 'intraday' | '1_day' | '3_day' | '1_week';
-export type PredictionStatus = 'open' | 'evaluated' | 'expired';
+export type PredictionStatus = 'open' | 'evaluated' | 'expired' | 'superseded';
 
 export interface PredictionCandidate {
   id: string;
@@ -115,6 +115,8 @@ export interface PredictionCandidate {
   dataSourcesUsed: string[];
   missingDataWarnings: string[];
   status: PredictionStatus;
+  supersededBy?: string;
+  supersessionReason?: string;
   createdAt: string;
 }
 

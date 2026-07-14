@@ -286,7 +286,7 @@ public enum PredictionCategory { short_term_stock, long_term_stock, scan_result 
 public enum PredictionAssetType { stock, option_watch_candidate }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
-public enum PredictionStatus { open, evaluated, expired }
+public enum PredictionStatus { open, evaluated, expired, superseded }
 
 /// <summary>
 /// Valid time windows. Stored as a plain string because C# enum members cannot start with a digit.
@@ -368,6 +368,8 @@ public record PredictionCandidate
     public ActionabilityTier? ActionabilityTier { get; init; }
     public List<string> DowngradeReasons { get; init; } = [];
     public string Status { get; init; } = "open";
+    public string? SupersededBy { get; init; }
+    public string? SupersessionReason { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
 
@@ -565,11 +567,13 @@ public record LearningUpdateResult
     public int InsightsGenerated { get; init; }
     public int WeightsAdjusted { get; init; }
     public int ObservationsCreated { get; init; }
+    public int SupersessionRecordsCreated { get; init; }
     public int KnowledgeCasesIndexed { get; init; }
     public int KnowledgePatternsDetected { get; init; }
     public int KnowledgeRulesGenerated { get; init; }
     public string Report { get; init; } = "";
     public string? AiSummary { get; init; }
+    public SupersessionAnalytics? RevisionAnalytics { get; init; }
     public List<string> Errors { get; init; } = [];
 }
 
@@ -670,4 +674,123 @@ public record ConfidenceBucket
     public double ActualAccuracy { get; init; }
     public double ExpectedAccuracy { get; init; }
     public double CalibrationError { get; init; }
+}
+
+// ---------------------------------------------------------------------------
+// Supersession Learning — tracks prediction revisions for pattern analysis
+// ---------------------------------------------------------------------------
+
+/// <summary>
+/// A single supersession event: one prediction replaced another.
+/// Captures the before/after state for learning.
+/// </summary>
+public record SupersessionLearningRecord
+{
+    public string Id { get; init; } = Guid.NewGuid().ToString();
+    public string OriginalPredictionId { get; init; } = "";
+    public string ReplacementPredictionId { get; init; } = "";
+    public string Ticker { get; init; } = "";
+    public string TimeWindow { get; init; } = "";
+
+    // Transition type (e.g., "neutral→bullish", "bearish→bullish")
+    public string OriginalType { get; init; } = "";
+    public string ReplacementType { get; init; } = "";
+    public string TransitionLabel { get; init; } = "";
+
+    // Timing
+    public double HoursBetween { get; init; }
+    public DateTimeOffset OriginalCreatedAt { get; init; }
+    public DateTimeOffset ReplacementCreatedAt { get; init; }
+
+    // Score deltas
+    public int ConfidenceDelta { get; init; }
+    public int RiskDelta { get; init; }
+    public double BullScoreDelta { get; init; }
+    public double BearScoreDelta { get; init; }
+
+    // Context
+    public string? OriginalMarketRegime { get; init; }
+    public string? ReplacementMarketRegime { get; init; }
+    public bool RegimeChanged { get; init; }
+    public double? OriginalCatalystStrength { get; init; }
+    public double? ReplacementCatalystStrength { get; init; }
+
+    // Outcome (populated after the replacement is evaluated)
+    public bool? ReplacementCorrect { get; init; }
+    public double? ReplacementReturnPercent { get; init; }
+    public double? ReplacementOutcomeScore { get; init; }
+
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
+/// <summary>
+/// Aggregated analytics across all supersession events.
+/// </summary>
+public record SupersessionAnalytics
+{
+    public int TotalSupersessions { get; init; }
+    public Dictionary<string, TransitionStats> ByTransition { get; init; } = new();
+    public double OverallImprovementRate { get; init; }
+    public string Summary { get; init; } = "";
+
+    // Ranked lists
+    public List<RankedTransition> MostCommonTransitions { get; init; } = [];
+    public List<RankedTransition> MostSuccessfulTransitions { get; init; } = [];
+    public List<RankedTransition> LeastSuccessfulTransitions { get; init; } = [];
+
+    // Context breakdowns
+    public Dictionary<string, int> ByMarketRegime { get; init; } = new();
+    public Dictionary<string, RegimeTransitionStats> RegimeBreakdown { get; init; } = new();
+    public Dictionary<string, NeutralTypeStats> NeutralTypeBreakdown { get; init; } = new();
+
+    // Timing
+    public double AvgHoursBeforeSupersession { get; init; }
+    public double MedianHoursBeforeSupersession { get; init; }
+}
+
+/// <summary>
+/// Performance stats for a specific transition type (e.g., "neutral→bullish").
+/// </summary>
+public record TransitionStats
+{
+    public int Count { get; init; }
+    public double AvgHoursBetween { get; init; }
+    public double AvgConfidenceDelta { get; init; }
+    public double AvgRiskDelta { get; init; }
+    public int EvaluatedCount { get; init; }
+    public int CorrectCount { get; init; }
+    public double Accuracy { get; init; }
+    public double AvgReturnPercent { get; init; }
+    public bool IsImprovement { get; init; }
+    public double AvgBullScoreDelta { get; init; }
+    public double AvgBearScoreDelta { get; init; }
+}
+
+public record RankedTransition
+{
+    public string TransitionLabel { get; init; } = "";
+    public int Count { get; init; }
+    public double Accuracy { get; init; }
+    public int EvaluatedCount { get; init; }
+}
+
+public record RegimeTransitionStats
+{
+    public int Count { get; init; }
+    public int EvaluatedCount { get; init; }
+    public int CorrectCount { get; init; }
+    public double Accuracy { get; init; }
+    public double AvgHoursBetween { get; init; }
+    public bool RegimeChangedDuringTransition { get; init; }
+}
+
+public record NeutralTypeStats
+{
+    public string NeutralType { get; init; } = "";
+    public int TimesSuperseded { get; init; }
+    public double AvgHoursBeforeSupersession { get; init; }
+    public Dictionary<string, int> SupersededTo { get; init; } = new();
+    public int EvaluatedCount { get; init; }
+    public int CorrectCount { get; init; }
+    public double ReplacementAccuracy { get; init; }
 }

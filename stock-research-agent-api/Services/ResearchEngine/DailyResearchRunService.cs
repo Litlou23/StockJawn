@@ -119,7 +119,7 @@ public class DailyResearchRunService
 
             // 2. Generate predictions
             _logger.LogInformation("[research-engine] Generating predictions...");
-            var (predictions, allInputs) = await _predGen.GeneratePredictionsForWatchlistAsync(
+            var (predictions, allInputs, pendingSupersessions) = await _predGen.GeneratePredictionsForWatchlistAsync(
                 tickers, run.Id, snapshots, assetLookup);
 
             // Save predictions
@@ -210,6 +210,26 @@ public class DailyResearchRunService
                     inputIdx++;
                 }
                 await _repo.SavePredictionInputsAsync(linkedInputs);
+            }
+
+            // Execute deferred neutral supersessions now that we have DB-assigned IDs
+            if (persisted && ids.Count > 0 && pendingSupersessions.Count > 0)
+            {
+                foreach (var sup in pendingSupersessions)
+                {
+                    // Find the replacement prediction's index by ticker+timeWindow
+                    var idx = predictions.FindIndex(p =>
+                        p.Ticker.Equals(sup.ReplacementTicker, StringComparison.OrdinalIgnoreCase)
+                        && p.TimeWindow.Equals(sup.ReplacementTimeWindow, StringComparison.OrdinalIgnoreCase));
+
+                    if (idx >= 0 && idx < ids.Count)
+                    {
+                        await _repo.SupersedePredictionAsync(sup.NeutralPredictionId, ids[idx], sup.Reason);
+                        _logger.LogInformation(
+                            "[research-engine] Superseded neutral prediction {OldId} → replacement {NewId}",
+                            sup.NeutralPredictionId, ids[idx]);
+                    }
+                }
             }
 
             // 3. Report

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Supabase;
@@ -111,6 +112,10 @@ public class LearningEngine
         // Stage 5: Setup Analytics — learn complete trade setups
         var setupStatsUpdated = await ComputeSetupPerformanceAsync();
 
+        // Stage 5b: Supersession Learning — learn from prediction revisions
+        var supersessionCount = await ComputeSupersessionAnalyticsAsync();
+        var revisionAnalytics = await GetSupersessionAnalyticsAsync();
+
         // Stage 6: Generate AI-summarized learning report
         var aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges);
 
@@ -120,7 +125,8 @@ public class LearningEngine
         var report = $"Learning cycle complete: {obsCreated} observations, {perfUpdated} signal stats, " +
                      $"{calibrationCount} calibration buckets, {correlationCount} correlations, " +
                      $"{influenceCount} influence stats, {interactionCount} interaction pairs, " +
-                     $"{weightsAdjusted} weight adjustments, {setupStatsUpdated} setup stats, {insights.Count} insights.";
+                     $"{weightsAdjusted} weight adjustments, {setupStatsUpdated} setup stats, " +
+                     $"{supersessionCount} supersession records, {insights.Count} insights.";
 
         _logger.LogInformation("[learning-engine] {Report}", report);
 
@@ -129,6 +135,8 @@ public class LearningEngine
             InsightsGenerated = insights.Count,
             WeightsAdjusted = weightsAdjusted,
             ObservationsCreated = obsCreated,
+            SupersessionRecordsCreated = supersessionCount,
+            RevisionAnalytics = revisionAnalytics.TotalSupersessions > 0 ? revisionAnalytics : null,
             Report = report,
             AiSummary = aiSummary,
             Errors = errors,
@@ -1305,6 +1313,377 @@ public class LearningEngine
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Stage 5b: Supersession Learning
+    // For each superseded prediction, build a learning record capturing the
+    // before/after state and (when available) the replacement's outcome.
+    // -----------------------------------------------------------------------
+
+    public async Task<int> ComputeSupersessionAnalyticsAsync()
+    {
+        try
+        {
+            var superseded = await _repo.GetSupersededPredictionsAsync(200);
+            if (superseded.Count == 0) return 0;
+
+            var outcomes = await _repo.GetRecentOutcomesAsync(500);
+            var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+
+            var records = new List<object>();
+            var processed = 0;
+
+            foreach (var original in superseded)
+            {
+                if (string.IsNullOrEmpty(original.SupersededBy)) continue;
+
+                // Skip if we already have a record for this pair
+                if (await _repo.HasSupersessionRecordAsync(original.Id, original.SupersededBy))
+                    continue;
+
+                var replacement = await _repo.GetPredictionByIdAsync(original.SupersededBy);
+                if (replacement is null) continue;
+
+                // Parse scoring breakdowns for context
+                var origBreakdown = ScoringBreakdownEnvelope.Parse(original.ScoreDebugJson);
+                var replBreakdown = ScoringBreakdownEnvelope.Parse(replacement.ScoreDebugJson);
+
+                var hoursBetween = (replacement.CreatedAt - original.CreatedAt).TotalHours;
+                var origRegime = origBreakdown is not null ? DetectMarketRegime(origBreakdown) : null;
+                var replRegime = replBreakdown is not null ? DetectMarketRegime(replBreakdown) : null;
+
+                // Outcome of the replacement (if evaluated)
+                outcomeMap.TryGetValue(replacement.Id, out var replOutcome);
+
+                var origType = original.PredictionType.ToString();
+                var replType = replacement.PredictionType.ToString();
+
+                records.Add(new
+                {
+                    original_prediction_id = original.Id,
+                    replacement_prediction_id = replacement.Id,
+                    ticker = original.Ticker,
+                    time_window = original.TimeWindow,
+                    original_type = origType,
+                    replacement_type = replType,
+                    transition_label = $"{origType}→{replType}",
+                    hours_between = Math.Round(hoursBetween, 2),
+                    original_created_at = original.CreatedAt.ToString("o"),
+                    replacement_created_at = replacement.CreatedAt.ToString("o"),
+                    confidence_delta = replacement.ConfidenceScore - original.ConfidenceScore,
+                    risk_delta = replacement.RiskScore - original.RiskScore,
+                    bull_score_delta = (replacement.BullishScore ?? 0) - (original.BullishScore ?? 0),
+                    bear_score_delta = (replacement.BearishScore ?? 0) - (original.BearishScore ?? 0),
+                    original_market_regime = origRegime,
+                    replacement_market_regime = replRegime,
+                    regime_changed = origRegime != replRegime,
+                    original_catalyst_strength = origBreakdown?.CatalystStrength,
+                    replacement_catalyst_strength = replBreakdown?.CatalystStrength,
+                    replacement_correct = replOutcome?.DirectionCorrect,
+                    replacement_return_percent = replOutcome?.PercentMove,
+                    replacement_outcome_score = replOutcome?.OutcomeScore,
+                    created_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+                processed++;
+
+                // Batch insert every 50
+                if (records.Count >= 50)
+                {
+                    await _repo.SaveSupersessionLearningRecordsAsync(records);
+                    records.Clear();
+                }
+            }
+
+            if (records.Count > 0)
+                await _repo.SaveSupersessionLearningRecordsAsync(records);
+
+            _logger.LogInformation("[learning-engine] Supersession learning: created {Count} records from {Total} superseded predictions",
+                processed, superseded.Count);
+            return processed;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Supersession learning computation failed");
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Build aggregated analytics from persisted supersession records.
+    /// Called by the dashboard/insights, not by the learning pipeline.
+    /// </summary>
+    public async Task<SupersessionAnalytics> GetSupersessionAnalyticsAsync()
+    {
+        var rows = await _repo.GetSupersessionLearningRecordsAsync(500);
+        if (rows.Count == 0)
+            return new SupersessionAnalytics { Summary = "No supersession data yet." };
+
+        var byTransition = new Dictionary<string, List<SupersessionRow>>();
+        var byRegime = new Dictionary<string, List<SupersessionRow>>();
+        var byNeutralType = new Dictionary<string, List<SupersessionRow>>();
+        var allHours = new List<double>();
+
+        foreach (var r in rows)
+        {
+            var row = new SupersessionRow
+            {
+                Label = r["transition_label"]?.ToString() ?? "unknown",
+                Hours = GetDouble(r, "hours_between"),
+                ConfDelta = (int)GetDouble(r, "confidence_delta"),
+                RiskDelta = (int)GetDouble(r, "risk_delta"),
+                BullDelta = GetDouble(r, "bull_score_delta"),
+                BearDelta = GetDouble(r, "bear_score_delta"),
+                Correct = GetNullableBool(r, "replacement_correct"),
+                ReturnPct = GetNullableDouble(r, "replacement_return_percent"),
+                OriginalType = r["original_type"]?.ToString() ?? "",
+                ReplacementType = r["replacement_type"]?.ToString() ?? "",
+                OrigRegime = r["original_market_regime"]?.ToString(),
+                ReplRegime = r["replacement_market_regime"]?.ToString(),
+                RegimeChanged = GetNullableBool(r, "regime_changed") == true,
+            };
+
+            allHours.Add(row.Hours);
+
+            if (!byTransition.ContainsKey(row.Label))
+                byTransition[row.Label] = [];
+            byTransition[row.Label].Add(row);
+
+            // Regime breakdown (use original regime)
+            var regime = row.OrigRegime ?? "unknown";
+            if (!byRegime.ContainsKey(regime))
+                byRegime[regime] = [];
+            byRegime[regime].Add(row);
+
+            // Neutral-type breakdown (only for neutral originals)
+            if (!PredictionCategoryHelper.IsDirectional(Enum.TryParse<PredictionType>(row.OriginalType, true, out var pt) ? pt : PredictionType.neutral))
+            {
+                var neutralType = row.OriginalType;
+                if (!byNeutralType.ContainsKey(neutralType))
+                    byNeutralType[neutralType] = [];
+                byNeutralType[neutralType].Add(row);
+            }
+        }
+
+        // Transition stats
+        var transitionStats = new Dictionary<string, TransitionStats>();
+        var totalEvaluated = 0;
+        var totalCorrect = 0;
+
+        foreach (var (label, items) in byTransition)
+        {
+            var evaluated = items.Where(i => i.Correct.HasValue).ToList();
+            var correct = evaluated.Count(i => i.Correct == true);
+            totalEvaluated += evaluated.Count;
+            totalCorrect += correct;
+
+            transitionStats[label] = new TransitionStats
+            {
+                Count = items.Count,
+                AvgHoursBetween = Math.Round(items.Average(i => i.Hours), 1),
+                AvgConfidenceDelta = Math.Round(items.Average(i => (double)i.ConfDelta), 1),
+                AvgRiskDelta = Math.Round(items.Average(i => (double)i.RiskDelta), 1),
+                AvgBullScoreDelta = Math.Round(items.Average(i => i.BullDelta), 2),
+                AvgBearScoreDelta = Math.Round(items.Average(i => i.BearDelta), 2),
+                EvaluatedCount = evaluated.Count,
+                CorrectCount = correct,
+                Accuracy = evaluated.Count > 0 ? Math.Round((double)correct / evaluated.Count, 4) : 0,
+                AvgReturnPercent = evaluated.Count > 0
+                    ? Math.Round(evaluated.Where(i => i.ReturnPct.HasValue).Select(i => i.ReturnPct!.Value).DefaultIfEmpty(0).Average(), 4)
+                    : 0,
+                IsImprovement = evaluated.Count >= 3 && (double)correct / evaluated.Count > 0.5,
+            };
+        }
+
+        var overallImprovement = totalEvaluated > 0 ? (double)totalCorrect / totalEvaluated : 0;
+
+        // Ranked transitions
+        var ranked = transitionStats.Select(t => new RankedTransition
+        {
+            TransitionLabel = t.Key,
+            Count = t.Value.Count,
+            Accuracy = t.Value.Accuracy,
+            EvaluatedCount = t.Value.EvaluatedCount,
+        }).ToList();
+
+        var mostCommon = ranked.OrderByDescending(r => r.Count).ToList();
+        var mostSuccessful = ranked.Where(r => r.EvaluatedCount >= 2)
+            .OrderByDescending(r => r.Accuracy).ThenByDescending(r => r.Count).ToList();
+        var leastSuccessful = ranked.Where(r => r.EvaluatedCount >= 2)
+            .OrderBy(r => r.Accuracy).ThenByDescending(r => r.Count).ToList();
+
+        // Regime breakdown
+        var regimeStats = byRegime.ToDictionary(
+            kvp => kvp.Key,
+            kvp =>
+            {
+                var items = kvp.Value;
+                var evaluated = items.Where(i => i.Correct.HasValue).ToList();
+                var correct = evaluated.Count(i => i.Correct == true);
+                return new RegimeTransitionStats
+                {
+                    Count = items.Count,
+                    EvaluatedCount = evaluated.Count,
+                    CorrectCount = correct,
+                    Accuracy = evaluated.Count > 0 ? Math.Round((double)correct / evaluated.Count, 4) : 0,
+                    AvgHoursBetween = Math.Round(items.Average(i => i.Hours), 1),
+                    RegimeChangedDuringTransition = items.Any(i => i.RegimeChanged),
+                };
+            });
+
+        var regimeCounts = byRegime.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Count);
+
+        // Neutral-type breakdown
+        var neutralStats = byNeutralType.ToDictionary(
+            kvp => kvp.Key,
+            kvp =>
+            {
+                var items = kvp.Value;
+                var evaluated = items.Where(i => i.Correct.HasValue).ToList();
+                var correct = evaluated.Count(i => i.Correct == true);
+                var supersededTo = items.GroupBy(i => i.ReplacementType)
+                    .ToDictionary(g => g.Key, g => g.Count());
+                return new NeutralTypeStats
+                {
+                    NeutralType = kvp.Key,
+                    TimesSuperseded = items.Count,
+                    AvgHoursBeforeSupersession = Math.Round(items.Average(i => i.Hours), 1),
+                    SupersededTo = supersededTo,
+                    EvaluatedCount = evaluated.Count,
+                    CorrectCount = correct,
+                    ReplacementAccuracy = evaluated.Count > 0 ? Math.Round((double)correct / evaluated.Count, 4) : 0,
+                };
+            });
+
+        // Timing
+        allHours.Sort();
+        var median = allHours.Count > 0
+            ? allHours[allHours.Count / 2]
+            : 0;
+
+        return new SupersessionAnalytics
+        {
+            TotalSupersessions = rows.Count,
+            ByTransition = transitionStats,
+            OverallImprovementRate = Math.Round(overallImprovement, 4),
+            MostCommonTransitions = mostCommon,
+            MostSuccessfulTransitions = mostSuccessful,
+            LeastSuccessfulTransitions = leastSuccessful,
+            ByMarketRegime = regimeCounts,
+            RegimeBreakdown = regimeStats,
+            NeutralTypeBreakdown = neutralStats,
+            AvgHoursBeforeSupersession = allHours.Count > 0 ? Math.Round(allHours.Average(), 1) : 0,
+            MedianHoursBeforeSupersession = Math.Round(median, 1),
+            Summary = $"{rows.Count} supersessions across {transitionStats.Count} transition types. " +
+                      $"Replacement accuracy: {overallImprovement * 100:F1}% ({totalCorrect}/{totalEvaluated} evaluated). " +
+                      $"Avg {(allHours.Count > 0 ? allHours.Average() : 0):F1}h before revision.",
+        };
+    }
+
+    // Internal row for analytics aggregation
+    private class SupersessionRow
+    {
+        public string Label { get; init; } = "";
+        public double Hours { get; init; }
+        public int ConfDelta { get; init; }
+        public int RiskDelta { get; init; }
+        public double BullDelta { get; init; }
+        public double BearDelta { get; init; }
+        public bool? Correct { get; init; }
+        public double? ReturnPct { get; init; }
+        public string OriginalType { get; init; } = "";
+        public string ReplacementType { get; init; } = "";
+        public string? OrigRegime { get; init; }
+        public string? ReplRegime { get; init; }
+        public bool RegimeChanged { get; init; }
+    }
+
+    private async Task<string> BuildSupersessionReportSectionAsync()
+    {
+        try
+        {
+            var analytics = await GetSupersessionAnalyticsAsync();
+            if (analytics.TotalSupersessions == 0)
+                return "  No supersession data yet.";
+
+            var lines = new List<string>
+            {
+                $"  Total revisions: {analytics.TotalSupersessions}",
+                $"  Avg time before revision: {analytics.AvgHoursBeforeSupersession:F1}h (median {analytics.MedianHoursBeforeSupersession:F1}h)",
+            };
+
+            // Transition breakdown
+            lines.Add("  Transitions:");
+            foreach (var (label, stats) in analytics.ByTransition.OrderByDescending(t => t.Value.Count))
+            {
+                var accStr = stats.EvaluatedCount > 0
+                    ? $", accuracy {stats.Accuracy * 100:F0}% ({stats.CorrectCount}/{stats.EvaluatedCount})"
+                    : ", not yet evaluated";
+                lines.Add($"    {label}: {stats.Count}x, avg {stats.AvgHoursBetween:F1}h gap, conf delta {stats.AvgConfidenceDelta:+0;-0}{accStr}");
+            }
+
+            // Top/bottom transitions
+            if (analytics.MostSuccessfulTransitions.Count > 0)
+            {
+                var top = analytics.MostSuccessfulTransitions.First();
+                lines.Add($"  Most successful: {top.TransitionLabel} ({top.Accuracy * 100:F0}% accuracy, {top.EvaluatedCount} evaluated)");
+            }
+            if (analytics.LeastSuccessfulTransitions.Count > 0)
+            {
+                var bottom = analytics.LeastSuccessfulTransitions.First();
+                lines.Add($"  Least successful: {bottom.TransitionLabel} ({bottom.Accuracy * 100:F0}% accuracy, {bottom.EvaluatedCount} evaluated)");
+            }
+
+            // Neutral-type breakdown
+            if (analytics.NeutralTypeBreakdown.Count > 0)
+            {
+                lines.Add("  Neutral types superseded:");
+                foreach (var (type, stats) in analytics.NeutralTypeBreakdown.OrderByDescending(n => n.Value.TimesSuperseded))
+                {
+                    var targets = string.Join(", ", stats.SupersededTo.Select(kvp => $"{kvp.Key}×{kvp.Value}"));
+                    lines.Add($"    {type}: {stats.TimesSuperseded}x, avg {stats.AvgHoursBeforeSupersession:F1}h → [{targets}]");
+                }
+            }
+
+            // Regime context
+            if (analytics.RegimeBreakdown.Count > 0)
+            {
+                lines.Add("  By market regime:");
+                foreach (var (regime, stats) in analytics.RegimeBreakdown.OrderByDescending(r => r.Value.Count))
+                    lines.Add($"    {regime}: {stats.Count}x, accuracy {stats.Accuracy * 100:F0}%");
+            }
+
+            lines.Add($"  Overall replacement accuracy: {analytics.OverallImprovementRate * 100:F1}%");
+            return string.Join("\n", lines);
+        }
+        catch
+        {
+            return "  Supersession analytics unavailable.";
+        }
+    }
+
+    private static double GetDouble(JsonObject r, string key)
+    {
+        var node = r[key];
+        if (node is null) return 0;
+        if (node is System.Text.Json.Nodes.JsonValue jv && jv.TryGetValue<double>(out var d)) return d;
+        return double.TryParse(node.ToString(), out var parsed) ? parsed : 0;
+    }
+
+    private static double? GetNullableDouble(JsonObject r, string key)
+    {
+        var node = r[key];
+        if (node is null) return null;
+        if (node is System.Text.Json.Nodes.JsonValue jv && jv.TryGetValue<double>(out var d)) return d;
+        return double.TryParse(node.ToString(), out var parsed) ? parsed : null;
+    }
+
+    private static bool? GetNullableBool(JsonObject r, string key)
+    {
+        var node = r[key];
+        if (node is null) return null;
+        if (node is System.Text.Json.Nodes.JsonValue jv && jv.TryGetValue<bool>(out var b)) return b;
+        return bool.TryParse(node.ToString(), out var parsed) ? parsed : null;
+    }
+
     /// <summary>
     /// Reconstruct BucketEvidence from a ScoringBreakdown (for historical predictions
     /// that were scored before the setup engine existed).
@@ -1642,6 +2021,9 @@ Calibration status: {calibration.Summary}
 WEIGHT CHANGES APPLIED:
 {(weightChangeLines.Count > 0 ? string.Join("\n", weightChangeLines) : "  None today")}
 
+PREDICTION REVISIONS (supersession learning):
+{await BuildSupersessionReportSectionAsync()}
+
 INSTRUCTIONS:
 - Write 3-5 short paragraphs, conversational tone
 - Lead with the most important finding from the NEW analytics (calibration, correlation, influence, interactions)
@@ -1653,6 +2035,7 @@ INSTRUCTIONS:
 - Highlight any concerning patterns or improvements
 - If confidence is miscalibrated, flag it clearly
 - Note any directional asymmetry (bull vs bear performance)
+- If supersession data exists, note which transition types improve accuracy and which don't
 - Keep under 500 words
 - Do NOT use bullet points or headers — write in flowing prose";
 
@@ -1857,6 +2240,35 @@ INSTRUCTIONS:
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[learning-engine] Failed to generate setup insights");
+        }
+
+        // 6. Supersession insights — which prediction revisions improve accuracy?
+        try
+        {
+            var supAnalytics = await GetSupersessionAnalyticsAsync();
+            if (supAnalytics.TotalSupersessions >= 3)
+            {
+                foreach (var (label, stats) in supAnalytics.ByTransition)
+                {
+                    if (stats.Count < 3) continue;
+
+                    var assessmentVerb = stats.IsImprovement ? "improves" : "does not clearly improve";
+                    insights.Add(new
+                    {
+                        insight_type = "supersession",
+                        summary = $"Transition {label}: {stats.Count} occurrences, replacement accuracy {stats.Accuracy * 100:F0}% ({stats.CorrectCount}/{stats.EvaluatedCount}). Revision {assessmentVerb} predictions.",
+                        evidence = $"Avg {stats.AvgHoursBetween:F1}h between predictions. Confidence delta: {stats.AvgConfidenceDelta:+0;-0}, risk delta: {stats.AvgRiskDelta:+0;-0}.",
+                        action_recommendation = stats.IsImprovement
+                            ? $"The {label} transition is effective. Consider being more aggressive about superseding."
+                            : $"The {label} transition shows marginal improvement. More data needed.",
+                        confidence = Math.Min((double)stats.EvaluatedCount / 20, 1.0),
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate supersession insights");
         }
 
         if (insights.Count > 0)

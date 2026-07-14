@@ -612,6 +612,60 @@ The pipeline adds three new scheduled job endpoints (all require `x-job-secret` 
 4. **Research Universe Capacity Planning**: Dynamic `MaxActiveAssets` based on system load and prediction accuracy.
 5. **Evidence-Driven Prediction Confidence**: Use the evidence snapshot's interest score and thesis quality to modulate prediction confidence before scoring.
 6. **Cross-Ticker Evidence Correlation**: Detect when evidence for one ticker implies something about related tickers (sector peers, supply chain).
+7. **News Alignment Learning** (see §11.8 below): Capture news-vs-prediction alignment at prediction time, then let the learning engine discover whether news agreement/disagreement correlates with accuracy.
+
+### 11.8 Planned Enhancement: News Alignment Learning
+
+**Status**: Planned — capture-first, learn-later. Do not hardcode scoring adjustments.
+
+**Problem**: The CatalystEvaluator contributes bull/bear scores from news sentiment, and the LearningEngine tracks `catalyst` as a signal bucket. But neither system captures whether news *agreed or disagreed with the final prediction direction*. After a prediction is made, there is no structured record of news alignment that the learning engine can correlate with outcomes. The system cannot answer: "Do bullish technicals perform better when news is also bullish?" or "Should conflicting news reduce confidence by a learned amount?"
+
+**Why it is valuable**: Empirical data from this system already shows prediction accuracy varies dramatically by context (e.g., 60% on low-volatility vs. 31% on high-volatility stocks). News alignment is likely another such contextual variable. Capturing it allows the learning engine to discover whether news agreement/disagreement is predictive of outcome accuracy — and if so, by how much — without hardcoding assumptions.
+
+**Existing infrastructure that supports this feature**:
+
+- `CatalystEvaluator` already computes per-news-item sentiment (bullish/bearish/neutral), importance scores, catalyst types, source counts, and a composite catalyst strength score (0–25).
+- `ScoringEngine` already produces `CatalystBullish` / `CatalystBearish` in the `ScoreBreakdown`, and `score_debug_json` persists the full breakdown with every prediction.
+- `PredictionGenerator.BuildInputs()` already stores the top 3 news items as `PredictionInput` rows (type=catalyst or news), preserving titles, sources, and URLs.
+- `LearningEngine` already tracks per-signal accuracy for the `catalyst` bucket and computes correlation coefficients, but only on the raw bull/bear contribution — not on alignment with the prediction direction.
+- The `prediction_inputs` table preserves what data was available at prediction time, but does not include computed alignment metadata.
+
+**Where it would integrate**:
+
+1. **Capture phase** (PredictionGenerator, at prediction-creation time):
+   - After the prediction direction is decided, compute a `NewsAlignment` score by comparing the catalyst evaluator's net sentiment direction against the prediction direction. Proposed scale: +2 (strongly supports), +1 (mildly supports), 0 (neutral/no news), -1 (mildly contradicts), -2 (strongly contradicts).
+   - Also capture: `CatalystStrength` (from `CatalystEvaluator.ScoreCatalystStrength()`), `NewsVolume` (count of news items), `DominantCatalystType` (most frequent or highest-importance catalyst type), `EvidenceConsensusScore` (how many of the 5 evaluator groups — trend, momentum, volume, market, catalyst — agreed with the prediction direction).
+   - Store these as new nullable columns on `prediction_candidates`, or as a structured JSON field (e.g., `news_alignment_context`).
+
+2. **Evaluation phase** (OutcomeEvaluator / LearningEngine, after outcome is known):
+   - When computing learning stats, group predictions by `NewsAlignment` bucket (and optionally by `DominantCatalystType`) in addition to the existing signal groupings.
+   - Compute per-bucket accuracy: "accuracy when news agreed," "accuracy when news disagreed," "accuracy when no news."
+   - Store results in `signal_performance` or a new `alignment_learning_stats` table.
+
+3. **Application phase** (ScoringEngine, future — NOT immediate):
+   - Only after sufficient data shows statistically significant correlations, allow the learning engine to output learned confidence adjustments keyed by alignment bucket.
+   - These would feed into the existing weight-override infrastructure (`research_scoring_weights`) rather than hardcoded rules.
+
+**Dependencies**:
+
+- Requires the existing CatalystEvaluator, ScoringEngine, and LearningEngine — all already in place.
+- Requires sufficient prediction volume with outcomes to produce statistically meaningful groupings. Current dataset (~132 evaluated directional predictions) is borderline; ~500+ would be ideal before acting on learned patterns.
+- The `prediction_candidates` table would need a schema migration to add the new columns (or a JSON column).
+
+**Estimated implementation complexity**: Medium.
+
+- Phase A (capture): ~1–2 days. Add alignment computation to PredictionGenerator, add columns/migration, persist at prediction time. No behavioral change.
+- Phase B (analysis): ~1–2 days. Extend LearningEngine to group by alignment bucket, compute and persist per-bucket accuracy stats, surface in learning reports.
+- Phase C (application): ~1 day. Wire learned alignment adjustments into ScoringEngine confidence modulation via the existing weight-override mechanism.
+
+**Recommended implementation phase**: After the system has accumulated 300+ evaluated directional predictions with the new alignment fields populated (Phase A should be implemented soon to start collecting data; Phases B and C should wait for data volume).
+
+**Architectural concerns**:
+
+- The `score_debug_json` column already captures the full `ScoreBreakdown` including `CatalystBullish`/`CatalystBearish`, so some retroactive analysis is possible on existing predictions without the new columns — but only for catalyst direction, not alignment with the prediction direction.
+- The `EvidenceConsensusScore` concept (how many evaluator groups agreed) is valuable beyond just news alignment and could become a general prediction quality signal.
+- Care must be taken not to double-count: the catalyst evaluator already contributes to bull/bear scores, so news alignment learning should modulate *confidence*, not add more bull/bear points.
+- The design principle of "capture first, learn later, apply only when data supports it" is consistent with how the existing Self-Tuning Confidence Caps (§10) and Opportunity Learning (§11.4) systems were designed.
 
 ---
 

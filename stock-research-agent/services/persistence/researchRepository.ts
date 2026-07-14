@@ -181,7 +181,7 @@ export async function getRecentPredictions(limit = 30): Promise<PredictionCandid
   } catch { return []; }
 }
 
-export async function updatePredictionStatus(id: string, status: 'evaluated' | 'expired'): Promise<PersistenceResult> {
+export async function updatePredictionStatus(id: string, status: 'evaluated' | 'expired' | 'superseded'): Promise<PersistenceResult> {
   if (!isSupabaseConfigured()) return NOT_CONFIGURED;
   try {
     const client = getSupabaseClient();
@@ -436,6 +436,8 @@ function mapPrediction(r: Record<string, unknown>): PredictionCandidate {
     dataSourcesUsed: (r.data_sources_used as string[]) ?? [],
     missingDataWarnings: (r.missing_data_warnings as string[]) ?? [],
     status: r.status as PredictionCandidate['status'],
+    supersededBy: r.superseded_by as string | undefined,
+    supersessionReason: r.supersession_reason as string | undefined,
     createdAt: r.created_at as string,
   };
 }

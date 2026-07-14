@@ -119,11 +119,12 @@ public class OpportunityLearningService : IOpportunityLearningService
         var partial = allRecords.Count(r => r.CaptureStatus == OpportunityCaptureStatus.PartiallyCaptured);
         var missed = allRecords.Count(r => r.CaptureStatus == OpportunityCaptureStatus.CompletelyMissed);
         var wrong = allRecords.Count(r => r.CaptureStatus == OpportunityCaptureStatus.WrongDirection);
+        var neutralCount = allRecords.Count(r => r.CaptureStatus == OpportunityCaptureStatus.NeutralPrediction);
 
         var summary = $"Scanned {tickers.Count} tickers in {sw.Elapsed.TotalSeconds:F1}s. " +
                       $"Found {allRecords.Count} significant movers: " +
                       $"{captured} captured, {partial} partially captured, " +
-                      $"{wrong} wrong direction, {missed} completely missed. " +
+                      $"{wrong} wrong direction, {neutralCount} neutral, {missed} completely missed. " +
                       $"{skipped} skipped (duplicate or no significant move).";
 
         _logger.LogInformation("[opportunity-learning] {Summary}", summary);
@@ -137,6 +138,7 @@ public class OpportunityLearningService : IOpportunityLearningService
             PartiallyCaptured = partial,
             CompletelyMissed = missed,
             WrongDirection = wrong,
+            NeutralPrediction = neutralCount,
             Skipped = skipped,
             Errors = errors,
             Summary = summary,
@@ -225,26 +227,40 @@ public class OpportunityLearningService : IOpportunityLearningService
         var hadPrediction = recentPredictions.Count > 0;
         PredictionCandidate? bestPrediction = null;
         bool? predictionCorrectDirection = null;
+        var hadNeutralPrediction = false;
 
         if (hadPrediction)
         {
-            // Find the most relevant prediction (highest confidence)
+            // Prefer the highest-confidence directional prediction; fall back to neutral
             bestPrediction = recentPredictions
+                .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType))
                 .OrderByDescending(p => p.ConfidenceScore)
-                .First();
+                .FirstOrDefault()
+                ?? recentPredictions
+                    .OrderByDescending(p => p.ConfidenceScore)
+                    .First();
 
-            var predBullish = bestPrediction.PredictionType == PredictionType.bullish;
-            var moveBullish = direction == "up";
-            predictionCorrectDirection = predBullish == moveBullish;
+            if (PredictionCategoryHelper.IsDirectional(bestPrediction.PredictionType))
+            {
+                var predBullish = bestPrediction.PredictionType == PredictionType.bullish;
+                var moveBullish = direction == "up";
+                predictionCorrectDirection = predBullish == moveBullish;
+            }
+            else
+            {
+                // Neutral predictions intentionally express no direction
+                hadNeutralPrediction = true;
+                predictionCorrectDirection = null;
+            }
         }
 
         // ── 4. Determine capture status ────────────────────────
         var captureStatus = DetermineCaptureStatus(
-            wasDiscovered, wasInUniverse, hadPrediction, predictionCorrectDirection);
+            wasDiscovered, wasInUniverse, hadPrediction, hadNeutralPrediction, predictionCorrectDirection);
 
         // ── 5. Determine miss reasons ──────────────────────────
         var missReasons = DetermineMissReasons(
-            wasDiscovered, wasInUniverse, hadPrediction,
+            wasDiscovered, wasInUniverse, hadPrediction, hadNeutralPrediction,
             predictionCorrectDirection, bestPrediction, researchAsset);
 
         // ── 6. Build summary ───────────────────────────────────
@@ -312,6 +328,7 @@ public class OpportunityLearningService : IOpportunityLearningService
         var partial = records.Count(r => r.CaptureStatus == OpportunityCaptureStatus.PartiallyCaptured);
         var wrong = records.Count(r => r.CaptureStatus == OpportunityCaptureStatus.WrongDirection);
         var missed = records.Count(r => r.CaptureStatus == OpportunityCaptureStatus.CompletelyMissed);
+        var neutral = records.Count(r => r.CaptureStatus == OpportunityCaptureStatus.NeutralPrediction);
         var total = records.Count;
 
         // By tier
@@ -369,8 +386,9 @@ public class OpportunityLearningService : IOpportunityLearningService
             PartiallyCaptured = partial,
             WrongDirection = wrong,
             CompletelyMissed = missed,
+            NeutralPrediction = neutral,
             CaptureRate = total > 0 ? Math.Round(100.0 * captured / total, 1) : 0,
-            AwarenessRate = total > 0 ? Math.Round(100.0 * (captured + partial) / total, 1) : 0,
+            AwarenessRate = total > 0 ? Math.Round(100.0 * (captured + partial + neutral) / total, 1) : 0,
             ByTier = byTier,
             ByPeriod = byPeriod,
             TopMissReasons = topMissReasons,
@@ -393,8 +411,12 @@ public class OpportunityLearningService : IOpportunityLearningService
     }
 
     private static OpportunityCaptureStatus DetermineCaptureStatus(
-        bool wasDiscovered, bool wasInUniverse, bool hadPrediction, bool? predictionCorrect)
+        bool wasDiscovered, bool wasInUniverse, bool hadPrediction,
+        bool hadNeutralPrediction, bool? predictionCorrect)
     {
+        if (hadPrediction && hadNeutralPrediction)
+            return OpportunityCaptureStatus.NeutralPrediction;
+
         if (hadPrediction && predictionCorrect == true)
             return OpportunityCaptureStatus.Captured;
 
@@ -409,8 +431,8 @@ public class OpportunityLearningService : IOpportunityLearningService
 
     private static List<string> DetermineMissReasons(
         bool wasDiscovered, bool wasInUniverse, bool hadPrediction,
-        bool? predictionCorrect, PredictionCandidate? prediction,
-        ResearchAsset? researchAsset)
+        bool hadNeutralPrediction, bool? predictionCorrect,
+        PredictionCandidate? prediction, ResearchAsset? researchAsset)
     {
         var reasons = new List<string>();
 
@@ -446,7 +468,14 @@ public class OpportunityLearningService : IOpportunityLearningService
             return reasons;
         }
 
-        // Had a prediction — analyze its quality
+        // Neutral prediction — the engine saw the ticker but chose not to express a direction
+        if (hadNeutralPrediction)
+        {
+            reasons.Add(MissedOpportunityReason.NeutralPrediction.ToString());
+            return reasons;
+        }
+
+        // Had a directional prediction — analyze its quality
         if (predictionCorrect == false)
         {
             reasons.Add(MissedOpportunityReason.WrongDirection.ToString());
@@ -493,6 +522,10 @@ public class OpportunityLearningService : IOpportunityLearningService
 
             case OpportunityCaptureStatus.WrongDirection:
                 parts.Add($"WRONG DIRECTION: predicted {prediction!.PredictionType} but stock went {direction}.");
+                break;
+
+            case OpportunityCaptureStatus.NeutralPrediction:
+                parts.Add($"NEUTRAL: predicted {prediction!.PredictionType} — no directional opinion expressed.");
                 break;
 
             case OpportunityCaptureStatus.PartiallyCaptured:

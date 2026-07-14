@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.Discovery;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.Supabase;
 
@@ -194,6 +195,15 @@ public class ResearchController : ControllerBase
         if (profile is null)
             return NotFound(new { error = $"No historical profile found for {ticker.ToUpperInvariant()}" });
         return Ok(profile);
+    }
+
+    /// <summary>GET /api/research/revision-analytics — prediction revision/supersession dashboard.</summary>
+    [HttpGet("revision-analytics")]
+    public async Task<IActionResult> GetRevisionAnalytics(
+        [FromServices] LearningEngine learningEngine = null!)
+    {
+        var analytics = await learningEngine.GetSupersessionAnalyticsAsync();
+        return Ok(analytics);
     }
 }
 
