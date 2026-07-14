@@ -31,6 +31,7 @@ public class DynamicPickOrchestrator
     private readonly LearningEngine _learning;
     private readonly IEvidenceService _evidence;
     private readonly IOpportunityLearningService _opportunityLearning;
+    private readonly NeutralOutcomeEvaluator _neutralEvaluator;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
 
     public DynamicPickOrchestrator(
@@ -44,6 +45,7 @@ public class DynamicPickOrchestrator
         LearningEngine learning,
         IEvidenceService evidence,
         IOpportunityLearningService opportunityLearning,
+        NeutralOutcomeEvaluator neutralEvaluator,
         ILogger<DynamicPickOrchestrator> logger)
     {
         _dailyService = dailyService;
@@ -56,6 +58,7 @@ public class DynamicPickOrchestrator
         _learning = learning;
         _evidence = evidence;
         _opportunityLearning = opportunityLearning;
+        _neutralEvaluator = neutralEvaluator;
         _logger = logger;
     }
 
@@ -231,10 +234,23 @@ public class DynamicPickOrchestrator
             await _portfolioLifecycle.ClosePositionsForCandidatesAsync(
                 openStock, StockCandidateService.MinEvalHours, errors);
 
+        // 6. Evaluate neutral predictions (parallel pipeline — does not touch directional evaluator)
+        var neutralEvaluated = 0;
+        try
+        {
+            neutralEvaluated = await _neutralEvaluator.EvaluateOpenNeutralPredictionsAsync(errors);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Neutral evaluation failed");
+            errors.Add($"neutral-eval: {ex.Message}");
+        }
+
         var report = $"Evaluated {stockEvaluated} paper stock candidates, " +
                      $"{optionOutcomes.Count} paper option candidates, " +
                      $"{setupsEvaluated} trade setups. " +
                      $"Existing predictions: {eod.PredictionsEvaluated}." +
+                     (neutralEvaluated > 0 ? $" Neutral outcomes: {neutralEvaluated}." : "") +
                      (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "") +
                      (portfolioPositionsSkipped > 0 ? $" Skipped {portfolioPositionsSkipped} positions (time window not elapsed)." : "");
 

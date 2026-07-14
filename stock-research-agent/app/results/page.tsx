@@ -37,6 +37,16 @@ interface Outcome {
   createdAt: string;
 }
 
+function formatWindow(tw: string): string {
+  const map: Record<string, string> = {
+    '1_day': '1 Day',
+    '3_day': '3 Days',
+    '1_week': '1 Week',
+    '1_month': '1 Month',
+  };
+  return map[tw] ?? tw.replace(/_/g, ' ');
+}
+
 function formatReturn(value?: number | null): string {
   if (value === undefined || value === null) return '—';
   const sign = value > 0 ? '+' : '';
@@ -324,7 +334,7 @@ export default function ResultsPage() {
                         <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">The Call</div>
                         <p className="leading-relaxed text-zinc-300">{p.predictionReason}</p>
                         <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
-                          <span className="text-zinc-500">Window: <span className="text-zinc-300">{p.timeWindow.replace(/_/g, ' ')}</span></span>
+                          <span className="text-zinc-500">Window: <span className="text-zinc-300">{formatWindow(p.timeWindow)}</span></span>
                           {p.entryReferencePrice && (
                             <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
                           )}

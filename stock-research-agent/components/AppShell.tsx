@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import Sidebar from './Sidebar';
 import MobileNav from './MobileNav';
 import BackButton from './MobileBackButton';
+import ChatPopup from './chat/ChatPopup';
 
 export default function AppShell({
   children,
@@ -28,6 +29,7 @@ export default function AppShell({
       </div>
 
       <MobileNav />
+      <ChatPopup />
     </div>
   );
 }

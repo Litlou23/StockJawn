@@ -49,7 +49,7 @@ export default function ConnectivityPage() {
 
   // Group checks by category
   const apiChecks = result?.checks.filter(c =>
-    ['.NET API (health)', 'Supabase (via .NET API)', 'Twelve Data API', 'OpenAI API', 'Finnhub API'].includes(c.name)
+    ['.NET API (health)', 'Supabase (via .NET API)', 'Twelve Data API', 'OpenAI API', 'Finnhub API', 'FMP (Financial Modeling Prep)'].includes(c.name)
   ) ?? [];
   const rssChecks = result?.checks.filter(c => c.name.includes('RSS')) ?? [];
 
@@ -213,6 +213,7 @@ export default function ConnectivityPage() {
                   ['SUPABASE_SERVICE_KEY', 'Azure', 'Supabase RLS bypass'],
                   ['TWELVE_DATA_API_KEY', 'Azure', 'Market data (quotes, bars)'],
                   ['FINNHUB_API_KEY', 'Azure', 'Earnings calendar, market news'],
+                  ['FMP_API_KEY', 'Azure + .env.local', 'Discovery provider (gainers, losers, analyst ratings)'],
                   ['OPENAI_API_KEY', 'Azure', 'AI completions'],
                 ].map(([name, where, usedBy]) => (
                   <tr key={name} className="border-t border-zinc-800">

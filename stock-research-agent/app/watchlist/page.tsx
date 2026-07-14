@@ -66,6 +66,22 @@ interface ChangeLogDto {
   createdAt: string;
 }
 
+// Prediction data shown on watchlist cards
+interface WatchlistPrediction {
+  id: string;
+  ticker: string;
+  predictionType: string;
+  timeWindow: string;
+  confidenceScore: number;
+  status: string;
+  createdAt: string;
+  outcome?: {
+    directionCorrect: boolean | null;
+    percentMove: number | null;
+    outcomeScore: number | null;
+  } | null;
+}
+
 // ---------------------------------------------------------------------------
 // Ticker detail types (from /api/chat-tools/get_ticker_detail)
 // ---------------------------------------------------------------------------
@@ -585,7 +601,7 @@ function SectionCard({ title, subtitle, children }: { title: string; subtitle?: 
 }
 
 function TickerDetailModal({
-  item, detail, detailLoading, detailError, onClose, researchSignals,
+  item, detail, detailLoading, detailError, onClose, researchSignals, predictions,
 }: {
   item: WatchlistItemDto;
   detail: TickerDetailData | null;
@@ -593,6 +609,7 @@ function TickerDetailModal({
   detailError: string | null;
   onClose: () => void;
   researchSignals?: import('@/components/ResearchSignals').ResearchSignal[];
+  predictions?: WatchlistPrediction[];
 }) {
   const { prediction: pred, stock_candidate: stock, option_candidate: opt, outcome, option_block_reason } = detail ?? {};
 
@@ -651,6 +668,46 @@ function TickerDetailModal({
             <SectionCard title="Why It's on the Watchlist" subtitle="How this stock scored when it was added or last checked">
               {item.thesisSummary && <p className="text-sm text-zinc-300 mb-4">{friendlyThesisText(item.thesisSummary)}</p>}
               <ScoreBreakdown item={item} researchSignals={researchSignals} />
+            </SectionCard>
+          )}
+
+          {/* All Predictions for this ticker */}
+          {predictions && predictions.length > 0 && (
+            <SectionCard title="Predictions &amp; Picks" subtitle="All predictions the system has made for this stock">
+              <div className="space-y-2">
+                {predictions.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2">
+                    <div className="flex items-center gap-3">
+                      {(() => {
+                        const bull = p.predictionType === 'bullish';
+                        const bear = p.predictionType === 'bearish';
+                        const cls = bull ? 'bg-green-500/15 text-green-400' : bear ? 'bg-red-500/15 text-red-400' : 'bg-zinc-700/40 text-zinc-400';
+                        const arr = bull ? '▲' : bear ? '▼' : '—';
+                        return (
+                      <span className={`rounded px-2 py-0.5 text-xs font-semibold ${cls}`}>
+                        {arr} {formatWindow(p.timeWindow)}
+                      </span>
+                        );
+                      })()}
+                      <span className="text-sm text-zinc-300">{p.confidenceScore}% confidence</span>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] ${
+                        p.status === 'open' ? 'bg-blue-500/15 text-blue-400' :
+                        p.status === 'evaluated' ? 'bg-zinc-700/50 text-zinc-400' :
+                        'bg-zinc-800 text-zinc-500'
+                      }`}>{p.status}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      {p.outcome?.directionCorrect !== null && p.outcome?.directionCorrect !== undefined && (
+                        <span className={p.outcome.directionCorrect ? 'text-green-400' : 'text-red-400'}>
+                          {p.outcome.directionCorrect ? '✓ Correct' : '✗ Wrong'}
+                          {p.outcome.percentMove !== null ? ` (${p.outcome.percentMove >= 0 ? '+' : ''}${p.outcome.percentMove.toFixed(1)}%)` : ''}
+                        </span>
+                      )}
+                      <span className="text-zinc-600">{relativeTime(p.createdAt)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </SectionCard>
           )}
 
@@ -852,7 +909,45 @@ function cardSummary(item: WatchlistItemDto): string {
   return item.watchReason ? friendlyThesisText(item.watchReason) : '';
 }
 
-function WatchlistCard({ item, onClick, researchSignals }: { item: WatchlistItemDto; onClick: () => void; researchSignals?: import('@/components/ResearchSignals').ResearchSignal[] }) {
+function formatWindow(tw: string): string {
+  const map: Record<string, string> = {
+    '1_day': '1D', '3_day': '3D', '1_week': '1W', '1_month': '1M',
+  };
+  return map[tw] ?? tw.replace(/_/g, ' ');
+}
+
+function PredictionBadges({ predictions }: { predictions: WatchlistPrediction[] }) {
+  if (predictions.length === 0) return null;
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="text-[10px] font-medium text-zinc-500 uppercase tracking-wide">Active Predictions</div>
+      {predictions.map((p) => {
+        const isBullish = p.predictionType === 'bullish';
+        const isBearish = p.predictionType === 'bearish';
+        const colorClass = isBullish ? 'bg-green-500/15 text-green-400'
+          : isBearish ? 'bg-red-500/15 text-red-400'
+          : 'bg-zinc-700/40 text-zinc-400';
+        const arrow = isBullish ? '▲' : isBearish ? '▼' : '—';
+        return (
+        <div key={p.id} className="flex items-center gap-2 text-xs">
+          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${colorClass}`}>
+            {arrow} {formatWindow(p.timeWindow)}
+          </span>
+          <span className="text-zinc-400">{p.confidenceScore}%</span>
+          {p.outcome?.directionCorrect !== null && p.outcome?.directionCorrect !== undefined && (
+            <span className={`text-[10px] ${p.outcome.directionCorrect ? 'text-green-400' : 'text-red-400'}`}>
+              {p.outcome.directionCorrect ? '✓' : '✗'}
+              {p.outcome.percentMove !== null ? ` ${p.outcome.percentMove >= 0 ? '+' : ''}${p.outcome.percentMove.toFixed(1)}%` : ''}
+            </span>
+          )}
+        </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function WatchlistCard({ item, onClick, researchSignals, predictions }: { item: WatchlistItemDto; onClick: () => void; researchSignals?: import('@/components/ResearchSignals').ResearchSignal[]; predictions?: WatchlistPrediction[] }) {
   const verdict = deriveAction(item);
   const sl = scoreLabel(item.totalScore);
   const rl = riskLabel(item);
@@ -878,6 +973,9 @@ function WatchlistCard({ item, onClick, researchSignals }: { item: WatchlistItem
       </div>
       <p className="text-xs text-zinc-500 mt-2">{verdict.detail}</p>
       <p className="text-xs text-zinc-400 mt-2 line-clamp-2">{cardSummary(item)}</p>
+      {predictions && predictions.length > 0 && (
+        <PredictionBadges predictions={predictions} />
+      )}
       {researchSignals && researchSignals.length > 0 && (
         <div className="mt-2">
           <ResearchSignalBadges signals={researchSignals} />
@@ -919,8 +1017,8 @@ function sortItems(items: WatchlistItemDto[], sortBy: WatchlistSort): WatchlistI
   }
 }
 
-function WatchlistSection({ title, items, emptyText, sortBy, onCardClick, signalsByTicker }: {
-  title: string; items: WatchlistItemDto[]; emptyText: string; sortBy: WatchlistSort; onCardClick: (item: WatchlistItemDto) => void; signalsByTicker?: Record<string, import('@/components/ResearchSignals').ResearchSignal[]>;
+function WatchlistSection({ title, items, emptyText, sortBy, onCardClick, signalsByTicker, predictionsByTicker }: {
+  title: string; items: WatchlistItemDto[]; emptyText: string; sortBy: WatchlistSort; onCardClick: (item: WatchlistItemDto) => void; signalsByTicker?: Record<string, import('@/components/ResearchSignals').ResearchSignal[]>; predictionsByTicker?: Record<string, WatchlistPrediction[]>;
 }) {
   const sorted = sortItems(items, sortBy);
   return (
@@ -933,7 +1031,7 @@ function WatchlistSection({ title, items, emptyText, sortBy, onCardClick, signal
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {sorted.map((item) => (
-            <WatchlistCard key={item.id} item={item} onClick={() => onCardClick(item)} researchSignals={signalsByTicker?.[item.ticker]} />
+            <WatchlistCard key={item.id} item={item} onClick={() => onCardClick(item)} researchSignals={signalsByTicker?.[item.ticker]} predictions={predictionsByTicker?.[item.ticker]} />
           ))}
         </div>
       )}
@@ -977,6 +1075,7 @@ function ChangeHistory({ changes }: { changes: ChangeLogDto[] }) {
 export default function WatchlistPage() {
   const [watchlist, setWatchlist] = useState<WatchlistResponse | null>(null);
   const [changes, setChanges] = useState<ChangeLogDto[]>([]);
+  const [predictionsByTicker, setPredictionsByTicker] = useState<Record<string, WatchlistPrediction[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<WatchlistSort>('score_desc');
@@ -989,12 +1088,40 @@ export default function WatchlistPage() {
     async function load() {
       setLoading(true);
       try {
-        const [wRes, cRes] = await Promise.all([
+        const [wRes, cRes, pRes] = await Promise.all([
           fetch('/api/watchlist').then((r) => (r.ok ? r.json() : null)),
           fetch('/api/watchlist/changes?limit=20').then((r) => (r.ok ? r.json() : null)),
+          fetch('/api/research/predictions-with-outcomes?limit=500').then((r) => (r.ok ? r.json() : null)),
         ]);
         setWatchlist(wRes);
         setChanges(cRes?.changes ?? []);
+
+        // Group predictions by ticker — API returns { stats, items: [...] }
+        const pItems = pRes?.items ?? (Array.isArray(pRes) ? pRes : []);
+        if (pItems.length > 0) {
+          const grouped: Record<string, WatchlistPrediction[]> = {};
+          for (const item of pItems) {
+            const p = item.prediction;
+            if (!p) continue;
+            const ticker = p.ticker;
+            if (!grouped[ticker]) grouped[ticker] = [];
+            grouped[ticker].push({
+              id: p.id,
+              ticker: p.ticker,
+              predictionType: p.predictionType,
+              timeWindow: p.timeWindow,
+              confidenceScore: p.confidenceScore,
+              status: p.status,
+              createdAt: p.createdAt,
+              outcome: item.outcome ? {
+                directionCorrect: item.outcome.directionCorrect,
+                percentMove: item.outcome.percentMove,
+                outcomeScore: item.outcome.outcomeScore,
+              } : null,
+            });
+          }
+          setPredictionsByTicker(grouped);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load watchlist');
       } finally {
@@ -1080,16 +1207,16 @@ export default function WatchlistPage() {
           </label>
         </div>
 
-        <WatchlistSection title="Active" items={watchlist.active.items} emptyText="No stocks being watched yet. Run a weekly research scan to find some." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} />
-        <WatchlistSection title="Needs a Second Look" items={watchlist.reviewNeeded.items} emptyText="Nothing flagged for review." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} />
-        <WatchlistSection title="Might Replace" items={watchlist.swapCandidates.items} emptyText="No stocks up for replacement." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} />
+        <WatchlistSection title="Active" items={watchlist.active.items} emptyText="No stocks being watched yet. Run a weekly research scan to find some." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} predictionsByTicker={predictionsByTicker} />
+        <WatchlistSection title="Needs a Second Look" items={watchlist.reviewNeeded.items} emptyText="Nothing flagged for review." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} predictionsByTicker={predictionsByTicker} />
+        <WatchlistSection title="Might Replace" items={watchlist.swapCandidates.items} emptyText="No stocks up for replacement." sortBy={sortBy} onCardClick={openDetail} signalsByTicker={signalsByTicker} predictionsByTicker={predictionsByTicker} />
         <WatchlistSection title="Removed" items={watchlist.archived.items} emptyText="Nothing removed yet." sortBy={sortBy} onCardClick={openDetail} />
 
         <ChangeHistory changes={changes} />
       </div>
 
       {selectedItem && (
-        <TickerDetailModal item={selectedItem} detail={detail} detailLoading={detailLoading} detailError={detailError} onClose={closeDetail} researchSignals={signalsByTicker[selectedItem.ticker]} />
+        <TickerDetailModal item={selectedItem} detail={detail} detailLoading={detailLoading} detailError={detailError} onClose={closeDetail} researchSignals={signalsByTicker[selectedItem.ticker]} predictions={predictionsByTicker[selectedItem.ticker]} />
       )}
     </AppShell>
   );

@@ -134,7 +134,36 @@ export async function GET() {
     );
   }
 
-  // 6. RSS feeds (direct connectivity test)
+  // 6. FMP (Financial Modeling Prep) — direct API ping
+  {
+    const fmpKey = process.env.FMP_API_KEY;
+    if (fmpKey) {
+      checks.push(
+        await checkService('FMP (Financial Modeling Prep)', async () => {
+          const res = await fetch(
+            `https://financialmodelingprep.com/stable/earnings-calendar?from=${new Date().toISOString().slice(0, 10)}&to=${new Date().toISOString().slice(0, 10)}&apikey=${fmpKey}`,
+            { signal: AbortSignal.timeout(10000) }
+          );
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const data = await res.json();
+          const count = Array.isArray(data) ? data.length : 0;
+          return {
+            message: `Connected — ${count} earnings today`,
+            details: { earningsToday: count },
+          };
+        })
+      );
+    } else {
+      checks.push({
+        name: 'FMP (Financial Modeling Prep)',
+        status: 'not_configured',
+        latencyMs: null,
+        message: 'FMP_API_KEY not set',
+      });
+    }
+  }
+
+  // 7. RSS feeds (direct connectivity test)
   const rssFeeds = [
     { name: 'Yahoo Finance RSS', url: 'https://finance.yahoo.com/news/rssindex' },
     { name: 'CNBC RSS', url: 'https://www.cnbc.com/id/100003114/device/rss/rss.html' },

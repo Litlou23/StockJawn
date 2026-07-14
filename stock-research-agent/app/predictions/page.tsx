@@ -106,6 +106,16 @@ function pctColor(v: number | null | undefined): string {
   return v >= 0 ? 'text-green-400' : 'text-red-400';
 }
 
+function formatWindow(tw: string): string {
+  const map: Record<string, string> = {
+    '1_day': '1 Day',
+    '3_day': '3 Days',
+    '1_week': '1 Week',
+    '1_month': '1 Month',
+  };
+  return map[tw] ?? tw.replace(/_/g, ' ');
+}
+
 function relativeTime(dateStr: string) {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
@@ -289,6 +299,7 @@ export default function PredictionsPage() {
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
   const [sortBy, setSortBy] = useState<SortKey>('newest');
+  const [search, setSearch] = useState('');
 
   const fetchData = useCallback(async (preset: DatePreset, cFrom: string, cTo: string, cat: CategoryTab) => {
     if (cat === 'options') {
@@ -352,6 +363,7 @@ export default function PredictionsPage() {
     setCategory(cat);
     setTab('all');
     setExpandedId(null);
+    setSearch('');
   };
 
   const isScanTab = category === 'scan_results';
@@ -360,10 +372,12 @@ export default function PredictionsPage() {
   const items = data?.items ?? [];
   const stats = data?.stats ?? { total: 0, evaluated: 0, correct: 0, incorrect: 0, pending: 0, accuracy: 0 };
 
-  const preSort = tab === 'correct' ? items.filter((i) => i.wasCorrect === true)
+  const searchLower = search.trim().toLowerCase();
+  const preSort = (tab === 'correct' ? items.filter((i) => i.wasCorrect === true)
     : tab === 'wrong' ? items.filter((i) => i.wasCorrect === false)
     : tab === 'pending' ? items.filter((i) => !i.hasOutcome)
-    : items;
+    : items
+  ).filter((i) => !searchLower || i.prediction.ticker.toLowerCase().includes(searchLower));
 
   const filtered = [...preSort].sort((a, b) => {
     switch (sortBy) {
@@ -556,9 +570,23 @@ export default function PredictionsPage() {
           )}
         </div>}
 
-        {/* Verdict filter tabs — hidden for scan results and options */}
+        {/* Search + Verdict filter tabs — hidden for scan results and options */}
         {!isScanTab && category !== 'options' && (
           <div className="flex flex-wrap items-center gap-3">
+            {/* Search */}
+            <div className="relative">
+              <svg className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search ticker..."
+                className="w-36 rounded-lg border border-zinc-800 bg-zinc-900 py-1.5 pl-8 pr-2 text-[11px] text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500"
+              />
+            </div>
+
             <div className="flex gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 w-fit">
               {([
                 ['all', `All (${stats.total})`],
@@ -576,7 +604,7 @@ export default function PredictionsPage() {
               ))}
             </div>
 
-            {/* Sort — orders by signal strength bar. */}
+            {/* Sort */}
             <label className="flex items-center gap-2 text-[11px] text-zinc-500">
               Sort:
               <select
@@ -592,10 +620,26 @@ export default function PredictionsPage() {
           </div>
         )}
 
+        {/* Search for scan / options tabs */}
+        {(isScanTab || isOptionsTab) && (
+          <div className="relative w-fit">
+            <svg className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search ticker..."
+              className="w-36 rounded-lg border border-zinc-800 bg-zinc-900 py-1.5 pl-8 pr-2 text-[11px] text-zinc-200 placeholder-zinc-600 outline-none focus:border-violet-500"
+            />
+          </div>
+        )}
+
         {/* Options tab */}
         {isOptionsTab && (() => {
           const oStats = optionsData?.stats ?? { total: 0, evaluated: 0, profitable: 0, unprofitable: 0, open: 0, winRate: 0 };
-          const oItems = optionsData?.items ?? [];
+          const oItems = (optionsData?.items ?? []).filter((i) => !searchLower || i.candidate.ticker.toLowerCase().includes(searchLower));
           return (
             <>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-6">
@@ -651,13 +695,15 @@ export default function PredictionsPage() {
                               </span>
                               <span className="text-[10px] text-zinc-400">${c.strike} strike</span>
                               <span className="text-[10px] text-zinc-600">{c.dteAtEntry} DTE</span>
-                              {o ? (
+                              {c.status === 'open' ? (
+                                <span className="rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-400">Open</span>
+                              ) : o ? (
                                 <span className={`rounded border px-2 py-0.5 text-[10px] font-bold ${o.contractProfitable ? 'border-green-500/30 bg-green-500/10 text-green-400' : 'border-red-500/30 bg-red-500/10 text-red-400'}`}>
                                   {o.contractProfitable ? 'PROFITABLE' : 'LOSS'}
                                 </span>
                               ) : (
                                 <span className="rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-[10px] font-medium text-zinc-400">
-                                  {c.status === 'open' ? 'Open' : c.status}
+                                  {c.status}
                                 </span>
                               )}
                             </div>
@@ -790,7 +836,7 @@ export default function PredictionsPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-sm font-bold text-zinc-100">{p.ticker}</span>
                         {predictionBadge(p.predictionType)}
-                        <span className="text-[10px] text-zinc-600">{p.timeWindow.replace(/_/g, ' ')}</span>
+                        <span className="text-[10px] text-zinc-600">{formatWindow(p.timeWindow)}</span>
                       </div>
                       <p className="mt-1 text-xs text-zinc-400">{scanReasonLabel(p.predictionType)}</p>
                       <p className="mt-1 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
@@ -906,10 +952,11 @@ export default function PredictionsPage() {
                   onClick={() => setExpandedId(isExpanded ? null : p.id)}
                   className="flex w-full items-center gap-3 px-4 py-3 text-left"
                 >
-                  {/* Left: ticker + type */}
+                  {/* Left: ticker + type + window */}
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-bold text-zinc-100">{p.ticker}</span>
                     {predictionBadge(p.predictionType)}
+                    <span className="text-[10px] text-zinc-600">{formatWindow(p.timeWindow)}</span>
                   </div>
 
                   {/* Center: result or status */}
@@ -946,7 +993,7 @@ export default function PredictionsPage() {
                       <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">The Call</div>
                       <p className="leading-relaxed text-zinc-300">{p.predictionReason}</p>
                       <div className="mt-2 flex flex-wrap gap-3 text-[11px]">
-                        <span className="text-zinc-500">Window: <span className="text-zinc-300">{p.timeWindow.replace(/_/g, ' ')}</span></span>
+                        <span className="text-zinc-500">Window: <span className="text-zinc-300">{formatWindow(p.timeWindow)}</span></span>
                         {p.entryReferencePrice != null && (
                           <span className="text-zinc-500">Entry: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
                         )}

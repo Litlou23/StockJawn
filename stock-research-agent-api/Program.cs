@@ -223,6 +223,8 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<StockCandidateService>();
     builder.Services.AddSingleton<OptionCandidateService>();
     builder.Services.AddSingleton<PortfolioLifecycleService>();
+    builder.Services.AddSingleton<NeutralOutcomeRepository>();
+    builder.Services.AddSingleton<NeutralOutcomeEvaluator>();
     builder.Services.AddSingleton<DynamicPickOrchestrator>();
 
     // Portfolio Challenge — simulated portfolio growth tracking.

@@ -67,6 +67,10 @@ const POST_TOOLS = new Set([
   'run_morning_scan',
   'run_eod_review',
   'update_config',
+  'update_weight_override',
+  'reset_weight_override',
+  'run_discovery',
+  'update_stock_eval',
 ]);
 
 async function executeToolCall(toolCall: AiToolCall): Promise<string> {

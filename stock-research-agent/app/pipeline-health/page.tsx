@@ -160,10 +160,36 @@ export default function PipelineHealthPage() {
               value={health.checks.eodReviewsLast24h}
             />
             <CheckCard
+              label="Discovery Events (24h)"
+              value={health.checks.discoveryEventsLast24h}
+              warn={health.checks.discoveryEventsLast24h === 0}
+            />
+            <CheckCard
+              label="Evidence Records (24h)"
+              value={health.checks.evidenceRecordsLast24h}
+            />
+            <CheckCard
               label="Schema Drift Warnings"
               value={health.checks.schemaDriftWarnings}
               warn={(health.checks.schemaDriftWarnings as number) > 0}
             />
+          </div>
+        </div>
+      ) : null}
+
+      {/* Data Providers */}
+      {health?.checks.providers ? (
+        <div className="space-y-2">
+          <h2 className="text-lg font-semibold text-zinc-200">Data Providers</h2>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+            {Object.entries(health.checks.providers as Record<string, { configured: boolean }>).map(([id, info]) => (
+              <div key={id} className={`rounded-lg border p-4 ${info.configured ? 'border-green-500/20 bg-green-500/5' : 'border-red-500/20 bg-red-500/5'}`}>
+                <div className="text-xs font-medium text-zinc-300">{id}</div>
+                <div className={`mt-1 text-sm font-bold ${info.configured ? 'text-green-400' : 'text-red-400'}`}>
+                  {info.configured ? 'Connected' : 'Not Configured'}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       ) : null}

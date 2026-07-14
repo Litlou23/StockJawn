@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.Supabase;
 
@@ -21,6 +22,7 @@ public class ChatToolsController : ControllerBase
     private readonly DynamicPickOrchestrator _orchestrator;
     private readonly LearningEngine _learning;
     private readonly TradeSetupEngine _setupEngine;
+    private readonly JobStatusTracker _jobStatus;
     private readonly ILogger<ChatToolsController> _logger;
 
     public ChatToolsController(
@@ -31,6 +33,7 @@ public class ChatToolsController : ControllerBase
         DynamicPickOrchestrator orchestrator,
         LearningEngine learning,
         TradeSetupEngine setupEngine,
+        JobStatusTracker jobStatus,
         ILogger<ChatToolsController> logger)
     {
         _researchRepo = researchRepo;
@@ -40,6 +43,7 @@ public class ChatToolsController : ControllerBase
         _orchestrator = orchestrator;
         _learning = learning;
         _setupEngine = setupEngine;
+        _jobStatus = jobStatus;
         _logger = logger;
     }
 
@@ -1001,6 +1005,278 @@ public class ChatToolsController : ControllerBase
             summary = $"Unknown setting: {setting}. Available: calibration_factor.",
             data = new { setting, applied = false },
             warnings = new List<string> { "Setting not recognized" },
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. update_weight_override — adjust a signal weight override
+    // -----------------------------------------------------------------------
+
+    private static readonly HashSet<string> ValidSignalNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "trend", "momentum", "volume", "volatility",
+        "market_context", "catalyst", "learning", "research_signal",
+    };
+
+    [HttpPost("update_weight_override")]
+    public async Task<IActionResult> UpdateWeightOverride(
+        [FromQuery] string signal_name,
+        [FromQuery] double adjustment_percent,
+        [FromQuery] string? reason)
+    {
+        var warnings = new List<string>();
+
+        if (!ValidSignalNames.Contains(signal_name))
+        {
+            return Ok(new
+            {
+                tool_name = "update_weight_override",
+                as_of = Now(),
+                summary = $"Unknown signal: {signal_name}. Valid signals: {string.Join(", ", ValidSignalNames)}.",
+                data = new { signal_name, applied = false },
+                warnings = new List<string> { "Signal name not recognized" },
+            });
+        }
+
+        // Clamp to ±20% (same as Learning Engine MaxAdjustmentPercent)
+        adjustment_percent = Math.Clamp(adjustment_percent, -0.20, 0.20);
+
+        // Look up the base weight from the Learning Engine defaults
+        var baseWeights = new Dictionary<string, double>
+        {
+            ["trend"] = 1.0, ["momentum"] = 1.0, ["volume"] = 0.8,
+            ["volatility"] = 0.7, ["market_context"] = 0.9, ["catalyst"] = 1.1,
+            ["learning"] = 0.5, ["research_signal"] = 1.0,
+        };
+        var baseWeight = baseWeights.GetValueOrDefault(signal_name.ToLowerInvariant(), 1.0);
+        var effectiveWeight = baseWeight * (1.0 + adjustment_percent);
+
+        await _researchRepo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+        {
+            SignalName = signal_name.ToLowerInvariant(),
+            BaseWeight = baseWeight,
+            AdjustmentPercent = adjustment_percent,
+            EffectiveWeight = effectiveWeight,
+            Confidence = 1.0,
+            SampleSize = 0,
+            Status = "manual",
+            Reason = reason ?? "Manually set via chat",
+        });
+
+        return Ok(new
+        {
+            tool_name = "update_weight_override",
+            as_of = Now(),
+            summary = $"Weight override for '{signal_name}' set to {adjustment_percent:+0.00%;-0.00%} (effective weight: {effectiveWeight:F4}). This affects future scoring runs.",
+            data = new
+            {
+                signal_name = signal_name.ToLowerInvariant(),
+                base_weight = baseWeight,
+                adjustment_percent,
+                effective_weight = effectiveWeight,
+                applied = true,
+            },
+            warnings,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. reset_weight_override — remove a manual weight override
+    // -----------------------------------------------------------------------
+
+    [HttpPost("reset_weight_override")]
+    public async Task<IActionResult> ResetWeightOverride(
+        [FromQuery] string signal_name)
+    {
+        if (!ValidSignalNames.Contains(signal_name))
+        {
+            return Ok(new
+            {
+                tool_name = "reset_weight_override",
+                as_of = Now(),
+                summary = $"Unknown signal: {signal_name}.",
+                data = new { signal_name, applied = false },
+                warnings = new List<string> { "Signal name not recognized" },
+            });
+        }
+
+        var baseWeights = new Dictionary<string, double>
+        {
+            ["trend"] = 1.0, ["momentum"] = 1.0, ["volume"] = 0.8,
+            ["volatility"] = 0.7, ["market_context"] = 0.9, ["catalyst"] = 1.1,
+            ["learning"] = 0.5, ["research_signal"] = 1.0,
+        };
+        var baseWeight = baseWeights.GetValueOrDefault(signal_name.ToLowerInvariant(), 1.0);
+
+        // Reset by setting adjustment to 0
+        await _researchRepo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+        {
+            SignalName = signal_name.ToLowerInvariant(),
+            BaseWeight = baseWeight,
+            AdjustmentPercent = 0.0,
+            EffectiveWeight = baseWeight,
+            Confidence = 1.0,
+            SampleSize = 0,
+            Status = "manual_reset",
+            Reason = "Reset via chat",
+        });
+
+        return Ok(new
+        {
+            tool_name = "reset_weight_override",
+            as_of = Now(),
+            summary = $"Weight override for '{signal_name}' has been reset to baseline ({baseWeight:F2}). Learning engine will resume adjusting it normally.",
+            data = new { signal_name = signal_name.ToLowerInvariant(), base_weight = baseWeight, applied = true },
+            warnings = new List<string>(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. get_job_statuses — check pipeline job statuses
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_job_statuses")]
+    public IActionResult GetJobStatuses([FromQuery] string? job_name)
+    {
+        if (!string.IsNullOrEmpty(job_name))
+        {
+            var status = _jobStatus.GetStatus(job_name);
+            return Ok(new
+            {
+                tool_name = "get_job_statuses",
+                as_of = Now(),
+                summary = status is null
+                    ? $"No status found for job '{job_name}'. It may not have run yet."
+                    : $"Job '{job_name}': {status.State} (started: {status.StartedAt:u}, duration: {status.DurationSeconds:F1}s)",
+                data = status ?? (object)new { state = "idle" },
+                warnings = new List<string>(),
+            });
+        }
+
+        var all = _jobStatus.GetAllStatuses();
+        var summaryParts = all.Select(kvp => $"{kvp.Key}: {kvp.Value.State}");
+        return Ok(new
+        {
+            tool_name = "get_job_statuses",
+            as_of = Now(),
+            summary = all.Count == 0
+                ? "No jobs have run yet."
+                : $"{all.Count} job(s) tracked: {string.Join(", ", summaryParts)}",
+            data = all,
+            warnings = new List<string>(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. run_discovery — trigger universe discovery
+    // -----------------------------------------------------------------------
+
+    [HttpPost("run_discovery")]
+    public async Task<IActionResult> RunDiscovery()
+    {
+        try
+        {
+            // Forward to the jobs controller endpoint internally
+            var baseUrl = $"{Request.Scheme}://{Request.Host}";
+            var jobSecret = HttpContext.RequestServices.GetRequiredService<IConfiguration>()["JobSecret"] ?? "";
+            using var client = new HttpClient();
+            client.DefaultRequestHeaders.Add("X-Job-Secret", jobSecret);
+            var resp = await client.PostAsync($"{baseUrl}/api/research-jobs/run-discovery",
+                new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
+
+            return Ok(new
+            {
+                tool_name = "run_discovery",
+                as_of = Now(),
+                summary = resp.IsSuccessStatusCode
+                    ? "Discovery scan triggered successfully. It runs in the background — check job statuses for progress."
+                    : $"Discovery trigger returned {resp.StatusCode}.",
+                data = new { triggered = resp.IsSuccessStatusCode },
+                warnings = new List<string>(),
+            });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new
+            {
+                tool_name = "run_discovery",
+                as_of = Now(),
+                summary = $"Failed to trigger discovery: {ex.Message}",
+                data = new { triggered = false },
+                warnings = new List<string> { ex.Message },
+            });
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. update_stock_eval — change a stock candidate's status
+    // -----------------------------------------------------------------------
+
+    [HttpPost("update_stock_eval")]
+    public async Task<IActionResult> UpdateStockEval(
+        [FromQuery] string ticker,
+        [FromQuery] string status,
+        [FromQuery] string? reason)
+    {
+        var validStatuses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "open", "evaluated", "expired", "watch_only", "unavailable" };
+
+        if (!validStatuses.Contains(status))
+        {
+            return Ok(new
+            {
+                tool_name = "update_stock_eval",
+                as_of = Now(),
+                summary = $"Invalid status: {status}. Valid: {string.Join(", ", validStatuses)}.",
+                data = new { applied = false },
+                warnings = new List<string> { "Invalid status" },
+            });
+        }
+
+        // Find the most recent open candidate for this ticker
+        var candidates = await _stockRepo.GetOpenCandidatesAsync();
+        var candidate = candidates.FirstOrDefault(c =>
+            c.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase));
+
+        if (candidate is null)
+        {
+            // Try recent candidates if none are open
+            var recent = await _stockRepo.GetRecentCandidatesAsync(50);
+            candidate = recent.FirstOrDefault(c =>
+                c.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (candidate is null)
+        {
+            return Ok(new
+            {
+                tool_name = "update_stock_eval",
+                as_of = Now(),
+                summary = $"No stock candidate found for {ticker.ToUpperInvariant()}.",
+                data = new { ticker = ticker.ToUpperInvariant(), applied = false },
+                warnings = new List<string> { "Candidate not found" },
+            });
+        }
+
+        var newStatus = Enum.Parse<PaperStockStatus>(status, ignoreCase: true);
+        var updated = await _stockRepo.UpdateCandidateStatusAsync(candidate.Id, newStatus);
+
+        return Ok(new
+        {
+            tool_name = "update_stock_eval",
+            as_of = Now(),
+            summary = updated
+                ? $"Stock candidate for {candidate.Ticker} updated from '{candidate.Status}' to '{status}'. {(reason is not null ? $"Reason: {reason}" : "")}"
+                : $"Failed to update status for {candidate.Ticker}.",
+            data = new
+            {
+                ticker = candidate.Ticker,
+                candidate_id = candidate.Id,
+                previous_status = candidate.Status.ToString(),
+                new_status = status,
+                applied = updated,
+            },
+            warnings = new List<string>(),
         });
     }
 

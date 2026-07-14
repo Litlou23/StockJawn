@@ -26,10 +26,13 @@ RULES:
 7. Options: be extra strict on IV, liquidity, bid-ask spread, theta decay, breakeven distance. A good stock idea can still be a bad options trade.
 8. Never give trade instructions, position sizing, or recommend automatic trading.
 9. This system is in LEARNING MODE — all candidates are paper-only, not actionable.
-10. You can trigger actions: run morning scans, EOD reviews, learning updates, and recalibration. When the user asks you to run something, use the appropriate tool — don't just describe what they should do.
+10. You can trigger actions: run morning scans, EOD reviews, learning updates, discovery scans, and recalibration. When the user asks you to run something, use the appropriate tool — don't just describe what they should do.
 11. You can explain scoring breakdowns for any ticker and show which signal buckets (trend, momentum, volume, volatility, market context, catalyst, research signals) drove a prediction.
 12. You can show trade setup performance — which combinations of signals historically produce positive expected value. Use get_setup_performance for this.
 13. You can view and adjust system configuration like the calibration factor.
+14. You can adjust scoring weight overrides for individual signal buckets (trend, momentum, volume, volatility, market_context, catalyst, learning, research_signal). Use update_weight_override to boost or dampen a signal's influence, and reset_weight_override to return it to baseline. Adjustment is clamped to ±20%.
+15. You can check pipeline job statuses (get_job_statuses) and trigger discovery scans (run_discovery).
+16. You can update stock candidate statuses — e.g. expire, close, or mark as watch_only (update_stock_eval).
 
 RESPONSE FORMAT — JSON only, no markdown fences:
 {"message": string, "dataConfidence": "high"|"medium"|"low", "suggestedPrompts": string[], "riskWarnings": string[], "thesis"?: {"ticker": string, "setupType"?: string, "thesisSummary": string, "bullishCase"?: string, "bearishCase"?: string, "invalidationPoint"?: string, "expectedTimeframe"?: "1d"|"5d"|"20d"|"60d"}}
@@ -254,6 +257,100 @@ export const CHAT_TOOL_DEFINITIONS: ChatToolDefinition[] = [
           value: { type: 'number', description: 'New value for the setting' },
         },
         required: ['setting', 'value'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_weight_override',
+      description:
+        'Adjust the scoring weight for a specific signal bucket. Use when the user says things like "boost momentum", "dampen volatility", "increase trend weight by 10%", or "set catalyst adjustment to +15%". Adjustment is clamped to ±20%. Valid signals: trend, momentum, volume, volatility, market_context, catalyst, learning, research_signal.',
+      parameters: {
+        type: 'object',
+        properties: {
+          signal_name: {
+            type: 'string',
+            enum: ['trend', 'momentum', 'volume', 'volatility', 'market_context', 'catalyst', 'learning', 'research_signal'],
+            description: 'The signal bucket to adjust',
+          },
+          adjustment_percent: {
+            type: 'number',
+            description: 'Adjustment as a decimal (-0.20 to 0.20). E.g. 0.10 means +10%, -0.05 means -5%.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Why this adjustment is being made (for audit trail)',
+          },
+        },
+        required: ['signal_name', 'adjustment_percent'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'reset_weight_override',
+      description:
+        'Reset a signal weight override back to its default baseline, removing any manual adjustment. Use when asked to "reset momentum weight", "undo the volatility boost", or "clear all overrides" (call once per signal).',
+      parameters: {
+        type: 'object',
+        properties: {
+          signal_name: {
+            type: 'string',
+            enum: ['trend', 'momentum', 'volume', 'volatility', 'market_context', 'catalyst', 'learning', 'research_signal'],
+            description: 'The signal bucket to reset',
+          },
+        },
+        required: ['signal_name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_job_statuses',
+      description:
+        'Check the status of pipeline jobs (morning_scan, eod_review, learning, discovery, continuous_discovery). Shows whether jobs are running, completed, or failed, plus timing. Use when asked "is the scan running?", "did the EOD finish?", "what jobs ran today?", or "check job status".',
+      parameters: {
+        type: 'object',
+        properties: {
+          job_name: {
+            type: 'string',
+            description: 'Optional: specific job to check (e.g. morning_scan, eod_review, learning, discovery, continuous_discovery). Omit for all jobs.',
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'run_discovery',
+      description:
+        'Trigger a full universe discovery scan — searches all providers (FMP, Finnhub, RSS) for new research assets and tickers. Use when asked to "run discovery", "scan for new tickers", or "find new stocks". Runs in the background.',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_stock_eval',
+      description:
+        'Change the status of a stock candidate. Use when asked to "close the AAPL position", "expire TSLA candidate", "mark MSFT as evaluated", or "set NVDA to watch only". Valid statuses: open, evaluated, expired, watch_only, unavailable.',
+      parameters: {
+        type: 'object',
+        properties: {
+          ticker: { type: 'string', description: 'Ticker symbol (e.g. AAPL)' },
+          status: {
+            type: 'string',
+            enum: ['open', 'evaluated', 'expired', 'watch_only', 'unavailable'],
+            description: 'New status for the candidate',
+          },
+          reason: { type: 'string', description: 'Why the status is being changed (optional, for audit)' },
+        },
+        required: ['ticker', 'status'],
       },
     },
   },

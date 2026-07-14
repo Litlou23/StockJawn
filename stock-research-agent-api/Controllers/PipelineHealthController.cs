@@ -1,4 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
+using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Discovery;
+using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Controllers;
@@ -14,11 +17,19 @@ namespace StockResearchAgent.Api.Controllers;
 public class PipelineHealthController : ControllerBase
 {
     private readonly SupabaseClient _db;
+    private readonly IEnumerable<IDiscoveryProvider> _discoveryProviders;
+    private readonly MarketDataOptionsProvider _marketData;
     private readonly ILogger<PipelineHealthController> _logger;
 
-    public PipelineHealthController(SupabaseClient db, ILogger<PipelineHealthController> logger)
+    public PipelineHealthController(
+        SupabaseClient db,
+        IEnumerable<IDiscoveryProvider> discoveryProviders,
+        MarketDataOptionsProvider marketData,
+        ILogger<PipelineHealthController> logger)
     {
         _db = db;
+        _discoveryProviders = discoveryProviders;
+        _marketData = marketData;
         _logger = logger;
     }
 
@@ -40,7 +51,7 @@ public class PipelineHealthController : ControllerBase
                 order: "started_at.desc",
                 limit: 5);
 
-            var todayRuns = recentRuns.Count(r => r["started_at"]?.ToString()?.StartsWith(today) == true);
+            var todayRuns = recentRuns.Count(r => r["started_at"]?.GetValue<string>()?.StartsWith(today) == true);
             checks["morningScansToday"] = todayRuns;
             checks["morningScansLast24h"] = recentRuns.Count;
 
@@ -136,6 +147,53 @@ public class PipelineHealthController : ControllerBase
         catch (Exception ex)
         {
             warnings.Add($"Could not check schema: {ex.Message}");
+        }
+
+        // 7. Data provider connectivity
+        try
+        {
+            var providers = new Dictionary<string, object>();
+            foreach (var p in _discoveryProviders)
+            {
+                providers[p.ProviderId] = new { configured = p.IsConfigured };
+                if (!p.IsConfigured)
+                    warnings.Add($"Discovery provider '{p.ProviderId}' is not configured.");
+            }
+            providers["marketdata_options"] = new { configured = _marketData.IsConfigured };
+            if (!_marketData.IsConfigured)
+                warnings.Add("MarketData.app options provider is not configured.");
+
+            checks["providers"] = providers;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Could not check providers: {ex.Message}");
+        }
+
+        // 8. Discovery events — are discoveries happening?
+        try
+        {
+            var discoveryCount = await _db.CountAsync("discovery_events",
+                $"timestamp=gte.{yesterday}");
+            checks["discoveryEventsLast24h"] = discoveryCount;
+            if (discoveryCount == 0)
+                warnings.Add("No discovery events in the last 24 hours.");
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Could not check discovery_events: {ex.Message}");
+        }
+
+        // 9. Evidence records — is evidence being recorded?
+        try
+        {
+            var evidenceCount = await _db.CountAsync("evidence_records",
+                $"observed_at=gte.{yesterday}");
+            checks["evidenceRecordsLast24h"] = evidenceCount;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add($"Could not check evidence_records: {ex.Message}");
         }
 
         var status = warnings.Count == 0 ? "healthy"
