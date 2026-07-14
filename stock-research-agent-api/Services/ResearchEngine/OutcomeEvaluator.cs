@@ -237,30 +237,22 @@ public class OutcomeEvaluator
         var now = DateTimeOffset.UtcNow;
         foreach (var prediction in openPredictions)
         {
-            // Non-directional predictions: evaluate watch_only as abstention decisions,
-            // expire everything else (scan results with no directional lean).
+            // Non-directional predictions: leave neutral types (watch_only,
+            // neutral_no_edge, neutral_high_volatility, neutral_range_bound)
+            // for NeutralOutcomeEvaluator which does proper timeframe-gated
+            // evaluation. Expire truly unevaluable types (rejected, unavailable).
             if (!PredictionCategoryHelper.IsDirectional(prediction.PredictionType))
             {
                 if (prediction.PredictionType == PredictionType.watch_only
                     || prediction.PredictionType == PredictionType.neutral_no_edge
-                    || prediction.PredictionType == PredictionType.neutral_high_volatility)
+                    || prediction.PredictionType == PredictionType.neutral_high_volatility
+                    || prediction.PredictionType == PredictionType.neutral_range_bound
+                    || prediction.PredictionType == PredictionType.neutral)
                 {
-                    // These had a directional lean but were downgraded — evaluate them
-                    // as abstention decisions so we can calibrate our guardrails.
-                    try
-                    {
-                        var watchResult = await EvaluateAbstentionAsync(prediction);
-                        if (watchResult is not null)
-                        {
-                            evaluated.Add(watchResult);
-                            continue;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        errors.Add($"{prediction.Ticker} (watch): {ex.Message}");
-                        continue;
-                    }
+                    // Handled by NeutralOutcomeEvaluator in EOD Step 6 —
+                    // skip here so they stay open until the proper time window elapses.
+                    skipped.Add($"{prediction.Ticker}: neutral ({prediction.PredictionType}), deferred to neutral evaluator");
+                    continue;
                 }
 
                 await _repo.UpdatePredictionStatusAsync(prediction.Id, "expired");

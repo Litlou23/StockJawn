@@ -1178,20 +1178,78 @@ public class ChatToolsController : ControllerBase
         {
             // Forward to the jobs controller endpoint internally
             var baseUrl = $"{Request.Scheme}://{Request.Host}";
-            var jobSecret = HttpContext.RequestServices.GetRequiredService<IConfiguration>()["JobSecret"] ?? "";
+            var jobSecret = HttpContext.RequestServices.GetRequiredService<IConfiguration>()["JOB_RUN_SECRET"] ?? "";
             using var client = new HttpClient();
             client.DefaultRequestHeaders.Add("X-Job-Secret", jobSecret);
             var resp = await client.PostAsync($"{baseUrl}/api/research-jobs/run-discovery",
                 new StringContent("{}", System.Text.Encoding.UTF8, "application/json"));
 
+            if (!resp.IsSuccessStatusCode)
+            {
+                return Ok(new
+                {
+                    tool_name = "run_discovery",
+                    as_of = Now(),
+                    summary = $"Discovery trigger returned {resp.StatusCode}.",
+                    data = new { triggered = false },
+                    warnings = new List<string>(),
+                });
+            }
+
+            // Wait briefly for the background Task.Run to call MarkStarted,
+            // then poll until it transitions to completed/failed.
+            var maxWait = TimeSpan.FromSeconds(90);
+            var pollInterval = TimeSpan.FromSeconds(2);
+            var started = DateTimeOffset.UtcNow;
+            var seenRunning = false;
+
+            // Give the background task a moment to start
+            await Task.Delay(500);
+
+            while (DateTimeOffset.UtcNow - started < maxWait)
+            {
+                var status = _jobStatus.GetStatus("discovery");
+
+                if (status?.State == "running")
+                {
+                    seenRunning = true;
+                }
+                // Only treat completed/failed as final if we saw it transition
+                // through running first (avoids stale state from a prior run)
+                else if (seenRunning && status?.State == "completed")
+                {
+                    return Ok(new
+                    {
+                        tool_name = "run_discovery",
+                        as_of = Now(),
+                        summary = $"Discovery completed in {status.DurationSeconds:F1}s. {status.Summary}",
+                        data = new { triggered = true, completed = true, duration = status.DurationSeconds, detail = status.Summary },
+                        warnings = new List<string>(),
+                    });
+                }
+                else if (seenRunning && status?.State == "failed")
+                {
+                    return Ok(new
+                    {
+                        tool_name = "run_discovery",
+                        as_of = Now(),
+                        summary = $"Discovery failed after {status.DurationSeconds:F1}s: {status.Error}",
+                        data = new { triggered = true, completed = false, error = status.Error },
+                        warnings = new List<string> { status.Error ?? "Unknown error" },
+                    });
+                }
+
+                await Task.Delay(pollInterval);
+            }
+
+            // Timed out waiting — still running
+            var lastStatus = _jobStatus.GetStatus("discovery");
             return Ok(new
             {
                 tool_name = "run_discovery",
                 as_of = Now(),
-                summary = resp.IsSuccessStatusCode
-                    ? "Discovery scan triggered successfully. It runs in the background — check job statuses for progress."
-                    : $"Discovery trigger returned {resp.StatusCode}.",
-                data = new { triggered = resp.IsSuccessStatusCode },
+                summary = $"Discovery is still running after 90s. Current state: {lastStatus?.State ?? "unknown"}. Check job statuses later for results.",
+                data = new { triggered = true, completed = false, still_running = true },
                 warnings = new List<string>(),
             });
         }
