@@ -553,6 +553,208 @@ public class ResearchRepository
         return rows.Count > 0;
     }
 
+    // -----------------------------------------------------------------------
+    // Volatility Assessments
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> SaveVolatilityAssessmentAsync(VolatilityOpportunityAssessment a, string runId)
+    {
+        try
+        {
+            await _db.InsertAsync("volatility_assessments", new
+            {
+                run_id = runId,
+                ticker = a.Ticker,
+                atr_percentile = a.AtrPercentile,
+                atr_acceleration = a.AtrAcceleration,
+                bandwidth_percentile = a.BandwidthPercentile,
+                bandwidth_direction = a.BandwidthDirection,
+                stock_volatility_regime = a.StockVolRegime.ToString(),
+                gap_percent = a.GapPercent,
+                gap_direction = a.GapDir.ToString(),
+                gap_type = a.GapClassification.ToString(),
+                gap_with_volume = a.GapWithVolume,
+                distance_from_support = a.DistanceFromSupport,
+                distance_from_resistance = a.DistanceFromResistance,
+                volume_ratio_persistence = a.VolumeRatioPersistence,
+                catalyst_age_hours = a.CatalystAgeHours,
+                opportunity_type = a.Opportunity.ToString(),
+                opportunity_score = a.OpportunityScore,
+                volatility_risk_modifier = a.RiskModifier,
+                features_skipped = a.FeaturesSkipped.ToArray(),
+                bars_used_for_history = a.BarsUsedForHistory,
+            }, returnRows: false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[research-repo] Failed to save volatility assessment for {Ticker}", a.Ticker);
+            return false;
+        }
+    }
+
+    public async Task<VolatilityOpportunityAssessment?> GetAssessmentAsync(string ticker, string runId)
+    {
+        var row = await _db.SelectSingleAsync("volatility_assessments",
+            filter: $"ticker=eq.{ticker}&run_id=eq.{runId}");
+        return row is not null ? MapVolatilityAssessment(row) : null;
+    }
+
+    public async Task<List<VolatilityOpportunityAssessment>> GetAssessmentsByTickerAsync(string ticker, int limit = 60)
+    {
+        var rows = await _db.SelectAsync("volatility_assessments",
+            filter: $"ticker=eq.{ticker}", order: "created_at.desc", limit: limit);
+        return rows.Select(MapVolatilityAssessment).ToList();
+    }
+
+    public async Task<List<VolatilityOpportunityAssessment>> GetAssessmentsByRunAsync(string runId)
+    {
+        var rows = await _db.SelectAsync("volatility_assessments",
+            filter: $"run_id=eq.{runId}", order: "ticker.asc");
+        return rows.Select(MapVolatilityAssessment).ToList();
+    }
+
+    private static VolatilityOpportunityAssessment MapVolatilityAssessment(JsonObject r)
+    {
+        return new VolatilityOpportunityAssessment
+        {
+            Ticker = r["ticker"]?.ToString() ?? "",
+            AssessedAt = r["created_at"] is JsonValue v && DateTimeOffset.TryParse(v.ToString(), out var dt)
+                ? dt : DateTimeOffset.UtcNow,
+            AtrPercentile = r["atr_percentile"]?.GetValue<double?>(),
+            AtrAcceleration = r["atr_acceleration"]?.GetValue<double?>(),
+            BandwidthPercentile = r["bandwidth_percentile"]?.GetValue<double?>(),
+            BandwidthDirection = r["bandwidth_direction"]?.GetValue<double?>(),
+            StockVolRegime = Enum.TryParse<StockVolatilityRegime>(r["stock_volatility_regime"]?.ToString(), out var regime)
+                ? regime : StockVolatilityRegime.Unknown,
+            GapPercent = r["gap_percent"]?.GetValue<double?>(),
+            GapDir = Enum.TryParse<GapDirection>(r["gap_direction"]?.ToString(), out var gd)
+                ? gd : GapDirection.None,
+            GapClassification = Enum.TryParse<GapType>(r["gap_type"]?.ToString(), out var gt)
+                ? gt : GapType.NoGap,
+            GapWithVolume = r["gap_with_volume"]?.GetValue<bool>() ?? false,
+            DistanceFromSupport = r["distance_from_support"]?.GetValue<double?>(),
+            DistanceFromResistance = r["distance_from_resistance"]?.GetValue<double?>(),
+            VolumeRatioPersistence = r["volume_ratio_persistence"]?.GetValue<double?>(),
+            CatalystAgeHours = r["catalyst_age_hours"]?.GetValue<double?>(),
+            Opportunity = Enum.TryParse<OpportunityType>(r["opportunity_type"]?.ToString(), out var ot)
+                ? ot : OpportunityType.None,
+            OpportunityScore = r["opportunity_score"]?.GetValue<double>() ?? 0,
+            RiskModifier = r["volatility_risk_modifier"]?.GetValue<double>() ?? 0,
+            FeaturesSkipped = r["features_skipped"] is JsonArray arr
+                ? arr.Select(x => x?.ToString() ?? "").ToList()
+                : [],
+            BarsUsedForHistory = r["bars_used_for_history"]?.GetValue<int>() ?? 0,
+        };
+    }
+
+    // -----------------------------------------------------------------------
+    // Volatility Learning Stats
+    // -----------------------------------------------------------------------
+
+    public async Task<bool> SaveVolatilityLearningRecordAsync(VolatilityLearningRecord rec)
+    {
+        try
+        {
+            await _db.InsertAsync("volatility_learning_stats", new
+            {
+                prediction_id = rec.PredictionId,
+                run_id = rec.RunId,
+                ticker = rec.Ticker,
+                opportunity_type = rec.OpportunityType,
+                opportunity_score = rec.OpportunityScore,
+                stock_volatility_regime = rec.StockVolatilityRegime,
+                atr_percentile = rec.AtrPercentile,
+                atr_acceleration = rec.AtrAcceleration,
+                bandwidth_percentile = rec.BandwidthPercentile,
+                gap_type = rec.GapType,
+                gap_percent = rec.GapPercent,
+                catalyst_age_hours = rec.CatalystAgeHours,
+                confidence = rec.Confidence,
+                risk = rec.Risk,
+                prediction_type = rec.PredictionType,
+                time_window = rec.TimeWindow,
+                direction_correct = rec.DirectionCorrect,
+                outcome_score = rec.OutcomeScore,
+                holding_period_hours = rec.HoldingPeriodHours,
+                max_favorable_excursion = rec.MaxFavorableExcursion,
+                max_adverse_excursion = rec.MaxAdverseExcursion,
+                time_to_3pct = rec.TimeTo3Pct,
+                time_to_5pct = rec.TimeTo5Pct,
+                time_to_target = rec.TimeToTarget,
+                recovery_speed = rec.RecoverySpeed,
+                bounce_quality_realized = rec.BounceQualityRealized,
+                opportunity_success = rec.OpportunitySuccess,
+                opportunity_success_reason = rec.OpportunitySuccessReason,
+            }, returnRows: false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[research-repo] Failed to save volatility learning record for {Ticker}", rec.Ticker);
+            return false;
+        }
+    }
+
+    public async Task<List<VolatilityLearningRecord>> GetLearningByTickerAsync(string ticker, int limit = 60)
+    {
+        var rows = await _db.SelectAsync("volatility_learning_stats",
+            filter: $"ticker=eq.{ticker}", order: "created_at.desc", limit: limit);
+        return rows.Select(MapLearningRecord).ToList();
+    }
+
+    public async Task<List<VolatilityLearningRecord>> GetLearningByOpportunityTypeAsync(string opportunityType, int limit = 100)
+    {
+        var rows = await _db.SelectAsync("volatility_learning_stats",
+            filter: $"opportunity_type=eq.{opportunityType}", order: "created_at.desc", limit: limit);
+        return rows.Select(MapLearningRecord).ToList();
+    }
+
+    public async Task<List<VolatilityLearningRecord>> GetAllVolatilityLearningStatsAsync(int limit = 1000, int? windowDays = null)
+    {
+        var filter = windowDays.HasValue
+            ? $"created_at=gte.{DateTimeOffset.UtcNow.AddDays(-windowDays.Value):yyyy-MM-dd}"
+            : null;
+        var rows = await _db.SelectAsync("volatility_learning_stats",
+            filter: filter, order: "created_at.desc", limit: limit);
+        return rows.Select(MapLearningRecord).ToList();
+    }
+
+    private static VolatilityLearningRecord MapLearningRecord(JsonObject r)
+    {
+        return new VolatilityLearningRecord
+        {
+            PredictionId = r["prediction_id"]?.ToString() ?? "",
+            RunId = r["run_id"]?.ToString() ?? "",
+            Ticker = r["ticker"]?.ToString() ?? "",
+            OpportunityType = r["opportunity_type"]?.ToString(),
+            OpportunityScore = r["opportunity_score"]?.GetValue<double?>(),
+            StockVolatilityRegime = r["stock_volatility_regime"]?.ToString(),
+            AtrPercentile = r["atr_percentile"]?.GetValue<double?>(),
+            AtrAcceleration = r["atr_acceleration"]?.GetValue<double?>(),
+            BandwidthPercentile = r["bandwidth_percentile"]?.GetValue<double?>(),
+            GapType = r["gap_type"]?.ToString(),
+            GapPercent = r["gap_percent"]?.GetValue<double?>(),
+            CatalystAgeHours = r["catalyst_age_hours"]?.GetValue<double?>(),
+            Confidence = r["confidence"]?.GetValue<int>() ?? 0,
+            Risk = r["risk"]?.GetValue<int>() ?? 0,
+            PredictionType = r["prediction_type"]?.ToString(),
+            TimeWindow = r["time_window"]?.ToString(),
+            DirectionCorrect = r["direction_correct"]?.GetValue<bool?>(),
+            OutcomeScore = r["outcome_score"]?.GetValue<double?>(),
+            HoldingPeriodHours = r["holding_period_hours"]?.GetValue<double?>(),
+            MaxFavorableExcursion = r["max_favorable_excursion"]?.GetValue<double?>(),
+            MaxAdverseExcursion = r["max_adverse_excursion"]?.GetValue<double?>(),
+            TimeTo3Pct = r["time_to_3pct"]?.GetValue<int?>(),
+            TimeTo5Pct = r["time_to_5pct"]?.GetValue<int?>(),
+            TimeToTarget = r["time_to_target"]?.GetValue<int?>(),
+            RecoverySpeed = r["recovery_speed"]?.GetValue<double?>(),
+            BounceQualityRealized = r["bounce_quality_realized"]?.ToString(),
+            OpportunitySuccess = r["opportunity_success"]?.GetValue<bool?>(),
+            OpportunitySuccessReason = r["opportunity_success_reason"]?.ToString(),
+        };
+    }
+
     public async Task<EnhancedLearningReport?> GetLatestLearningReportAsync()
     {
         var rows = await _db.SelectAsync("learning_reports",

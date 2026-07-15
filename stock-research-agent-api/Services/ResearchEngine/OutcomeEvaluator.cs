@@ -221,6 +221,11 @@ public class OutcomeEvaluator
             Lesson = lesson,
         };
 
+        // Volatility learning — non-blocking, best-effort
+        _ = CreateVolatilityLearningRecordAsync(
+            prediction, outcome, startPrice,
+            Math.Round(maxFavorable, 2), Math.Round(maxAdverse, 2));
+
         return new EvaluationResult(prediction.Id, prediction.Ticker, outcome, true);
     }
 
@@ -694,5 +699,279 @@ public class OutcomeEvaluator
             parts.Add($"Contradictory: confidence {prediction.ConfidenceScore} with risk {prediction.RiskScore} — these should be inversely related.");
 
         return string.Join(" ", parts);
+    }
+
+    // -----------------------------------------------------------------------
+    // Volatility learning record creation
+    // -----------------------------------------------------------------------
+
+    private async Task CreateVolatilityLearningRecordAsync(
+        PredictionCandidate prediction,
+        PredictionOutcome outcome,
+        double startPrice,
+        double maxFavorable,
+        double maxAdverse)
+    {
+        try
+        {
+            var assessment = await _repo.GetAssessmentAsync(prediction.Ticker, prediction.RunId);
+            if (assessment is null)
+            {
+                _logger.LogDebug("[outcome-evaluator] {Ticker}: no VOE assessment for run {RunId}, skipping learning record",
+                    prediction.Ticker, prediction.RunId);
+                return;
+            }
+
+            // Fetch bars since prediction for time-to-move computation
+            var bars = await _marketData.GetRecentBarsAsync(prediction.Ticker, 60);
+            var predDate = prediction.CreatedAt.Date;
+            var barsAfterEntry = bars
+                .Where(b => DateTime.TryParse(b.Date, out var d) && d > predDate)
+                .OrderBy(b => b.Date)
+                .ToList();
+
+            var isBullish = prediction.PredictionType == PredictionType.bullish;
+
+            var timeTo3 = ComputeTimeToMove(barsAfterEntry, startPrice, 3.0, isBullish);
+            var timeTo5 = ComputeTimeToMove(barsAfterEntry, startPrice, 5.0, isBullish);
+            var timeToTarget = prediction.TargetPrice is double tp and > 0
+                ? ComputeTimeToTarget(barsAfterEntry, tp, isBullish)
+                : null;
+
+            var holdingHours = (DateTimeOffset.UtcNow - prediction.CreatedAt).TotalHours;
+
+            var recoverySpeed = ComputeRecoverySpeed(barsAfterEntry, startPrice, isBullish);
+            var bounceQuality = ClassifyBounceQuality(maxFavorable, maxAdverse, outcome.DirectionCorrect);
+
+            var (oppSuccess, oppReason) = EvaluateOpportunitySuccess(
+                assessment, outcome, maxFavorable, barsAfterEntry, startPrice, isBullish);
+
+            var record = new VolatilityLearningRecord
+            {
+                PredictionId = prediction.Id,
+                RunId = prediction.RunId,
+                Ticker = prediction.Ticker,
+                OpportunityType = assessment.Opportunity.ToString(),
+                OpportunityScore = assessment.OpportunityScore,
+                StockVolatilityRegime = assessment.StockVolRegime.ToString(),
+                AtrPercentile = assessment.AtrPercentile,
+                AtrAcceleration = assessment.AtrAcceleration,
+                BandwidthPercentile = assessment.BandwidthPercentile,
+                GapType = assessment.GapClassification.ToString(),
+                GapPercent = assessment.GapPercent,
+                CatalystAgeHours = assessment.CatalystAgeHours,
+                Confidence = prediction.ConfidenceScore,
+                Risk = prediction.RiskScore,
+                PredictionType = prediction.PredictionType.ToString(),
+                TimeWindow = prediction.TimeWindow,
+                DirectionCorrect = outcome.DirectionCorrect,
+                OutcomeScore = outcome.OutcomeScore,
+                HoldingPeriodHours = Math.Round(holdingHours, 1),
+                MaxFavorableExcursion = maxFavorable,
+                MaxAdverseExcursion = maxAdverse,
+                TimeTo3Pct = timeTo3,
+                TimeTo5Pct = timeTo5,
+                TimeToTarget = timeToTarget,
+                RecoverySpeed = recoverySpeed,
+                BounceQualityRealized = bounceQuality.ToString(),
+                OpportunitySuccess = oppSuccess,
+                OpportunitySuccessReason = oppReason,
+            };
+
+            await _repo.SaveVolatilityLearningRecordAsync(record);
+
+            _logger.LogInformation(
+                "[outcome-evaluator] {Ticker}: VOE learning — opportunity={Opp}, success={Success}, bounce={Bounce}, timeTo3={T3}, timeTo5={T5}, direction={Dir}",
+                prediction.Ticker,
+                assessment.Opportunity,
+                oppSuccess?.ToString() ?? "n/a",
+                bounceQuality,
+                timeTo3?.ToString() ?? "n/a",
+                timeTo5?.ToString() ?? "n/a",
+                outcome.DirectionCorrect == true ? "correct" : "wrong");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[outcome-evaluator] {Ticker}: volatility learning record failed (non-blocking)", prediction.Ticker);
+        }
+    }
+
+    // bars ordered chronologically (oldest first)
+    private static int? ComputeTimeToMove(
+        List<MarketSnapshotBar> bars, double entryPrice, double targetPct, bool isBullish)
+    {
+        for (int i = 0; i < bars.Count; i++)
+        {
+            var bar = bars[i];
+            double movePct = isBullish
+                ? ((bar.High - entryPrice) / entryPrice) * 100
+                : ((entryPrice - bar.Low) / entryPrice) * 100;
+            if (movePct >= targetPct) return i + 1;
+        }
+        return null;
+    }
+
+    private static int? ComputeTimeToTarget(
+        List<MarketSnapshotBar> bars, double targetPrice, bool isBullish)
+    {
+        for (int i = 0; i < bars.Count; i++)
+        {
+            var bar = bars[i];
+            bool hit = isBullish ? bar.High >= targetPrice : bar.Low <= targetPrice;
+            if (hit) return i + 1;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// How quickly price recovered from max adverse excursion.
+    /// 1.0 = recovered fully within 1 bar, lower = slower recovery.
+    /// Null if no adverse excursion occurred.
+    /// </summary>
+    private static double? ComputeRecoverySpeed(
+        List<MarketSnapshotBar> bars, double entryPrice, bool isBullish)
+    {
+        if (bars.Count < 2) return null;
+
+        int worstBar = -1;
+        double worstAdverse = 0;
+        for (int i = 0; i < bars.Count; i++)
+        {
+            double adverse = isBullish
+                ? ((entryPrice - bars[i].Low) / entryPrice) * 100
+                : ((bars[i].High - entryPrice) / entryPrice) * 100;
+            if (adverse > worstAdverse)
+            {
+                worstAdverse = adverse;
+                worstBar = i;
+            }
+        }
+
+        if (worstAdverse < 0.5 || worstBar < 0) return null;
+
+        // Count bars after worst point to recover back to entry
+        int barsToRecover = 0;
+        for (int i = worstBar + 1; i < bars.Count; i++)
+        {
+            barsToRecover++;
+            double price = isBullish ? bars[i].Close : bars[i].Close;
+            bool recovered = isBullish ? price >= entryPrice : price <= entryPrice;
+            if (recovered) return Math.Round(1.0 / barsToRecover, 3);
+        }
+
+        // Never recovered — speed based on how far back it got
+        if (barsToRecover == 0) return 0;
+        var lastClose = bars[^1].Close;
+        double remainingAdverse = isBullish
+            ? ((entryPrice - lastClose) / entryPrice) * 100
+            : ((lastClose - entryPrice) / entryPrice) * 100;
+        if (remainingAdverse <= 0) return Math.Round(1.0 / barsToRecover, 3);
+        return Math.Round((1.0 - remainingAdverse / worstAdverse) / barsToRecover, 3);
+    }
+
+    private static BounceQuality ClassifyBounceQuality(
+        double maxFavorable, double maxAdverse, bool? directionCorrect)
+    {
+        if (directionCorrect != true) return BounceQuality.None;
+
+        // Ratio of favorable to adverse movement
+        if (maxAdverse < 0.5) return maxFavorable > 2 ? BounceQuality.Excellent : BounceQuality.Good;
+        var ratio = maxFavorable / Math.Max(maxAdverse, 0.1);
+        return ratio switch
+        {
+            >= 5.0 => BounceQuality.Excellent,
+            >= 2.5 => BounceQuality.Good,
+            >= 1.0 => BounceQuality.Fair,
+            _ => BounceQuality.Poor,
+        };
+    }
+
+    private static (bool? Success, string? Reason) EvaluateOpportunitySuccess(
+        VolatilityOpportunityAssessment assessment,
+        PredictionOutcome outcome,
+        double maxFavorable,
+        List<MarketSnapshotBar> barsAfterEntry,
+        double entryPrice,
+        bool isBullish)
+    {
+        if (assessment.Opportunity == OpportunityType.None)
+            return (null, null);
+
+        return assessment.Opportunity switch
+        {
+            OpportunityType.DipAfterPanic => EvalDipAfterPanic(outcome, maxFavorable, isBullish),
+            OpportunityType.MomentumContinuation => EvalMomentumContinuation(outcome, maxFavorable),
+            OpportunityType.SqueezeBreakout => EvalSqueezeBreakout(outcome, maxFavorable, barsAfterEntry, entryPrice),
+            OpportunityType.MeanReversion => EvalMeanReversion(outcome, maxFavorable),
+            OpportunityType.VolatilityTrap => EvalVolatilityTrap(outcome, isBullish),
+            OpportunityType.FailedBounce => EvalFailedBounce(outcome, isBullish),
+            _ => (null, "Unknown opportunity type"),
+        };
+    }
+
+    private static (bool?, string?) EvalDipAfterPanic(PredictionOutcome outcome, double maxFavorable, bool isBullish)
+    {
+        if (!isBullish) return (null, "DipAfterPanic expects bullish prediction");
+        if (outcome.DirectionCorrect == true && maxFavorable >= 3.0)
+            return (true, $"Price recovered {maxFavorable:F1}% from panic dip");
+        if (outcome.DirectionCorrect == true)
+            return (true, $"Price recovered {maxFavorable:F1}% — partial recovery");
+        return (false, "Price did not recover from dip");
+    }
+
+    private static (bool?, string?) EvalMomentumContinuation(PredictionOutcome outcome, double maxFavorable)
+    {
+        if (outcome.DirectionCorrect == true && maxFavorable >= 2.0)
+            return (true, $"Momentum continued — {maxFavorable:F1}% favorable move");
+        if (outcome.DirectionCorrect == true)
+            return (true, $"Momentum continued modestly — {maxFavorable:F1}%");
+        return (false, "Momentum did not continue");
+    }
+
+    private static (bool?, string?) EvalSqueezeBreakout(
+        PredictionOutcome outcome, double maxFavorable,
+        List<MarketSnapshotBar> bars, double entryPrice)
+    {
+        // Did expansion actually occur? Check if range expanded after prediction
+        if (bars.Count < 3) return (null, "Insufficient bars to evaluate squeeze breakout");
+
+        var avgRange = bars.Take(Math.Min(5, bars.Count))
+            .Average(b => (b.High - b.Low) / entryPrice * 100);
+        bool expanded = avgRange > 1.5; // meaningful expansion
+
+        if (expanded && outcome.DirectionCorrect == true)
+            return (true, $"Squeeze broke out — avg range {avgRange:F2}%, favorable {maxFavorable:F1}%");
+        if (!expanded)
+            return (false, $"No expansion after squeeze — avg range only {avgRange:F2}%");
+        return (false, "Expansion occurred but direction was wrong");
+    }
+
+    private static (bool?, string?) EvalMeanReversion(PredictionOutcome outcome, double maxFavorable)
+    {
+        if (outcome.DirectionCorrect == true && maxFavorable >= 1.5)
+            return (true, $"Price reverted toward mean — {maxFavorable:F1}% favorable");
+        if (outcome.DirectionCorrect == true)
+            return (true, $"Partial mean reversion — {maxFavorable:F1}%");
+        return (false, "Mean reversion did not materialize");
+    }
+
+    private static (bool?, string?) EvalVolatilityTrap(PredictionOutcome outcome, bool isBullish)
+    {
+        // VolatilityTrap expects bearish — price continues failing
+        if (!isBullish && outcome.DirectionCorrect == true)
+            return (true, "Correctly identified volatility trap — price continued lower");
+        if (isBullish && outcome.DirectionCorrect == false)
+            return (true, "Volatility trap — bullish signal was false");
+        return (false, "Volatility trap classification was incorrect");
+    }
+
+    private static (bool?, string?) EvalFailedBounce(PredictionOutcome outcome, bool isBullish)
+    {
+        // FailedBounce expects bearish — recovery fails
+        if (!isBullish && outcome.DirectionCorrect == true)
+            return (true, "Bounce failed as predicted — price resumed decline");
+        if (isBullish && outcome.DirectionCorrect == false)
+            return (true, "Bounce failed — bullish call was wrong");
+        return (false, "Bounce actually succeeded — FailedBounce was wrong");
     }
 }

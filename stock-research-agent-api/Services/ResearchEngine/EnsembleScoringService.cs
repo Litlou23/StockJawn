@@ -84,7 +84,8 @@ public class EnsembleScoringService
         List<string> lessons,
         List<ResearchSignal>? researchSignals = null,
         MarketIntelligenceContext? intelligence = null,
-        ResearchUniverseContext? researchUniverse = null)
+        ResearchUniverseContext? researchUniverse = null,
+        VolatilityOpportunityAssessment? volatilityAssessment = null)
     {
         var modelAccuracies = await GetModelAccuraciesAsync();
         var modelScores = new List<ModelScore>();
@@ -102,7 +103,7 @@ public class EnsembleScoringService
             }
 
             var result = _scoringEngine.Evaluate(
-                snapshot, indicators, benchmark, adjustedWeights, lessons, researchSignals, intelligence, researchUniverse);
+                snapshot, indicators, benchmark, adjustedWeights, lessons, researchSignals, intelligence, researchUniverse, volatilityAssessment);
 
             var accuracy = modelAccuracies.GetValueOrDefault(modelName, 0.5);
             // Weight = accuracy squared to amplify good models
@@ -118,7 +119,7 @@ public class EnsembleScoringService
         }
 
         // Blend results using performance-weighted average
-        var blended = BlendResults(modelScores);
+        var blended = BlendResults(modelScores, baseWeights);
 
         // Compute agreement: how many models agree on direction
         var directions = modelScores.Select(m => m.Result.WinningDirection).ToList();
@@ -163,7 +164,8 @@ public class EnsembleScoringService
         });
     }
 
-    private static ScoringEngine.ScoringResult BlendResults(List<ModelScore> scores)
+    private static ScoringEngine.ScoringResult BlendResults(
+        List<ModelScore> scores, Dictionary<string, double> weights)
     {
         var totalWeight = scores.Sum(s => s.ModelWeight);
         if (totalWeight == 0) totalWeight = 1;
@@ -186,11 +188,12 @@ public class EnsembleScoringService
             .ToList();
         if (nonPrimaryVotes.Count > 0 && nonPrimaryVotes.All(d => d != primary.WinningDirection && d != "neutral"))
         {
-            // All non-primary models disagree — use blended scores for direction
-            // but still delegate to ScoringEngine's margin constant (10)
+            // All non-primary models disagree — use blended scores for direction,
+            // reading configurable threshold from weights (same as ScoringEngine)
+            var minEdgeMargin = weights.GetValueOrDefault("min_edge_margin", 10.0);
             var margin = blendedBull - blendedBear;
-            direction = margin >= 10 ? "bullish"
-                : -margin >= 10 ? "bearish"
+            direction = margin >= minEdgeMargin ? "bullish"
+                : -margin >= minEdgeMargin ? "bearish"
                 : "neutral";
             if (direction == "neutral") predType = "neutral_no_edge";
         }

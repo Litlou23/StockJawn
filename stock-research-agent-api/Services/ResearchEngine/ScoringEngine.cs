@@ -22,8 +22,11 @@ public class ScoringEngine : IScoringEngine
     private readonly IConfidenceEngine _confidenceEngine;
     private readonly IRiskEngine _riskEngine;
 
-    private const double MinEdgeMargin = 10;
-    private const double MinScoreForDirection = 20;
+    // Defaults — overridable via scoring_weight_overrides keys:
+    //   min_edge_margin, min_score_for_direction, min_ratio_for_direction
+    private const double DefaultMinEdgeMargin = 10;
+    private const double DefaultMinScoreForDirection = 20;
+    private const double DefaultMinRatioForDirection = 1.4;
 
     public record ScoringResult
     {
@@ -115,7 +118,8 @@ public class ScoringEngine : IScoringEngine
         List<string> lessons,
         List<ResearchSignal>? researchSignals = null,
         MarketIntelligenceContext? intelligence = null,
-        ResearchUniverseContext? researchUniverse = null)
+        ResearchUniverseContext? researchUniverse = null,
+        VolatilityOpportunityAssessment? volatilityAssessment = null)
     {
         intelligence ??= new MarketIntelligenceContext
         {
@@ -132,7 +136,8 @@ public class ScoringEngine : IScoringEngine
             weights,
             lessons,
             researchSignals ?? [],
-            researchUniverse);
+            researchUniverse,
+            volatilityAssessment);
 
         var outputs = new List<EvaluatorOutput>
         {
@@ -148,7 +153,7 @@ public class ScoringEngine : IScoringEngine
 
         var tentativeBull = Math.Clamp(outputs.Sum(o => o.BullishContribution), 0, 100);
         var tentativeBear = Math.Clamp(outputs.Sum(o => o.BearishContribution), 0, 100);
-        var (winningDirection, predType) = DeterminePredictionType(tentativeBull, tentativeBear, snapshot, indicators);
+        var (winningDirection, predType) = DeterminePredictionType(tentativeBull, tentativeBear, snapshot, indicators, weights);
 
         var aggregate = _scoreAggregator.Aggregate(outputs, winningDirection, context);
         var riskAssessment = _riskEngine.Evaluate(context, predType);
@@ -507,27 +512,33 @@ public class ScoringEngine : IScoringEngine
     }
 
     private static (string WinningDirection, string PredictionType) DeterminePredictionType(
-        double bullishScore, double bearishScore, MarketSnapshot snapshot, TechnicalIndicators ind)
+        double bullishScore, double bearishScore, MarketSnapshot snapshot, TechnicalIndicators ind,
+        Dictionary<string, double>? weights = null)
     {
         if (!snapshot.DataAvailability.MarketDataAvailable && !snapshot.DataAvailability.NewsAvailable)
             return ("neutral", "unavailable");
 
+        // Read configurable thresholds from weights (set via scoring_weight_overrides),
+        // falling back to compile-time defaults so existing callers are unaffected.
+        var minEdgeMargin = weights?.GetValueOrDefault("min_edge_margin", DefaultMinEdgeMargin) ?? DefaultMinEdgeMargin;
+        var minScoreForDirection = weights?.GetValueOrDefault("min_score_for_direction", DefaultMinScoreForDirection) ?? DefaultMinScoreForDirection;
+        var minRatioForDirection = weights?.GetValueOrDefault("min_ratio_for_direction", DefaultMinRatioForDirection) ?? DefaultMinRatioForDirection;
+
         var margin = bullishScore - bearishScore;
 
-        if (bullishScore >= MinScoreForDirection && margin >= MinEdgeMargin)
+        if (bullishScore >= minScoreForDirection && margin >= minEdgeMargin)
             return ("bullish", "bullish");
 
-        if (bearishScore >= MinScoreForDirection && -margin >= MinEdgeMargin)
+        if (bearishScore >= minScoreForDirection && -margin >= minEdgeMargin)
             return ("bearish", "bearish");
 
-        const double MinRatioForDirection = 1.4;
-        const double MinScoreForRatio = 15;
-        if (bullishScore >= MinScoreForRatio && bearishScore >= MinScoreForRatio)
+        var minScoreForRatio = minScoreForDirection * 0.75; // scale with the main threshold
+        if (bullishScore >= minScoreForRatio && bearishScore >= minScoreForRatio)
         {
             var ratio = bullishScore / bearishScore;
-            if (ratio >= MinRatioForDirection)
+            if (ratio >= minRatioForDirection)
                 return ("bullish", "bullish");
-            if (1.0 / ratio >= MinRatioForDirection)
+            if (1.0 / ratio >= minRatioForDirection)
                 return ("bearish", "bearish");
         }
 

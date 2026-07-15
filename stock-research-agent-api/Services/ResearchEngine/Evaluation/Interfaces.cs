@@ -51,5 +51,6 @@ public interface IScoringEngine
         List<string> lessons,
         List<ResearchSignal>? researchSignals = null,
         MarketIntelligenceContext? intelligence = null,
-        ResearchUniverseContext? researchUniverse = null);
+        ResearchUniverseContext? researchUniverse = null,
+        VolatilityOpportunityAssessment? volatilityAssessment = null);
 }

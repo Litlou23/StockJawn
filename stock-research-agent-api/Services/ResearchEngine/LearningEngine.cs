@@ -14,7 +14,7 @@ namespace StockResearchAgent.Api.Services.ResearchEngine;
 public class LearningEngine
 {
     private const int MinObservationsForAdjustment = 50;
-    private const double MaxAdjustmentPercent = 0.20;   // ±20% max
+    private const double MaxAdjustmentPercent = 0.50;   // ±50% max — let the learning engine express conviction
     private const double MaxDailyMovement = 0.01;       // 1% per day
     private const double TimeDecayHalfLifeDays = 45.0;
 
@@ -37,6 +37,26 @@ public class LearningEngine
         "trend", "momentum", "volume", "volatility",
         "market_context", "catalyst", "learning", "research_signal"
     ];
+
+    /// <summary>
+    /// Neutral correctness threshold: abs move &lt; 2% means the neutral call was correct.
+    /// </summary>
+    private const double NeutralCorrectThreshold = 2.0;
+
+    /// <summary>
+    /// Determines whether a prediction was "correct" — works for both directional and neutral types.
+    /// Directional: uses DirectionCorrect from the outcome evaluator.
+    /// Neutral: abs percent move &lt; 2% means the "no edge" / "range bound" call was right.
+    /// Returns null if the outcome doesn't have enough data to determine correctness.
+    /// </summary>
+    private static bool? ResolveCorrectness(PredictionCandidate pred, PredictionOutcome outcome)
+    {
+        if (PredictionCategoryHelper.IsDirectional(pred.PredictionType))
+            return outcome.DirectionCorrect;
+        // Neutral: need PercentMove to evaluate
+        if (outcome.PercentMove is null) return null;
+        return Math.Abs(outcome.PercentMove.Value) < NeutralCorrectThreshold;
+    }
 
     private readonly ResearchRepository _repo;
     private readonly PatternDetectionService _patternDetection;
@@ -109,6 +129,11 @@ public class LearningEngine
         weightsAdjusted += patternAdjusted;
         weightChanges.AddRange(patternChanges);
 
+        // Stage 4c: Decision threshold optimization — learn optimal edge/score thresholds
+        var (thresholdAdjusted, thresholdChanges) = await OptimizeDecisionThresholdsAsync();
+        weightsAdjusted += thresholdAdjusted;
+        weightChanges.AddRange(thresholdChanges);
+
         // Stage 5: Setup Analytics — learn complete trade setups
         var setupStatsUpdated = await ComputeSetupPerformanceAsync();
 
@@ -116,8 +141,12 @@ public class LearningEngine
         var supersessionCount = await ComputeSupersessionAnalyticsAsync();
         var revisionAnalytics = await GetSupersessionAnalyticsAsync();
 
+        // Stage 5c: Volatility Opportunity Learning — learn which VOE opportunities are profitable
+        var voeSummary = await ComputeVolatilityOpportunityLearningAsync();
+        weightChanges.AddRange(voeSummary.WeightChanges);
+
         // Stage 6: Generate AI-summarized learning report
-        var aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges);
+        var aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges, voeSummary);
 
         // Stage 7: Generate structured insights (includes setup-level insights)
         var insights = await GenerateLearningInsightsAsync();
@@ -126,7 +155,8 @@ public class LearningEngine
                      $"{calibrationCount} calibration buckets, {correlationCount} correlations, " +
                      $"{influenceCount} influence stats, {interactionCount} interaction pairs, " +
                      $"{weightsAdjusted} weight adjustments, {setupStatsUpdated} setup stats, " +
-                     $"{supersessionCount} supersession records, {insights.Count} insights.";
+                     $"{supersessionCount} supersession records, {voeSummary.TotalRecords} VOE records, " +
+                     $"{insights.Count} insights.";
 
         _logger.LogInformation("[learning-engine] {Report}", report);
 
@@ -158,8 +188,14 @@ public class LearningEngine
 
         foreach (var pred in predictions)
         {
-            if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || outcome.DirectionCorrect is null)
+            if (!outcomeMap.TryGetValue(pred.Id, out var outcome))
                 continue;
+
+            // Determine correctness for both directional and neutral predictions
+            var resolvedCorrect = ResolveCorrectness(pred, outcome);
+            if (resolvedCorrect is null) continue; // not enough data to evaluate
+
+            var isNeutral = !PredictionCategoryHelper.IsDirectional(pred.PredictionType);
 
             // Skip if we already have observations for this prediction
             if (await _repo.HasObservationsForPredictionAsync(pred.Id))
@@ -182,8 +218,9 @@ public class LearningEngine
                     breakdown.TrendBullish, breakdown.TrendBearish, breakdown.MomentumBullish, breakdown.VolumeBullish);
             }
 
-            var direction = pred.PredictionType == PredictionType.bearish ? "bearish" : "bullish";
-            var correct = outcome.DirectionCorrect == true;
+            var direction = isNeutral ? "neutral"
+                : pred.PredictionType == PredictionType.bearish ? "bearish" : "bullish";
+            var correct = resolvedCorrect == true;
 
             // Pre-compute total weighted contribution for contribution_percent
             double totalContribution = 0;
@@ -191,7 +228,8 @@ public class LearningEngine
             foreach (var bucket in BucketNames)
             {
                 var (bull, bear) = GetBucketScores(breakdown, bucket);
-                var dominantScore = direction == "bullish" ? bull : bear;
+                var dominantScore = isNeutral ? (bull + bear) / 2.0
+                    : direction == "bullish" ? bull : bear;
                 var weight = DefaultBaseWeights.GetValueOrDefault(bucket, 1.0);
                 var contribution = dominantScore * weight;
                 bucketContributions[bucket] = contribution;
@@ -202,7 +240,8 @@ public class LearningEngine
             foreach (var bucket in BucketNames)
             {
                 var (bull, bear) = GetBucketScores(breakdown, bucket);
-                var dominantScore = direction == "bullish" ? bull : bear;
+                var dominantScore = isNeutral ? (bull + bear) / 2.0
+                    : direction == "bullish" ? bull : bear;
                 var weight = DefaultBaseWeights.GetValueOrDefault(bucket, 1.0);
                 var contribution = bucketContributions[bucket];
                 var contributionPct = totalContribution > 0
@@ -706,12 +745,12 @@ public class LearningEngine
         {
             var inBucket = predictions
                 .Where(p => p.ConfidenceScore >= min && p.ConfidenceScore < max
-                    && outcomeMap.ContainsKey(p.Id) && outcomeMap[p.Id].DirectionCorrect is not null)
+                    && outcomeMap.ContainsKey(p.Id) && ResolveCorrectness(p, outcomeMap[p.Id]) is not null)
                 .ToList();
 
             if (inBucket.Count < 3) continue;
 
-            var correct = inBucket.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
+            var correct = inBucket.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
             var actualAcc = (double)correct / inBucket.Count;
             var expectedAcc = (min + max) / 200.0;
             var calibError = actualAcc - expectedAcc;
@@ -857,7 +896,7 @@ public class LearningEngine
 
             foreach (var pw in predictionsWithOutcomes)
             {
-                if (pw.Outcome?.DirectionCorrect is null) continue;
+                if (pw.Outcome is null || ResolveCorrectness(pw.Prediction, pw.Outcome) is null) continue;
 
                 ScoringBreakdown? debug = null;
                 var capReason = "none";
@@ -878,7 +917,7 @@ public class LearningEngine
             {
                 if (items.Count < 5) continue; // need meaningful sample
 
-                var correct = items.Count(i => i.pw.Outcome!.DirectionCorrect == true);
+                var correct = items.Count(i => ResolveCorrectness(i.pw.Prediction, i.pw.Outcome!) == true);
                 var accuracy = (double)correct / items.Count;
                 var avgConf = (int)items.Average(i => i.pw.Prediction.ConfidenceScore);
                 var avgRisk = (int)items
@@ -946,7 +985,7 @@ public class LearningEngine
             {
                 var totalRiskCapped = riskCaps.Sum(g => g.Value.Count);
                 var totalRiskCorrect = riskCaps.Sum(g =>
-                    g.Value.Count(i => i.pw.Outcome?.DirectionCorrect == true));
+                    g.Value.Count(i => i.pw.Outcome is not null && ResolveCorrectness(i.pw.Prediction, i.pw.Outcome) == true));
                 var riskCapAcc = (double)totalRiskCorrect / totalRiskCapped;
                 // Direct calibration error: compare observed accuracy vs mean predicted confidence
                 var predictedProb = riskCaps.SelectMany(g => g.Value)
@@ -1156,6 +1195,183 @@ public class LearningEngine
     }
 
     // -----------------------------------------------------------------------
+    // Stage 4c: Decision Threshold Optimization
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Evaluates whether the decision thresholds (min_edge_margin, min_score_for_direction,
+    /// min_ratio_for_direction) should be adjusted based on prediction outcomes.
+    ///
+    /// The core question: are we making directional calls without enough edge (thresholds too low),
+    /// or leaving money on the table by calling things neutral (thresholds too high)?
+    ///
+    /// Stored in scoring_weight_overrides with base_weight = current default, effective_weight = the
+    /// actual threshold value the ScoringEngine reads.
+    /// </summary>
+    private async Task<(int Adjusted, List<WeightChangeSummary> Changes)> OptimizeDecisionThresholdsAsync()
+    {
+        var changes = new List<WeightChangeSummary>();
+
+        try
+        {
+            var predictions = await _repo.GetRecentPredictionsAsync(500);
+            var outcomes = await _repo.GetRecentOutcomesAsync(500);
+            var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+
+            // Split into directional vs neutral predictions that have outcomes
+            var directionalWithOutcomes = predictions
+                .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType)
+                    && outcomeMap.ContainsKey(p.Id))
+                .Select(p => (Pred: p, Outcome: outcomeMap[p.Id]))
+                .ToList();
+
+            var neutralWithOutcomes = predictions
+                .Where(p => !PredictionCategoryHelper.IsDirectional(p.PredictionType)
+                    && p.PredictionType != PredictionType.unavailable
+                    && outcomeMap.ContainsKey(p.Id)
+                    && outcomeMap[p.Id].PercentMove is not null)
+                .Select(p => (Pred: p, Outcome: outcomeMap[p.Id]))
+                .ToList();
+
+            if (directionalWithOutcomes.Count + neutralWithOutcomes.Count < 50)
+            {
+                _logger.LogInformation(
+                    "[learning-engine] Threshold optimization: insufficient data ({Count} predictions), skipping",
+                    directionalWithOutcomes.Count + neutralWithOutcomes.Count);
+                return (0, changes);
+            }
+
+            // Metric 1: Directional accuracy — if low, thresholds may be too loose
+            var directionalCorrect = directionalWithOutcomes.Count(x => x.Outcome.DirectionCorrect == true);
+            var directionalAccuracy = directionalWithOutcomes.Count > 0
+                ? (double)directionalCorrect / directionalWithOutcomes.Count : 0.5;
+
+            // Metric 2: Neutral miss rate — neutrals that moved >2% in either direction
+            var neutralMisses = neutralWithOutcomes
+                .Count(x => Math.Abs(x.Outcome.PercentMove!.Value) >= NeutralCorrectThreshold);
+            var neutralMissRate = neutralWithOutcomes.Count > 0
+                ? (double)neutralMisses / neutralWithOutcomes.Count : 0.0;
+
+            // Metric 3: Weak directional predictions — directional calls near the margin
+            // that ended up wrong (these would be filtered out by a higher threshold)
+            var weakDirectionalWrong = directionalWithOutcomes
+                .Where(x => x.Outcome.DirectionCorrect == false)
+                .Count(x =>
+                {
+                    var bull = x.Pred.BullishScore ?? 0;
+                    var bear = x.Pred.BearishScore ?? 0;
+                    var margin = Math.Abs(bull - bear);
+                    // "Weak" = within 4 points of the current edge margin threshold
+                    return margin < 14;
+                });
+
+            _logger.LogInformation(
+                "[learning-engine] Threshold analysis: directional accuracy={Accuracy:P1}, " +
+                "neutral miss rate={MissRate:P1}, weak directional wrong={WeakWrong}",
+                directionalAccuracy, neutralMissRate, weakDirectionalWrong);
+
+            // --- Compute target adjustment for min_edge_margin ---
+            // If directional accuracy < 45% AND there are weak wrong calls, raise the margin.
+            // If neutral miss rate > 40%, lower the margin (we're being too conservative).
+            var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+            var overrideMap = currentOverrides.ToDictionary(o => o.SignalName);
+
+            var currentEdgeMargin = overrideMap.TryGetValue("min_edge_margin", out var emOverride)
+                ? emOverride.EffectiveWeight : 10.0;
+
+            double targetEdgeMargin = currentEdgeMargin;
+
+            if (directionalAccuracy < 0.45 && weakDirectionalWrong >= 5)
+            {
+                // Poor accuracy with weak wrong calls → raise margin to filter them
+                targetEdgeMargin = Math.Min(currentEdgeMargin + 1.0, 18.0);
+            }
+            else if (directionalAccuracy > 0.55 && neutralMissRate > 0.35)
+            {
+                // Good accuracy but missing moves in neutrals → lower margin to catch more
+                targetEdgeMargin = Math.Max(currentEdgeMargin - 1.0, 6.0);
+            }
+
+            // Gradual movement: cap at 1.0 per cycle
+            var edgeDelta = Math.Clamp(targetEdgeMargin - currentEdgeMargin, -1.0, 1.0);
+            var newEdgeMargin = Math.Round(currentEdgeMargin + edgeDelta, 1);
+
+            if (Math.Abs(edgeDelta) >= 0.5)
+            {
+                var reason = $"Directional accuracy: {directionalAccuracy * 100:F1}% ({directionalWithOutcomes.Count} preds). " +
+                             $"Neutral miss rate: {neutralMissRate * 100:F1}% ({neutralWithOutcomes.Count} neutrals). " +
+                             $"Weak wrong calls: {weakDirectionalWrong}.";
+
+                await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+                {
+                    SignalName = "min_edge_margin",
+                    BaseWeight = 10.0, // original default
+                    AdjustmentPercent = (newEdgeMargin - 10.0) / 10.0,
+                    EffectiveWeight = newEdgeMargin,
+                    Confidence = Math.Min((double)(directionalWithOutcomes.Count + neutralWithOutcomes.Count) / 200.0, 1.0),
+                    SampleSize = directionalWithOutcomes.Count + neutralWithOutcomes.Count,
+                    Status = "active",
+                    Reason = reason,
+                });
+
+                changes.Add(new WeightChangeSummary
+                {
+                    SignalName = "min_edge_margin",
+                    PreviousWeight = currentEdgeMargin,
+                    NewWeight = newEdgeMargin,
+                    ChangePercent = edgeDelta / currentEdgeMargin * 100,
+                    Reason = reason,
+                });
+
+                _logger.LogInformation(
+                    "[learning-engine] Threshold update: min_edge_margin {Old} → {New} ({Reason})",
+                    currentEdgeMargin, newEdgeMargin, reason);
+            }
+
+            // --- min_score_for_direction: keep proportional to edge margin ---
+            // Default ratio is 20/10 = 2.0. Maintain that ratio as edge margin moves.
+            var currentScoreThreshold = overrideMap.TryGetValue("min_score_for_direction", out var sdOverride)
+                ? sdOverride.EffectiveWeight : 20.0;
+            var targetScoreThreshold = Math.Round(newEdgeMargin * 2.0, 1);
+            var scoreDelta = Math.Clamp(targetScoreThreshold - currentScoreThreshold, -2.0, 2.0);
+            var newScoreThreshold = Math.Round(currentScoreThreshold + scoreDelta, 1);
+
+            if (Math.Abs(scoreDelta) >= 1.0)
+            {
+                var reason = $"Tracking min_edge_margin at 2:1 ratio. Edge margin now {newEdgeMargin}.";
+
+                await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+                {
+                    SignalName = "min_score_for_direction",
+                    BaseWeight = 20.0,
+                    AdjustmentPercent = (newScoreThreshold - 20.0) / 20.0,
+                    EffectiveWeight = newScoreThreshold,
+                    Confidence = Math.Min((double)(directionalWithOutcomes.Count + neutralWithOutcomes.Count) / 200.0, 1.0),
+                    SampleSize = directionalWithOutcomes.Count + neutralWithOutcomes.Count,
+                    Status = "active",
+                    Reason = reason,
+                });
+
+                changes.Add(new WeightChangeSummary
+                {
+                    SignalName = "min_score_for_direction",
+                    PreviousWeight = currentScoreThreshold,
+                    NewWeight = newScoreThreshold,
+                    ChangePercent = scoreDelta / currentScoreThreshold * 100,
+                    Reason = reason,
+                });
+            }
+
+            return (changes.Count, changes);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to optimize decision thresholds");
+            return (0, changes);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Stage 5: Setup Analytics — learn complete trade setups
     // -----------------------------------------------------------------------
 
@@ -1177,7 +1393,7 @@ public class LearningEngine
 
             foreach (var pred in predictions)
             {
-                if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || outcome.DirectionCorrect is null)
+                if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || ResolveCorrectness(pred, outcome) is null)
                     continue;
 
                 // Parse scoring breakdown to extract signals
@@ -1202,16 +1418,16 @@ public class LearningEngine
             {
                 if (group.Count < 3) continue; // Need meaningful sample
 
-                var wins = group.Count(g => g.Outcome.DirectionCorrect == true);
+                var wins = group.Count(g => ResolveCorrectness(g.Pred, g.Outcome) == true);
                 var losses = group.Count - wins;
                 var winRate = (double)wins / group.Count;
 
                 var winReturns = group
-                    .Where(g => g.Outcome.DirectionCorrect == true && g.Outcome.PercentMove.HasValue)
+                    .Where(g => ResolveCorrectness(g.Pred, g.Outcome) == true && g.Outcome.PercentMove.HasValue)
                     .Select(g => Math.Abs(g.Outcome.PercentMove!.Value))
                     .ToList();
                 var lossReturns = group
-                    .Where(g => g.Outcome.DirectionCorrect == false && g.Outcome.PercentMove.HasValue)
+                    .Where(g => ResolveCorrectness(g.Pred, g.Outcome) == false && g.Outcome.PercentMove.HasValue)
                     .Select(g => -Math.Abs(g.Outcome.PercentMove!.Value))
                     .ToList();
 
@@ -1240,11 +1456,11 @@ public class LearningEngine
                 foreach (var regimeGroup in byRegime)
                 {
                     if (regimeGroup.Count() < 2) continue;
-                    var rWins = regimeGroup.Count(g => g.Outcome.DirectionCorrect == true);
+                    var rWins = regimeGroup.Count(g => ResolveCorrectness(g.Pred, g.Outcome) == true);
                     var rWinRate = (double)rWins / regimeGroup.Count();
-                    var rWinReturns = regimeGroup.Where(g => g.Outcome.DirectionCorrect == true && g.Outcome.PercentMove.HasValue)
+                    var rWinReturns = regimeGroup.Where(g => ResolveCorrectness(g.Pred, g.Outcome) == true && g.Outcome.PercentMove.HasValue)
                         .Select(g => Math.Abs(g.Outcome.PercentMove!.Value)).ToList();
-                    var rLossReturns = regimeGroup.Where(g => g.Outcome.DirectionCorrect == false && g.Outcome.PercentMove.HasValue)
+                    var rLossReturns = regimeGroup.Where(g => ResolveCorrectness(g.Pred, g.Outcome) == false && g.Outcome.PercentMove.HasValue)
                         .Select(g => -Math.Abs(g.Outcome.PercentMove!.Value)).ToList();
                     var rAvgWin = rWinReturns.Count > 0 ? rWinReturns.Average() : 0;
                     var rAvgLoss = rLossReturns.Count > 0 ? rLossReturns.Average() : 0;
@@ -1269,7 +1485,7 @@ public class LearningEngine
                 var recentGroup = group.Where(g => g.Pred.CreatedAt >= recentCutoff).ToList();
                 if (recentGroup.Count >= 3)
                 {
-                    var recentWinRate = (double)recentGroup.Count(g => g.Outcome.DirectionCorrect == true) / recentGroup.Count;
+                    var recentWinRate = (double)recentGroup.Count(g => ResolveCorrectness(g.Pred, g.Outcome) == true) / recentGroup.Count;
                     if (winRate - recentWinRate > 0.15) isTrusted = false; // degrading
                 }
 
@@ -1660,6 +1876,377 @@ public class LearningEngine
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Stage 5c: Volatility Opportunity Learning
+    // -----------------------------------------------------------------------
+
+    public async Task<VolatilityOpportunityLearningSummary> ComputeVolatilityOpportunityLearningAsync()
+    {
+        var summary = new VolatilityOpportunityLearningSummary();
+
+        try
+        {
+            var records = await _repo.GetAllVolatilityLearningStatsAsync(limit: 1000, windowDays: 90);
+            var resolved = records.Where(r => r.DirectionCorrect is not null).ToList();
+
+            summary.TotalRecords = resolved.Count;
+            if (resolved.Count < MinObservationsForAdjustment)
+            {
+                _logger.LogInformation(
+                    "[learning-engine] Stage 5c: {Count} resolved records < {Min} minimum, skipping",
+                    resolved.Count, MinObservationsForAdjustment);
+                return summary;
+            }
+
+            // Q1: Opportunity type performance
+            var byType = resolved
+                .Where(r => !string.IsNullOrEmpty(r.OpportunityType))
+                .GroupBy(r => r.OpportunityType!)
+                .Where(g => g.Count() >= 10)
+                .ToList();
+
+            foreach (var group in byType)
+            {
+                var correct = group.Count(r => r.DirectionCorrect == true);
+                var total = group.Count();
+                var winRate = (double)correct / total;
+                var successRate = group.Count(r => r.OpportunitySuccess == true) / (double)total;
+                var avgScore = group.Where(r => r.OutcomeScore.HasValue).Select(r => r.OutcomeScore!.Value).DefaultIfEmpty(0).Average();
+                var avgMfe = group.Where(r => r.MaxFavorableExcursion.HasValue).Select(r => r.MaxFavorableExcursion!.Value).DefaultIfEmpty(0).Average();
+                var avgMae = group.Where(r => r.MaxAdverseExcursion.HasValue).Select(r => r.MaxAdverseExcursion!.Value).DefaultIfEmpty(0).Average();
+
+                summary.OpportunityTypeStats.Add(new OpportunityTypePerformance
+                {
+                    OpportunityType = group.Key,
+                    WinRate = winRate,
+                    SuccessRate = successRate,
+                    SampleSize = total,
+                    AvgOutcomeScore = avgScore,
+                    AvgMfe = avgMfe,
+                    AvgMae = avgMae,
+                });
+            }
+
+            // Q2: Regime performance
+            var byRegime = resolved
+                .Where(r => !string.IsNullOrEmpty(r.StockVolatilityRegime))
+                .GroupBy(r => r.StockVolatilityRegime!)
+                .Where(g => g.Count() >= 10)
+                .ToList();
+
+            foreach (var group in byRegime)
+            {
+                var correct = group.Count(r => r.DirectionCorrect == true);
+                var total = group.Count();
+                summary.RegimeStats.Add(new RegimePerformance
+                {
+                    Regime = group.Key,
+                    WinRate = (double)correct / total,
+                    SampleSize = total,
+                    AvgOutcomeScore = group.Where(r => r.OutcomeScore.HasValue).Select(r => r.OutcomeScore!.Value).DefaultIfEmpty(0).Average(),
+                });
+            }
+
+            // Q3: Cross-learning — opportunity type × regime
+            var crossGroups = resolved
+                .Where(r => !string.IsNullOrEmpty(r.OpportunityType) && !string.IsNullOrEmpty(r.StockVolatilityRegime))
+                .GroupBy(r => (r.OpportunityType!, r.StockVolatilityRegime!))
+                .Where(g => g.Count() >= 5)
+                .ToList();
+
+            foreach (var group in crossGroups)
+            {
+                var correct = group.Count(r => r.DirectionCorrect == true);
+                var total = group.Count();
+                summary.CrossLearning.Add(new CrossLearningEntry
+                {
+                    OpportunityType = group.Key.Item1,
+                    Regime = group.Key.Item2,
+                    WinRate = (double)correct / total,
+                    SampleSize = total,
+                });
+            }
+
+            // Q4: ATR percentile learning — bin into quartiles
+            var withAtr = resolved.Where(r => r.AtrPercentile.HasValue).ToList();
+            if (withAtr.Count >= 20)
+            {
+                var atrBuckets = new[] { (0.0, 25.0, "0-25"), (25.0, 50.0, "25-50"), (50.0, 75.0, "50-75"), (75.0, 100.0, "75-100") };
+                foreach (var (lo, hi, label) in atrBuckets)
+                {
+                    var bucket = withAtr.Where(r => r.AtrPercentile!.Value >= lo && r.AtrPercentile!.Value < (hi == 100.0 ? 101.0 : hi)).ToList();
+                    if (bucket.Count < 5) continue;
+                    var correct = bucket.Count(r => r.DirectionCorrect == true);
+                    summary.AtrPercentileBuckets.Add(new AtrBucketPerformance
+                    {
+                        Bucket = label,
+                        WinRate = (double)correct / bucket.Count,
+                        SampleSize = bucket.Count,
+                    });
+                }
+            }
+
+            // Q5: Gap learning
+            var withGap = resolved.Where(r => !string.IsNullOrEmpty(r.GapType) && r.GapType != "None").ToList();
+            if (withGap.Count >= 10)
+            {
+                var gapGroups = withGap.GroupBy(r => r.GapType!).Where(g => g.Count() >= 5);
+                foreach (var g in gapGroups)
+                {
+                    var correct = g.Count(r => r.DirectionCorrect == true);
+                    summary.GapStats.Add(new GapPerformance
+                    {
+                        GapType = g.Key,
+                        WinRate = (double)correct / g.Count(),
+                        SampleSize = g.Count(),
+                        AvgGapPercent = g.Where(r => r.GapPercent.HasValue).Select(r => r.GapPercent!.Value).DefaultIfEmpty(0).Average(),
+                    });
+                }
+            }
+
+            // Q6: Catalyst interaction — catalyst age vs success
+            var withCatalyst = resolved.Where(r => r.CatalystAgeHours.HasValue && r.CatalystAgeHours > 0).ToList();
+            if (withCatalyst.Count >= 10)
+            {
+                var catalystBuckets = new[] { (0.0, 4.0, "0-4h"), (4.0, 24.0, "4-24h"), (24.0, 72.0, "1-3d"), (72.0, double.MaxValue, "3d+") };
+                foreach (var (lo, hi, label) in catalystBuckets)
+                {
+                    var bucket = withCatalyst.Where(r => r.CatalystAgeHours!.Value >= lo && r.CatalystAgeHours!.Value < hi).ToList();
+                    if (bucket.Count < 3) continue;
+                    var correct = bucket.Count(r => r.DirectionCorrect == true);
+                    summary.CatalystAgeBuckets.Add(new CatalystAgePerformance
+                    {
+                        AgeBucket = label,
+                        WinRate = (double)correct / bucket.Count,
+                        SampleSize = bucket.Count,
+                    });
+                }
+            }
+
+            // Q7: Recovery learning — bounce quality vs outcome
+            var withBounce = resolved.Where(r => !string.IsNullOrEmpty(r.BounceQualityRealized)).ToList();
+            if (withBounce.Count >= 10)
+            {
+                var bounceGroups = withBounce.GroupBy(r => r.BounceQualityRealized!).Where(g => g.Count() >= 3);
+                foreach (var g in bounceGroups)
+                {
+                    var correct = g.Count(r => r.DirectionCorrect == true);
+                    summary.RecoveryStats.Add(new RecoveryPerformance
+                    {
+                        BounceQuality = g.Key,
+                        WinRate = (double)correct / g.Count(),
+                        SampleSize = g.Count(),
+                        AvgRecoverySpeed = g.Where(r => r.RecoverySpeed.HasValue).Select(r => r.RecoverySpeed!.Value).DefaultIfEmpty(0).Average(),
+                    });
+                }
+            }
+
+            // Weight recommendations — adjust volatility bucket based on opportunity success rates
+            var weightChanges = await ApplyVolatilityWeightRecommendationsAsync(resolved, summary);
+            summary.WeightChanges = weightChanges;
+
+            _logger.LogInformation(
+                "[learning-engine] Stage 5c: {Count} records, {Types} opportunity types, {Regimes} regimes, {Changes} weight changes",
+                resolved.Count, summary.OpportunityTypeStats.Count, summary.RegimeStats.Count, weightChanges.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Stage 5c failed");
+        }
+
+        return summary;
+    }
+
+    private async Task<List<WeightChangeSummary>> ApplyVolatilityWeightRecommendationsAsync(
+        List<VolatilityLearningRecord> resolved, VolatilityOpportunityLearningSummary summary)
+    {
+        var changes = new List<WeightChangeSummary>();
+
+        // Only adjust if we have enough data across opportunity types
+        var typesWithEnoughData = summary.OpportunityTypeStats
+            .Where(t => t.SampleSize >= MinObservationsForAdjustment)
+            .ToList();
+        if (typesWithEnoughData.Count == 0) return changes;
+
+        // Compute overall VOE-tagged success rate vs baseline
+        var voeTagged = resolved.Where(r => !string.IsNullOrEmpty(r.OpportunityType) && r.OpportunityType != "None").ToList();
+        var noVoe = resolved.Where(r => string.IsNullOrEmpty(r.OpportunityType) || r.OpportunityType == "None").ToList();
+
+        if (voeTagged.Count < MinObservationsForAdjustment) return changes;
+
+        var voeWinRate = (double)voeTagged.Count(r => r.DirectionCorrect == true) / voeTagged.Count;
+        var baselineWinRate = noVoe.Count >= 10
+            ? (double)noVoe.Count(r => r.DirectionCorrect == true) / noVoe.Count
+            : 0.5;
+
+        // Bayesian-smoothed adjustment: if VOE-tagged predictions outperform baseline, boost volatility weight
+        var smoothed = (voeTagged.Count(r => r.DirectionCorrect == true) + 25.0) / (voeTagged.Count + 50.0);
+        var diff = smoothed - 0.5;
+        var proposedMovement = Math.Clamp(diff * 0.1, -MaxDailyMovement, MaxDailyMovement);
+
+        if (Math.Abs(proposedMovement) < 0.001) return changes;
+
+        const string signal = "volatility";
+        var validation = await _guardrail.ValidateSignalWeightUpdateAsync(
+            signal, voeTagged.Count, voeWinRate, proposedMovement);
+
+        if (!validation.Approved)
+        {
+            _logger.LogInformation("[learning-engine] Stage 5c weight update blocked: {Reason}", validation.Reason);
+            return changes;
+        }
+
+        var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+        var existing = currentOverrides.FirstOrDefault(o => o.SignalName == signal);
+        var baseWeight = DefaultBaseWeights.GetValueOrDefault(signal, 0.7);
+        var currentAdj = existing?.AdjustmentPercent ?? 0.0;
+
+        var effectiveMovement = await _guardrail.GetEffectiveDailyMovementAsync(signal);
+        var clampedMovement = Math.Clamp(proposedMovement, -effectiveMovement, effectiveMovement);
+        var newAdj = Math.Clamp(currentAdj + clampedMovement, -MaxAdjustmentPercent, MaxAdjustmentPercent);
+
+        if (Math.Abs(clampedMovement) < 0.001) return changes;
+
+        var effectiveWeight = baseWeight * (1.0 + newAdj);
+
+        await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+        {
+            SignalName = signal,
+            BaseWeight = baseWeight,
+            AdjustmentPercent = newAdj,
+            EffectiveWeight = effectiveWeight,
+            Confidence = Math.Min((double)voeTagged.Count / 200, 1.0),
+            SampleSize = voeTagged.Count,
+            Status = "active",
+            Reason = $"VOE Stage 5c: {voeTagged.Count} tagged predictions, win rate {voeWinRate:P0} vs baseline {baselineWinRate:P0}",
+        });
+
+        changes.Add(new WeightChangeSummary
+        {
+            SignalName = signal,
+            PreviousWeight = baseWeight * (1.0 + currentAdj),
+            NewWeight = effectiveWeight,
+            ChangePercent = clampedMovement * 100,
+            Reason = $"[voe-learning] VOE win rate {voeWinRate:P0} (n={voeTagged.Count})",
+        });
+
+        return changes;
+    }
+
+    private string BuildVolatilityOpportunitySummarySection(VolatilityOpportunityLearningSummary summary)
+    {
+        if (summary.TotalRecords < MinObservationsForAdjustment)
+            return "  Insufficient data for volatility opportunity analysis.";
+
+        var lines = new List<string>();
+
+        if (summary.OpportunityTypeStats.Count > 0)
+        {
+            lines.Add("  By opportunity type:");
+            foreach (var t in summary.OpportunityTypeStats.OrderByDescending(t => t.WinRate))
+                lines.Add($"    {t.OpportunityType}: {t.WinRate * 100:F0}% win, {t.SuccessRate * 100:F0}% success (n={t.SampleSize}, MFE {t.AvgMfe:F1}%, MAE {t.AvgMae:F1}%)");
+        }
+
+        if (summary.RegimeStats.Count > 0)
+        {
+            lines.Add("  By volatility regime:");
+            foreach (var r in summary.RegimeStats.OrderByDescending(r => r.WinRate))
+                lines.Add($"    {r.Regime}: {r.WinRate * 100:F0}% win (n={r.SampleSize})");
+        }
+
+        if (summary.CrossLearning.Count > 0)
+        {
+            var best = summary.CrossLearning.OrderByDescending(c => c.WinRate).Take(3);
+            lines.Add("  Best opportunity×regime combos:");
+            foreach (var c in best)
+                lines.Add($"    {c.OpportunityType} in {c.Regime}: {c.WinRate * 100:F0}% (n={c.SampleSize})");
+        }
+
+        if (summary.WeightChanges.Count > 0)
+        {
+            lines.Add("  Weight adjustments:");
+            foreach (var w in summary.WeightChanges)
+                lines.Add($"    {w.SignalName}: {w.ChangePercent:+0.0;-0.0}% → {w.NewWeight:F3}");
+        }
+
+        return lines.Count > 0 ? string.Join("\n", lines) : "  No actionable patterns yet.";
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 5c Models
+    // -----------------------------------------------------------------------
+
+    public record VolatilityOpportunityLearningSummary
+    {
+        public int TotalRecords { get; set; }
+        public List<OpportunityTypePerformance> OpportunityTypeStats { get; init; } = [];
+        public List<RegimePerformance> RegimeStats { get; init; } = [];
+        public List<CrossLearningEntry> CrossLearning { get; init; } = [];
+        public List<AtrBucketPerformance> AtrPercentileBuckets { get; init; } = [];
+        public List<GapPerformance> GapStats { get; init; } = [];
+        public List<CatalystAgePerformance> CatalystAgeBuckets { get; init; } = [];
+        public List<RecoveryPerformance> RecoveryStats { get; init; } = [];
+        public List<WeightChangeSummary> WeightChanges { get; set; } = [];
+    }
+
+    public record OpportunityTypePerformance
+    {
+        public string OpportunityType { get; init; } = "";
+        public double WinRate { get; init; }
+        public double SuccessRate { get; init; }
+        public int SampleSize { get; init; }
+        public double AvgOutcomeScore { get; init; }
+        public double AvgMfe { get; init; }
+        public double AvgMae { get; init; }
+    }
+
+    public record RegimePerformance
+    {
+        public string Regime { get; init; } = "";
+        public double WinRate { get; init; }
+        public int SampleSize { get; init; }
+        public double AvgOutcomeScore { get; init; }
+        public double ExpectedValuePercent { get; init; }
+    }
+
+    public record CrossLearningEntry
+    {
+        public string OpportunityType { get; init; } = "";
+        public string Regime { get; init; } = "";
+        public double WinRate { get; init; }
+        public int SampleSize { get; init; }
+    }
+
+    public record AtrBucketPerformance
+    {
+        public string Bucket { get; init; } = "";
+        public double WinRate { get; init; }
+        public int SampleSize { get; init; }
+    }
+
+    public record GapPerformance
+    {
+        public string GapType { get; init; } = "";
+        public double WinRate { get; init; }
+        public int SampleSize { get; init; }
+        public double AvgGapPercent { get; init; }
+    }
+
+    public record CatalystAgePerformance
+    {
+        public string AgeBucket { get; init; } = "";
+        public double WinRate { get; init; }
+        public int SampleSize { get; init; }
+    }
+
+    public record RecoveryPerformance
+    {
+        public string BounceQuality { get; init; } = "";
+        public double WinRate { get; init; }
+        public int SampleSize { get; init; }
+        public double AvgRecoverySpeed { get; init; }
+    }
+
     private static double GetDouble(JsonObject r, string key)
     {
         var node = r[key];
@@ -1912,7 +2499,8 @@ public class LearningEngine
     public async Task<string?> GenerateAiLearningReportAsync(
         List<ResearchSignalPerformance> signalStats,
         ConfidenceAnalysis calibration,
-        List<WeightChangeSummary> weightChanges)
+        List<WeightChangeSummary> weightChanges,
+        VolatilityOpportunityLearningSummary? voeSummary = null)
     {
         if (!_ai.IsConfigured)
         {
@@ -1924,13 +2512,18 @@ public class LearningEngine
         var outcomes = await _repo.GetRecentOutcomesAsync(200);
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
-        var evaluated = predictions.Where(p => outcomeMap.ContainsKey(p.Id)
-            && outcomeMap[p.Id].DirectionCorrect is not null).ToList();
-        var correct = evaluated.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
+        // Include all evaluated predictions: directional and neutral
+        var evaluated = predictions
+            .Where(p => outcomeMap.ContainsKey(p.Id) && ResolveCorrectness(p, outcomeMap[p.Id]) is not null)
+            .ToList();
+
+        var correct = evaluated.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
         var bullPreds = evaluated.Where(p => p.PredictionType == PredictionType.bullish).ToList();
         var bearPreds = evaluated.Where(p => p.PredictionType == PredictionType.bearish).ToList();
+        var neutralPreds = evaluated.Where(p => !PredictionCategoryHelper.IsDirectional(p.PredictionType)).ToList();
         var bullCorrect = bullPreds.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
         var bearCorrect = bearPreds.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
+        var neutralCorrect = neutralPreds.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
 
         var topSignals = signalStats
             .Where(s => s.Direction == "all" && s.TotalPredictions >= 10)
@@ -1995,6 +2588,7 @@ DATA:
 - Overall accuracy: {(evaluated.Count > 0 ? (double)correct / evaluated.Count * 100 : 0):F1}%
 - Bullish accuracy: {(bullPreds.Count > 0 ? (double)bullCorrect / bullPreds.Count * 100 : 0):F1}% ({bullPreds.Count} predictions)
 - Bearish accuracy: {(bearPreds.Count > 0 ? (double)bearCorrect / bearPreds.Count * 100 : 0):F1}% ({bearPreds.Count} predictions)
+- Neutral accuracy: {(neutralPreds.Count > 0 ? (double)neutralCorrect / neutralPreds.Count * 100 : 0):F1}% ({neutralPreds.Count} predictions, correct = abs move < 2%)
 
 TOP SIGNALS (legacy binary tracking — treat with skepticism if all signals show same accuracy):
 {string.Join("\n", topSignals)}
@@ -2024,6 +2618,9 @@ WEIGHT CHANGES APPLIED:
 PREDICTION REVISIONS (supersession learning):
 {await BuildSupersessionReportSectionAsync()}
 
+VOLATILITY OPPORTUNITY LEARNING (VOE Stage 5c):
+{BuildVolatilityOpportunitySummarySection(voeSummary ?? new VolatilityOpportunityLearningSummary())}
+
 INSTRUCTIONS:
 - Write 3-5 short paragraphs, conversational tone
 - Lead with the most important finding from the NEW analytics (calibration, correlation, influence, interactions)
@@ -2036,6 +2633,7 @@ INSTRUCTIONS:
 - If confidence is miscalibrated, flag it clearly
 - Note any directional asymmetry (bull vs bear performance)
 - If supersession data exists, note which transition types improve accuracy and which don't
+- If VOE data exists, highlight which opportunity types and regimes perform best/worst
 - Keep under 500 words
 - Do NOT use bullet points or headers — write in flowing prose";
 
@@ -2162,15 +2760,27 @@ INSTRUCTIONS:
             }
         }
 
-        // 4. Per-ticker patterns
+        // 4. Per-ticker patterns (includes directional and neutral predictions)
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
         var tickerStats = new Dictionary<string, (int Correct, int Wrong, int Total)>();
         foreach (var pred in predictions)
         {
-            if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || outcome.DirectionCorrect is null) continue;
+            if (!outcomeMap.TryGetValue(pred.Id, out var outcome)) continue;
+            var isNeutral = !PredictionCategoryHelper.IsDirectional(pred.PredictionType);
+            bool? isCorrect;
+            if (isNeutral)
+            {
+                if (outcome.PercentMove is null) continue;
+                isCorrect = Math.Abs(outcome.PercentMove.Value) < 2.0;
+            }
+            else
+            {
+                if (outcome.DirectionCorrect is null) continue;
+                isCorrect = outcome.DirectionCorrect;
+            }
             var (correct, wrong, total) = tickerStats.GetValueOrDefault(pred.Ticker);
             total++;
-            if (outcome.DirectionCorrect == true) correct++; else wrong++;
+            if (isCorrect == true) correct++; else wrong++;
             tickerStats[pred.Ticker] = (correct, wrong, total);
         }
         foreach (var (ticker, (correct, wrong, total)) in tickerStats)
@@ -2269,6 +2879,47 @@ INSTRUCTIONS:
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[learning-engine] Failed to generate supersession insights");
+        }
+
+        // 7. Volatility opportunity insights
+        try
+        {
+            var voeRecords = await _repo.GetAllVolatilityLearningStatsAsync(limit: 500, windowDays: 90);
+            var voeResolved = voeRecords.Where(r => r.DirectionCorrect is not null).ToList();
+
+            if (voeResolved.Count >= 20)
+            {
+                var byType = voeResolved
+                    .Where(r => !string.IsNullOrEmpty(r.OpportunityType) && r.OpportunityType != "None")
+                    .GroupBy(r => r.OpportunityType!)
+                    .Where(g => g.Count() >= 5)
+                    .OrderByDescending(g => (double)g.Count(r => r.DirectionCorrect == true) / g.Count())
+                    .ToList();
+
+                if (byType.Count > 0)
+                {
+                    var best = byType.First();
+                    var bestWin = (double)best.Count(r => r.DirectionCorrect == true) / best.Count();
+                    var worst = byType.Last();
+                    var worstWin = (double)worst.Count(r => r.DirectionCorrect == true) / worst.Count();
+
+                    insights.Add(new
+                    {
+                        insight_type = "volatility_opportunity",
+                        summary = $"Best VOE type: {best.Key} ({bestWin * 100:F0}% win, n={best.Count()}). " +
+                                  $"Worst: {worst.Key} ({worstWin * 100:F0}% win, n={worst.Count()}).",
+                        evidence = $"Based on {voeResolved.Count} resolved VOE-tagged predictions over 90 days.",
+                        action_recommendation = worstWin < 0.4
+                            ? $"Consider reducing confidence for {worst.Key} opportunities."
+                            : "All opportunity types are performing adequately.",
+                        confidence = Math.Min((double)voeResolved.Count / 100, 1.0),
+                    });
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate VOE insights");
         }
 
         if (insights.Count > 0)

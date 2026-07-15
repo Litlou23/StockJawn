@@ -41,6 +41,7 @@ public class PredictionGenerator
     private readonly TradeSetupEngine _setupEngine;
     private readonly MarketSnapshotBuilder _snapshotBuilder;
     private readonly IHistoricalProfileBuilder _profileBuilder;
+    private readonly VolatilityOpportunityEngine _voe;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
@@ -56,6 +57,7 @@ public class PredictionGenerator
         TradeSetupEngine setupEngine,
         MarketSnapshotBuilder snapshotBuilder,
         IHistoricalProfileBuilder profileBuilder,
+        VolatilityOpportunityEngine voe,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
@@ -69,6 +71,7 @@ public class PredictionGenerator
         _setupEngine = setupEngine;
         _snapshotBuilder = snapshotBuilder;
         _profileBuilder = profileBuilder;
+        _voe = voe;
         _logger = logger;
         _ensembleEnabled = string.Equals(
             configuration["ENSEMBLE_SCORING_ENABLED"], "true",
@@ -173,6 +176,21 @@ public class PredictionGenerator
                 }
                 : null;
 
+        // ── VOE: compute volatility context before scoring ───────
+        var volatilityAssessment = _voe.Assess(
+            ticker, snapshot.RecentBars, indicators, snapshot.NewsContext);
+
+        if (volatilityAssessment.Opportunity != Models.OpportunityType.None)
+        {
+            _logger.LogInformation(
+                "[prediction] {Ticker}: VOE classified {Opportunity} (regime={Regime}, ATR pctile={AtrPctile})",
+                ticker, volatilityAssessment.Opportunity, volatilityAssessment.StockVolRegime,
+                volatilityAssessment.AtrPercentile?.ToString("F0") ?? "n/a");
+        }
+
+        // Persist assessment (fire-and-forget — non-blocking, best-effort)
+        _ = _repo.SaveVolatilityAssessmentAsync(volatilityAssessment, runId);
+
         ScoringEngine.ScoringResult scoring;
         EnsembleScoringService.EnsembleResult? ensembleResult = null;
 
@@ -180,7 +198,7 @@ public class PredictionGenerator
         {
             ensembleResult = await _ensemble.ScoreWithEnsembleAsync(
                 snapshot, indicators, benchmark, weights, lessons, researchSignals,
-                intelligence, researchUniverse);
+                intelligence, researchUniverse, volatilityAssessment);
             scoring = ensembleResult.BlendedResult;
             _logger.LogInformation(
                 "[prediction] {Ticker}: ensemble scoring — agreement={Agreement:P0}, dominant={Dominant}",
@@ -189,7 +207,8 @@ public class PredictionGenerator
         else
         {
             scoring = _scoringEngine.Evaluate(
-                snapshot, indicators, benchmark, weights, lessons, researchSignals, intelligence, researchUniverse);
+                snapshot, indicators, benchmark, weights, lessons, researchSignals,
+                intelligence, researchUniverse, volatilityAssessment);
         }
 
         var predType = scoring.PredictionType;
@@ -383,8 +402,31 @@ public class PredictionGenerator
             MissingDataWarnings = missingWarnings,
             ScoreDebugJson = JsonSerializer.Serialize(
                 ensembleResult is not null
-                    ? new { scoring.Breakdown, Ensemble = new { ensembleResult.Agreement, ensembleResult.DominantModel, Models = ensembleResult.ModelScores.Select(m => new { m.ModelName, m.HistoricalAccuracy, m.ModelWeight }) } }
-                    : (object)scoring.Breakdown,
+                    ? new {
+                        scoring.Breakdown,
+                        Ensemble = new { ensembleResult.Agreement, ensembleResult.DominantModel, Models = ensembleResult.ModelScores.Select(m => new { m.ModelName, m.HistoricalAccuracy, m.ModelWeight }) },
+                        Volatility = new {
+                            volatilityAssessment.AtrPercentile,
+                            StockVolRegime = volatilityAssessment.StockVolRegime.ToString(),
+                            GapType = volatilityAssessment.GapClassification.ToString(),
+                            volatilityAssessment.GapPercent,
+                            OpportunityType = volatilityAssessment.Opportunity.ToString(),
+                            volatilityAssessment.OpportunityScore,
+                            volatilityAssessment.RiskModifier,
+                        },
+                    }
+                    : (object)new {
+                        scoring.Breakdown,
+                        Volatility = new {
+                            volatilityAssessment.AtrPercentile,
+                            StockVolRegime = volatilityAssessment.StockVolRegime.ToString(),
+                            GapType = volatilityAssessment.GapClassification.ToString(),
+                            volatilityAssessment.GapPercent,
+                            OpportunityType = volatilityAssessment.Opportunity.ToString(),
+                            volatilityAssessment.OpportunityScore,
+                            volatilityAssessment.RiskModifier,
+                        },
+                    },
                 new JsonSerializerOptions { WriteIndented = false }),
             ActionabilityScore = scoring.Breakdown.ActionabilityScore,
             ActionabilityTier = scoring.Breakdown.ActionabilityTier,

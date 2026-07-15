@@ -282,11 +282,70 @@ Both. The dedup IS intentional — it prevents redundant predictions. But the si
 
 ---
 
-## 6. Final Assessment
+## 6. Neutral Prediction Learning Gap
+
+### The problem
+
+The learning engine excludes all neutral predictions from its training pipeline. In `LearningEngine.ExtractSignalObservationsAsync` (line 166):
+
+```csharp
+if (!outcomeMap.TryGetValue(pred.Id, out var outcome) || outcome.DirectionCorrect is null)
+    continue;
+```
+
+Any prediction where `direction_correct` is NULL is skipped — no signal observations are extracted, no weight adjustments occur, no calibration data is collected.
+
+### Scale of the gap
+
+Of 223 evaluated predictions, 91 (41%) have `direction_correct = NULL` and are invisible to the learning engine:
+
+| Prediction Type | Count | Avg Absolute Move | What This Means |
+|---|---|---|---|
+| neutral_no_edge | 58 | 2.97% | Engine said "no edge" but stocks moved ~3% on average |
+| watch_only | 27 | 2.04% | Low-confidence calls that were downgraded |
+| neutral_high_volatility | 6 | 3.72% | Volatility prediction was arguably correct — big moves occurred |
+
+The learning engine's reported sample size of **92 predictions** is actually only **59%** of all evaluated predictions. 41% of the engine's experience is discarded.
+
+### What's being lost
+
+Every neutral prediction was scored using the same 8 signal buckets (trend, momentum, volume, pattern, sentiment, market_context, fundamental, options_flow) and has a complete `score_debug_json`. The learning engine could extract signal observations from these to learn:
+
+- Which signal patterns reliably indicate "no clear direction" (true neutrals)
+- Which neutral calls were wrong — the stock moved 5%+ and the engine missed it (false neutrals)
+- Whether specific signal combinations that produce neutral calls should instead trigger directional predictions
+- How confidence calibration performs on the neutral ↔ directional boundary
+
+### NeutralOutcomeEvaluator produces zero rows
+
+The `neutral_prediction_outcomes` table — designed specifically for rich neutral evaluation with fields like `counterfactual_correct`, `opportunity_missed_score`, `neutral_accuracy_score`, `realized_volatility` — has **0 rows**. The NeutralOutcomeEvaluator service exists and is wired into the EOD pipeline (Step 6 of `DynamicPickOrchestrator.RunDynamicEodReviewAsync`), but has not successfully produced any outcomes.
+
+This means the richer neutral-specific learning that was designed (was the neutral call justified? was an opportunity missed? was the volatility prediction correct?) is not happening at all.
+
+### Why NeutralOutcomeEvaluator has 0 rows
+
+This is **not a bug** — it's a timing issue. The NeutralOutcomeEvaluator was deployed alongside a fix (task #24) that made the directional `OutcomeEvaluator` skip neutral types. Since that deployment, no neutral predictions have reached their 120h evaluation window. The oldest eligible neutrals (Jul 9 23:15 1_week predictions) become eligible at Jul 14 23:15 UTC — tonight. The Jul 15 EOD review at 21:30 UTC will be the NeutralOutcomeEvaluator's first real test.
+
+The 91 existing NULL-direction outcomes in `prediction_outcomes` are from **before** the skip logic was deployed — the old evaluator processed them, set `direction_correct = NULL`, and moved on. These will never be re-evaluated by the neutral evaluator because they're already in `evaluated` status.
+
+### Three issues to fix
+
+1. **Learning engine should process neutral outcomes** — the `DirectionCorrect is null` filter in Stage 1 needs to be relaxed. For neutral predictions, "correct" could mean: the stock didn't make a significant directional move (confirming the neutral thesis). The `percent_move` and `outcome_score` data already exists to make this determination. This immediately unlocks 91 predictions for learning.
+
+2. **Backfill the 91 legacy neutral outcomes** — these predictions were evaluated by the old directional evaluator, which only set `direction_correct = NULL`. They should be re-processed by the NeutralOutcomeEvaluator to produce the richer neutral-specific metrics (counterfactual_correct, opportunity_missed_score, neutral_accuracy_score). This requires either resetting their status to 'open' for re-evaluation, or a one-time backfill script.
+
+3. **Verify NeutralOutcomeEvaluator produces rows on Jul 15** — monitor the Jul 15 EOD review to confirm the neutral evaluator processes the 10 newly-eligible neutral 1_week predictions and saves outcomes to `neutral_prediction_outcomes`.
+
+---
+
+## 7. Final Assessment
 
 ### Is the prediction lifecycle working correctly?
 
-**Yes, with one bug.** The evaluation pipeline, learning pipeline, EOD scheduling, and time-gating are all functioning correctly. Every prediction follows the intended lifecycle from creation through evaluation. The one bug is dedup failure due to silent Supabase errors, which creates duplicates that shouldn't exist.
+**The evaluation and scheduling pipelines work correctly. Two bugs and one design gap exist:**
+1. **Bug:** Dedup intermittently fails due to silent Supabase errors, creating duplicate predictions.
+2. **Bug:** NeutralOutcomeEvaluator produces zero outcomes despite being wired into the pipeline.
+3. **Gap:** The learning engine discards 41% of evaluated predictions (all neutrals) because they lack a `direction_correct` value, losing signal data from 91 outcomes.
 
 ### Are predictions remaining open for valid reasons?
 
@@ -306,10 +365,11 @@ Both. The dedup IS intentional — it prevents redundant predictions. But the si
 
 ### Is neither the problem?
 
-**Both are problems, but different ones.** The dedup bug creates junk data (duplicates). The dedup design creates suppression (no revised opinions). These are independent issues that should be addressed separately:
+**Three independent issues exist, in priority order:**
 
-1. **Fix the bug first** — make `GetOpenPredictionsAsync()` throw or retry on failure instead of silently returning `[]`. This is a correctness fix.
-2. **Then address the design** — replace cross-day dedup with a materiality check that allows revised opinions while preventing noise. This is the architectural evolution described in FORECAST_EVOLUTION_DESIGN.md.
+1. **Fix silent Supabase failures** — make `GetOpenPredictionsAsync()` throw or retry on failure instead of silently returning `[]`. This causes both dedup failures and potential evaluator blindness. Correctness fix.
+2. **Fix neutral learning** — the learning engine discards 41% of its training data. The `DirectionCorrect is null` filter in Stage 1 needs to be relaxed for neutral predictions, and the NeutralOutcomeEvaluator needs debugging (0 rows produced). This is the largest untapped learning opportunity.
+3. **Address dedup design** — replace cross-day dedup with a materiality check that allows revised opinions while preventing noise. This is the architectural evolution described in FORECAST_EVOLUTION_DESIGN.md.
 
 ---
 

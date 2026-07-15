@@ -168,6 +168,7 @@ try
     builder.Services.AddSingleton<MarketSnapshotBuilder>();
     builder.Services.AddSingleton<PredictionGenerator>();
     builder.Services.AddSingleton<OutcomeEvaluator>();
+    builder.Services.AddSingleton<VolatilityOpportunityEngine>();
     builder.Services.AddSingleton<TradeSetupEngine>();
     builder.Services.Configure<LearningGuardrailOptions>(
         builder.Configuration.GetSection(LearningGuardrailOptions.SectionName));

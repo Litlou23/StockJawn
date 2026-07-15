@@ -794,3 +794,177 @@ public record NeutralTypeStats
     public int CorrectCount { get; init; }
     public double ReplacementAccuracy { get; init; }
 }
+
+// ---------------------------------------------------------------------------
+// Volatility Opportunity Engine
+// ---------------------------------------------------------------------------
+
+/// <summary>Per-stock volatility regime classification.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum StockVolatilityRegime
+{
+    /// <summary>ATR pctile &lt; 20 AND bandwidth pctile &lt; 20 — compressed range.</summary>
+    Squeeze,
+    /// <summary>Both percentiles between 20–80 — typical volatility.</summary>
+    Normal,
+    /// <summary>Either percentile &gt; 80 — volatility increasing.</summary>
+    Expanding,
+    /// <summary>ATR pctile &gt; 90 — unusually wide moves.</summary>
+    Extreme,
+    /// <summary>Insufficient history to classify.</summary>
+    Unknown,
+}
+
+/// <summary>Gap size classification.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum GapType
+{
+    NoGap,        // |gap| < 1%
+    Small,        // 1–3%
+    Significant,  // 3–5%
+    Large,        // 5–10%
+    Extreme,      // > 10%
+}
+
+/// <summary>Gap direction.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum GapDirection
+{
+    None,
+    Up,
+    Down,
+}
+
+/// <summary>
+/// Volatility opportunity type. Placeholder for Phase 2 classification.
+/// Phase 1 always sets <see cref="OpportunityType.None"/>.
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum OpportunityType
+{
+    None,
+    DipAfterPanic,
+    SqueezeBreakout,
+    ExhaustionReversal,
+    MomentumContinuation,
+    FailedBounce,
+    VolatilityTrap,
+    MeanReversion,
+}
+
+/// <summary>
+/// Structured output of <see cref="Services.ResearchEngine.VolatilityOpportunityEngine"/>.
+/// Contains all computed volatility features for a single ticker at a point in time.
+/// Designed to be consumed by the VolatilityEvaluator in Phase 2.
+/// </summary>
+public record VolatilityOpportunityAssessment
+{
+    public string Ticker { get; init; } = "";
+    public DateTimeOffset AssessedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    // ── Volatility context ──────────────────────────────────────
+    /// <summary>Current ATR14 ranked against trailing 60-day ATR history (0–100). Null if insufficient history.</summary>
+    public double? AtrPercentile { get; init; }
+    /// <summary>ATR14 rate of change over 5 days. Positive = expanding, negative = contracting.</summary>
+    public double? AtrAcceleration { get; init; }
+    /// <summary>Current Bollinger Bandwidth ranked against trailing 60-day history (0–100).</summary>
+    public double? BandwidthPercentile { get; init; }
+    /// <summary>Linear regression slope of last 5 bandwidth values. Positive = widening.</summary>
+    public double? BandwidthDirection { get; init; }
+    /// <summary>Per-stock volatility regime derived from ATR and bandwidth percentiles.</summary>
+    public StockVolatilityRegime StockVolRegime { get; init; } = StockVolatilityRegime.Unknown;
+
+    // ── Gap features ────────────────────────────────────────────
+    /// <summary>(Today open − yesterday close) / yesterday close × 100.</summary>
+    public double? GapPercent { get; init; }
+    public GapDirection GapDir { get; init; } = GapDirection.None;
+    public GapType GapClassification { get; init; } = GapType.NoGap;
+    /// <summary>True when gap is accompanied by volume &gt; 1.5× average.</summary>
+    public bool GapWithVolume { get; init; }
+
+    // ── Support / resistance ────────────────────────────────────
+    /// <summary>% distance from DonchianLow20 (positive = above support).</summary>
+    public double? DistanceFromSupport { get; init; }
+    /// <summary>% distance from DonchianHigh20 (negative = below resistance).</summary>
+    public double? DistanceFromResistance { get; init; }
+
+    // ── Volume ──────────────────────────────────────────────────
+    /// <summary>Average VolumeRatio over the last 3 bars.</summary>
+    public double? VolumeRatioPersistence { get; init; }
+
+    // ── Catalyst ────────────────────────────────────────────────
+    /// <summary>Hours since the most recent catalyst event. Null if no catalysts.</summary>
+    public double? CatalystAgeHours { get; init; }
+
+    // ── Classification (Phase 2 placeholders) ───────────────────
+    /// <summary>Opportunity type. Always <see cref="OpportunityType.None"/> in Phase 1.</summary>
+    public OpportunityType Opportunity { get; init; } = OpportunityType.None;
+    /// <summary>Composite opportunity score (0–100). Placeholder — always 0 in Phase 1.</summary>
+    public double OpportunityScore { get; init; }
+    /// <summary>Risk modifier from volatility context. Placeholder — always 0 in Phase 1.</summary>
+    public double RiskModifier { get; init; }
+
+    // ── Metadata ────────────────────────────────────────────────
+    /// <summary>Features that could not be computed due to insufficient data.</summary>
+    public List<string> FeaturesSkipped { get; init; } = [];
+    /// <summary>Number of historical bars used for percentile calculations.</summary>
+    public int BarsUsedForHistory { get; init; }
+}
+
+// ---------------------------------------------------------------------------
+// Volatility Learning Record — one per evaluated prediction
+// ---------------------------------------------------------------------------
+
+public record VolatilityLearningRecord
+{
+    public string PredictionId { get; init; } = "";
+    public string RunId { get; init; } = "";
+    public string Ticker { get; init; } = "";
+
+    // Opportunity context (snapshot from VOE assessment)
+    public string? OpportunityType { get; init; }
+    public double? OpportunityScore { get; init; }
+    public string? StockVolatilityRegime { get; init; }
+    public double? AtrPercentile { get; init; }
+    public double? AtrAcceleration { get; init; }
+    public double? BandwidthPercentile { get; init; }
+    public string? GapType { get; init; }
+    public double? GapPercent { get; init; }
+    public double? CatalystAgeHours { get; init; }
+
+    // Prediction context
+    public int Confidence { get; init; }
+    public int Risk { get; init; }
+    public string? PredictionType { get; init; }
+    public string? TimeWindow { get; init; }
+
+    // Movement outcome
+    public bool? DirectionCorrect { get; init; }
+    public double? OutcomeScore { get; init; }
+    public double? HoldingPeriodHours { get; init; }
+    public double? MaxFavorableExcursion { get; init; }
+    public double? MaxAdverseExcursion { get; init; }
+
+    // Time-to-move (in trading days)
+    public int? TimeTo3Pct { get; init; }
+    public int? TimeTo5Pct { get; init; }
+    public int? TimeToTarget { get; init; }
+
+    // Recovery
+    public double? RecoverySpeed { get; init; }
+    public string? BounceQualityRealized { get; init; }
+
+    // Opportunity success
+    public bool? OpportunitySuccess { get; init; }
+    public string? OpportunitySuccessReason { get; init; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum BounceQuality
+{
+    None,
+    Poor,
+    Fair,
+    Good,
+    Excellent,
+}

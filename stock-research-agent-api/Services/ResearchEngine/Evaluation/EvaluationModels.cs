@@ -105,6 +105,13 @@ public record EvaluationContext
     /// </summary>
     public ResearchUniverseContext ResearchUniverse { get; init; } = new();
 
+    /// <summary>
+    /// Volatility Opportunity Engine assessment. Null when VOE has not run
+    /// (e.g. static Score() compat path). The VolatilityEvaluator falls back
+    /// to legacy Bollinger-only scoring when this is null.
+    /// </summary>
+    public VolatilityOpportunityAssessment? VolatilityAssessment { get; init; }
+
     public static EvaluationContext Create(
         MarketSnapshot snapshot,
         TechnicalIndicators indicators,
@@ -113,7 +120,8 @@ public record EvaluationContext
         Dictionary<string, double> weights,
         List<string> lessons,
         List<ResearchSignal> researchSignals,
-        ResearchUniverseContext? researchUniverse = null)
+        ResearchUniverseContext? researchUniverse = null,
+        VolatilityOpportunityAssessment? volatilityAssessment = null)
     {
         var riskCapBoost = (int)Math.Clamp(weights.GetValueOrDefault("risk_cap_boost", 0.0), 0, 15);
         var calibrationFactor = Math.Clamp(weights.GetValueOrDefault("calibration_factor", 1.0), 0.85, 1.15);
@@ -127,6 +135,7 @@ public record EvaluationContext
             Intelligence = intelligence,
             ResearchSignals = researchSignals,
             ResearchUniverse = researchUniverse ?? new ResearchUniverseContext(),
+            VolatilityAssessment = volatilityAssessment,
             LearningData = new EvaluationLearningData
             {
                 Weights = new Dictionary<string, double>(weights),

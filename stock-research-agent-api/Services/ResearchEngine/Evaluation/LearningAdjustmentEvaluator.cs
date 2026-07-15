@@ -33,6 +33,7 @@ public class LearningAdjustmentEvaluator : ILearningAdjustmentEvaluator
 
         var genericWeights = weights
             .Where(w => w.Key != "calibration_factor"
+                && !w.Key.StartsWith("min_") // exclude decision thresholds
                 && !w.Key.EndsWith("_bullish") && !w.Key.EndsWith("_bearish")
                 && Math.Abs(w.Value - 1.0) > 0.15)
             .ToList();
