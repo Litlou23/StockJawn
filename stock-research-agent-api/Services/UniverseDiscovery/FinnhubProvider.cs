@@ -12,6 +12,11 @@ public class FinnhubProvider
 {
     private const string BaseUrl = "https://finnhub.io/api/v1";
 
+    // Free tier: 60 calls/min. Keep 5 req/min headroom.
+    private const int MaxRequestsPerMinute = 55;
+    private static readonly SemaphoreSlim _throttle = new(1, 1);
+    private static readonly Queue<DateTimeOffset> _requestTimestamps = new();
+
     private readonly HttpClient _http;
     private readonly string _apiKey;
     private readonly bool _configured;
@@ -30,6 +35,40 @@ public class FinnhubProvider
 
     public bool IsConfigured => _configured;
 
+    /// <summary>
+    /// Waits if necessary to stay within the free-tier rate limit (55 req/min).
+    /// </summary>
+    private async Task ThrottleAsync()
+    {
+        await _throttle.WaitAsync();
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
+                _requestTimestamps.Dequeue();
+
+            if (_requestTimestamps.Count >= MaxRequestsPerMinute)
+            {
+                var oldest = _requestTimestamps.Peek();
+                var waitMs = (int)(60_000 - (now - oldest).TotalMilliseconds) + 500;
+                if (waitMs > 0)
+                {
+                    _logger.LogInformation("[finnhub] Rate limit reached, waiting {WaitMs}ms", waitMs);
+                    await Task.Delay(waitMs);
+                }
+                now = DateTimeOffset.UtcNow;
+                while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
+                    _requestTimestamps.Dequeue();
+            }
+
+            _requestTimestamps.Enqueue(DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            _throttle.Release();
+        }
+    }
+
     public record EarningsEntry(string Ticker, string Date, string? Hour, double? EstimateEps);
     public record NewsArticle(string Headline, string Summary, string Source, string Url, DateTimeOffset Datetime, List<string> RelatedTickers);
 
@@ -47,6 +86,7 @@ public class FinnhubProvider
 
         try
         {
+            await ThrottleAsync();
             _logger.LogInformation("[finnhub] Fetching earnings calendar {From} to {To}", from, to);
             var resp = await _http.GetStringAsync(url);
             var json = JsonNode.Parse(resp);
@@ -91,6 +131,7 @@ public class FinnhubProvider
 
         try
         {
+            await ThrottleAsync();
             _logger.LogInformation("[finnhub] Fetching market news (category={Category})", category);
             var resp = await _http.GetStringAsync(url);
             var json = JsonNode.Parse(resp);
@@ -140,6 +181,7 @@ public class FinnhubProvider
 
         try
         {
+            await ThrottleAsync();
             var resp = await _http.GetStringAsync(url);
             var json = JsonNode.Parse(resp);
             if (json is not JsonArray arr) return [];

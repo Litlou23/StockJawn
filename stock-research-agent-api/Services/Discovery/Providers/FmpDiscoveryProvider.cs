@@ -18,6 +18,20 @@ namespace StockResearchAgent.Api.Services.Discovery.Providers;
 /// </summary>
 public class FmpDiscoveryProvider : IDiscoveryProvider
 {
+    /// <summary>
+    /// Reject tickers that downstream providers (TwelveData, StockFit) can't process.
+    /// OTC pinks end in F/Y (foreign ordinaries/ADRs with 5+ chars), preferred shares
+    /// contain hyphens, and dots indicate foreign exchanges.
+    /// </summary>
+    private static bool IsSupportedTicker(string ticker)
+    {
+        if (string.IsNullOrEmpty(ticker)) return false;
+        if (ticker.Contains('.') || ticker.Contains('-')) return false;
+        // 5-char tickers ending in F or Y are almost always OTC foreign ordinaries
+        if (ticker.Length == 5 && (ticker[^1] is 'F' or 'Y' or 'f' or 'y')) return false;
+        return true;
+    }
+
     private readonly FmpClient _fmp;
     private readonly ILogger<FmpDiscoveryProvider> _logger;
 
@@ -47,7 +61,7 @@ public class FmpDiscoveryProvider : IDiscoveryProvider
             // Group by ticker, keep highest-importance aggregate
             var tickerGroups = articles
                 .GroupBy(a => a.Symbol)
-                .Where(g => g.Key.Length >= 1 && g.Key.Length <= 5);
+                .Where(g => IsSupportedTicker(g.Key));
 
             foreach (var group in tickerGroups)
             {
@@ -87,7 +101,7 @@ public class FmpDiscoveryProvider : IDiscoveryProvider
 
             var releaseGroups = releases
                 .GroupBy(r => r.Symbol)
-                .Where(g => g.Key.Length >= 1 && g.Key.Length <= 5);
+                .Where(g => IsSupportedTicker(g.Key));
 
             foreach (var group in releaseGroups)
             {
@@ -127,7 +141,7 @@ public class FmpDiscoveryProvider : IDiscoveryProvider
             var earnings = await _fmp.GetEarningsCalendarAsync(7);
             foreach (var entry in earnings)
             {
-                if (string.IsNullOrEmpty(entry.Symbol) || entry.Symbol.Length > 5) continue;
+                if (!IsSupportedTicker(entry.Symbol)) continue;
 
                 var daysUntil = DateTimeOffset.TryParse(entry.Date, out var earningsDate)
                     ? (earningsDate - DateTimeOffset.UtcNow).Days
@@ -175,7 +189,7 @@ public class FmpDiscoveryProvider : IDiscoveryProvider
 
             var filingGroups = filings
                 .GroupBy(f => f.Symbol)
-                .Where(g => g.Key.Length >= 1 && g.Key.Length <= 5);
+                .Where(g => IsSupportedTicker(g.Key));
 
             foreach (var group in filingGroups)
             {
@@ -216,7 +230,7 @@ public class FmpDiscoveryProvider : IDiscoveryProvider
 
             var gradeGroups = grades
                 .GroupBy(g => g.Symbol)
-                .Where(g => g.Key.Length >= 1 && g.Key.Length <= 5);
+                .Where(g => IsSupportedTicker(g.Key));
 
             foreach (var group in gradeGroups)
             {
@@ -261,7 +275,7 @@ public class FmpDiscoveryProvider : IDiscoveryProvider
             var tradeGroups = trades
                 .Where(t => t.SecuritiesTransacted > 0)
                 .GroupBy(t => t.Symbol)
-                .Where(g => g.Key.Length >= 1 && g.Key.Length <= 5);
+                .Where(g => IsSupportedTicker(g.Key));
 
             foreach (var group in tradeGroups)
             {

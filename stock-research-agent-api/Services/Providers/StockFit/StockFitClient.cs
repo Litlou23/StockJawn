@@ -24,6 +24,12 @@ public sealed class StockFitClient
     private const string DefaultBaseUrl = "https://api.stockfit.io/v1/api";
     private const int DefaultTimeoutSeconds = 20;
 
+    // Rate limiter: allow up to 30 req/min to avoid hammering the API
+    // when processing hundreds of tickers concurrently.
+    private const int MaxRequestsPerMinute = 30;
+    private static readonly SemaphoreSlim _throttle = new(1, 1);
+    private static readonly Queue<DateTimeOffset> _requestTimestamps = new();
+
     private readonly HttpClient _http;
     private readonly string _baseUrl;
     private readonly string _authMode;
@@ -69,6 +75,40 @@ public sealed class StockFitClient
     public record RawResponse(int StatusCode, string Body, string Endpoint, TimeSpan Elapsed);
 
     /// <summary>
+    /// Waits if necessary to stay within the rate limit.
+    /// </summary>
+    private async Task ThrottleAsync()
+    {
+        await _throttle.WaitAsync();
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
+                _requestTimestamps.Dequeue();
+
+            if (_requestTimestamps.Count >= MaxRequestsPerMinute)
+            {
+                var oldest = _requestTimestamps.Peek();
+                var waitMs = (int)(60_000 - (now - oldest).TotalMilliseconds) + 500;
+                if (waitMs > 0)
+                {
+                    _logger.LogInformation("[stockfit] Rate limit reached, waiting {WaitMs}ms", waitMs);
+                    await Task.Delay(waitMs);
+                }
+                now = DateTimeOffset.UtcNow;
+                while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
+                    _requestTimestamps.Dequeue();
+            }
+
+            _requestTimestamps.Enqueue(DateTimeOffset.UtcNow);
+        }
+        finally
+        {
+            _throttle.Release();
+        }
+    }
+
+    /// <summary>
     /// Perform a GET. Never throws — every failure is captured as a non-2xx
     /// status plus a diagnostic body ("timeout", "network error: ...", etc.).
     /// </summary>
@@ -86,6 +126,7 @@ public sealed class StockFitClient
 
         try
         {
+            await ThrottleAsync();
             var resp = await _http.GetAsync(url, cancellationToken);
             var body = await resp.Content.ReadAsStringAsync(cancellationToken);
             stopwatch.Stop();

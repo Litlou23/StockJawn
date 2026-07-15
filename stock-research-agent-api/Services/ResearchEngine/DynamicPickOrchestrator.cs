@@ -117,10 +117,9 @@ public class DynamicPickOrchestrator
 
         _logger.LogInformation("[dynamic] Wrapping {Count} predictions as paper stock candidates", runPredictions.Count);
 
-        // 3. Build stock candidates via extracted service
+        // 3. Build stock candidates via extracted service, then batch-save
         var directionalRankings = StockCandidateService.BuildDirectionalRankings(runPredictions);
-        var stockBuilds = new List<StockCandidateService.StockCandidateBuild>();
-        var stockSaveFailures = 0;
+        var builtCandidates = new List<(PredictionCandidate Pred, PaperStockCandidate Candidate, StockCandidateService.DirectionalRanking? Ranking)>();
         foreach (var pred in runPredictions)
         {
             directionalRankings.TryGetValue(pred.Id, out var ranking);
@@ -129,14 +128,30 @@ public class DynamicPickOrchestrator
                 scan.RunId,
                 ranking?.Percentile ?? 0,
                 ranking?.IsTopQuartile ?? false);
-            var saved = await _stockRepo.SaveCandidateAsync(candidate);
+            builtCandidates.Add((pred, candidate, ranking));
+        }
+
+        // Batch save all candidates at once (chunks of 50 internally)
+        var allCandidatesToSave = builtCandidates.Select(b => b.Candidate).ToList();
+        var savedList = await _stockRepo.SaveCandidatesBatchAsync(allCandidatesToSave);
+        var stockSaveFailures = allCandidatesToSave.Count - savedList.Count;
+
+        // Build a lookup from ticker+runId to saved candidate for matching
+        var savedLookup = savedList.ToDictionary(
+            s => $"{s.Ticker}:{s.RunId}", s => s, StringComparer.OrdinalIgnoreCase);
+
+        var stockBuilds = new List<StockCandidateService.StockCandidateBuild>();
+        foreach (var (pred, candidate, ranking) in builtCandidates)
+        {
+            savedLookup.TryGetValue($"{candidate.Ticker}:{candidate.RunId}", out var saved);
+
             if (saved is null)
             {
-                stockSaveFailures++;
                 _logger.LogError("[dynamic] PIPELINE BREAK: Failed to save paper stock candidate for {Ticker} (prediction {PredId}). " +
                     "This likely means the database schema is out of sync with the code. Check for missing columns.",
                     pred.Ticker, pred.Id);
             }
+
             // Classify as a trade setup (non-blocking)
             try
             {

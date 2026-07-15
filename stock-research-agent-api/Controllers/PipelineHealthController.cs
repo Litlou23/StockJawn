@@ -188,7 +188,7 @@ public class PipelineHealthController : ControllerBase
         try
         {
             var evidenceCount = await _db.CountAsync("evidence_records",
-                $"observed_at=gte.{yesterday}");
+                $"timestamp=gte.{yesterday}");
             checks["evidenceRecordsLast24h"] = evidenceCount;
         }
         catch (Exception ex)

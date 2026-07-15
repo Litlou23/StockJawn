@@ -114,7 +114,16 @@ public class ResearchRepository
     public async Task<bool> SaveMarketSnapshotsAsync(List<object> snapshots)
     {
         if (snapshots.Count == 0) return true;
-        var rows = await _db.InsertAsync("market_snapshots", snapshots, returnRows: false);
+
+        // Chunk into batches of 50 to avoid oversized PostgREST payloads.
+        // Each snapshot carries full JSON (bars, news, technicals) so 430
+        // snapshots in one INSERT can exceed body size limits.
+        const int batchSize = 50;
+        for (int i = 0; i < snapshots.Count; i += batchSize)
+        {
+            var chunk = snapshots.Skip(i).Take(batchSize).ToList();
+            await _db.InsertAsync("market_snapshots", chunk, returnRows: false);
+        }
         return true; // InsertAsync logs failures
     }
 
@@ -269,7 +278,15 @@ public class ResearchRepository
     public async Task<bool> SavePredictionInputsAsync(List<object> inputs)
     {
         if (inputs.Count == 0) return true;
-        await _db.InsertAsync("prediction_inputs", inputs, returnRows: false);
+
+        // Chunk into batches of 100 to avoid oversized payloads.
+        // With 430 tickers × ~5 inputs each = 2000+ rows.
+        const int batchSize = 100;
+        for (int i = 0; i < inputs.Count; i += batchSize)
+        {
+            var chunk = inputs.Skip(i).Take(batchSize).ToList();
+            await _db.InsertAsync("prediction_inputs", chunk, returnRows: false);
+        }
         return true;
     }
 

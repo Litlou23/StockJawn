@@ -76,6 +76,68 @@ public class PaperStockCandidateRepository
         return MapCandidate(rows[0]);
     }
 
+    /// <summary>
+    /// Batch-insert multiple candidates in chunks of 50. Returns the list of
+    /// successfully saved candidates. More efficient than calling SaveCandidateAsync
+    /// 430 times individually.
+    /// </summary>
+    public async Task<List<PaperStockCandidate>> SaveCandidatesBatchAsync(List<PaperStockCandidate> candidates)
+    {
+        if (candidates.Count == 0) return [];
+
+        var payloads = candidates.Select(c => (object)new
+        {
+            prediction_id = c.PredictionId,
+            run_id = c.RunId,
+            ticker = c.Ticker,
+            prediction_type = c.PredictionType.ToString(),
+            timeframe = c.Timeframe.ToString(),
+            entry_price = c.EntryPrice,
+            reference_price = c.ReferencePrice,
+            target_price = c.TargetPrice,
+            stop_price = c.StopPrice,
+            catalyst_score = c.CatalystScore,
+            trend_score = c.TrendScore,
+            volume_score = c.VolumeScore,
+            market_context_score = c.MarketContextScore,
+            historical_accuracy_score = c.HistoricalAccuracyScore,
+            risk_penalty = c.RiskPenalty,
+            missing_data_penalty = c.MissingDataPenalty,
+            total_score = c.TotalScore,
+            confidence_score = c.ConfidenceScore,
+            risk_score = c.RiskScore,
+            catalyst_type = c.CatalystType,
+            selection_reason = c.SelectionReason,
+            warnings_json = JsonSerializer.SerializeToNode(c.Warnings),
+            data_availability = c.DataAvailability,
+            candidate_mode = c.CandidateMode.ToString(),
+            quality_tier = c.QualityTier.ToString(),
+            is_actionable = c.IsActionable,
+            threshold_policy_version = c.ThresholdPolicyVersion,
+            inclusion_reason = c.InclusionReason,
+            exclusion_reason = c.ExclusionReason,
+            score_percentile_in_run = c.ScorePercentileInRun,
+            bullish_score = c.BullishScore,
+            bearish_score = c.BearishScore,
+            winning_direction = c.WinningDirection,
+            status = c.Status.ToString(),
+            qualifies_for_options = c.QualifiesForOptions,
+        }).ToList();
+
+        var saved = new List<PaperStockCandidate>();
+        const int batchSize = 50;
+        for (int i = 0; i < payloads.Count; i += batchSize)
+        {
+            var chunk = payloads.Skip(i).Take(batchSize).ToList();
+            var rows = await _db.InsertAsync("paper_stock_candidates", chunk);
+            saved.AddRange(rows.Select(MapCandidate));
+        }
+
+        _logger.LogInformation("[stock-repo] Batch saved {Saved}/{Total} paper stock candidates",
+            saved.Count, candidates.Count);
+        return saved;
+    }
+
     public async Task<PaperStockCandidate?> GetCandidateAsync(string id)
     {
         var row = await _db.SelectSingleAsync("paper_stock_candidates", $"id=eq.{id}");

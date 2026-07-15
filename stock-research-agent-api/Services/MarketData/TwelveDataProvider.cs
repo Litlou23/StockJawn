@@ -12,15 +12,23 @@ public class TwelveDataProvider
 {
     private const string BaseUrl = "https://api.twelvedata.com";
 
-    // Free tier: 8 requests/minute, 800/day. We allow 7/min to stay safe.
-    private const int MaxRequestsPerMinute = 7;
+    // Rate limits — configurable via env vars for paid plans.
+    // Free tier: 8 requests/minute, 800/day.
+    // Grow tier: 30/min, 5000/day. Pro: 120/min, unlimited.
+    private readonly int _maxRequestsPerMinute;
+    private readonly int _maxRequestsPerDay;
     private static readonly SemaphoreSlim _throttle = new(1, 1);
     private static readonly Queue<DateTimeOffset> _requestTimestamps = new();
+    private static int _dailyRequestCount;
+    private static DateTimeOffset _dailyResetDate = DateTimeOffset.MinValue;
 
     private readonly HttpClient _http;
     private readonly string _apiKey;
     private readonly bool _configured;
     private readonly ILogger<TwelveDataProvider> _logger;
+
+    /// <summary>True when the daily quota has been exhausted. Resets at midnight UTC.</summary>
+    public bool DailyQuotaExhausted { get; private set; }
 
     public TwelveDataProvider(IConfiguration configuration, ILogger<TwelveDataProvider> logger)
     {
@@ -29,41 +37,73 @@ public class TwelveDataProvider
         _configured = !string.IsNullOrWhiteSpace(_apiKey);
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 
+        // Allow override for paid plans: TWELVE_DATA_RPM and TWELVE_DATA_DAILY
+        _maxRequestsPerMinute = int.TryParse(configuration["TWELVE_DATA_RPM"], out var rpm) ? rpm : 7;
+        _maxRequestsPerDay = int.TryParse(configuration["TWELVE_DATA_DAILY"], out var daily) ? daily : 750;
+
         if (!_configured)
             _logger.LogWarning("[twelve-data] TWELVE_DATA_API_KEY not set -- market data unavailable");
+        else
+            _logger.LogInformation("[twelve-data] Configured: {RPM} req/min, {Daily} req/day", _maxRequestsPerMinute, _maxRequestsPerDay);
     }
 
     public bool IsConfigured => _configured;
 
     /// <summary>
-    /// Waits if necessary to stay within the free-tier rate limit (7 req/min).
+    /// Waits if necessary to stay within rate limits (per-minute and daily).
+    /// Returns false if the daily quota is exhausted — caller should skip the request.
     /// </summary>
-    private async Task ThrottleAsync()
+    private async Task<bool> ThrottleAsync()
     {
         await _throttle.WaitAsync();
         try
         {
             var now = DateTimeOffset.UtcNow;
-            // Remove timestamps older than 60 seconds
+
+            // Reset daily counter at midnight UTC
+            if (now.Date > _dailyResetDate.Date)
+            {
+                _dailyRequestCount = 0;
+                _dailyResetDate = now;
+                DailyQuotaExhausted = false;
+            }
+
+            // Check daily quota
+            if (_dailyRequestCount >= _maxRequestsPerDay)
+            {
+                if (!DailyQuotaExhausted)
+                {
+                    _logger.LogWarning("[twelve-data] Daily quota exhausted ({Used}/{Max}). " +
+                        "Remaining tickers will proceed without market data. " +
+                        "Set TWELVE_DATA_DAILY to increase or upgrade your plan.",
+                        _dailyRequestCount, _maxRequestsPerDay);
+                    DailyQuotaExhausted = true;
+                }
+                return false;
+            }
+
+            // Per-minute throttle
             while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
                 _requestTimestamps.Dequeue();
 
-            if (_requestTimestamps.Count >= MaxRequestsPerMinute)
+            if (_requestTimestamps.Count >= _maxRequestsPerMinute)
             {
                 var oldest = _requestTimestamps.Peek();
                 var waitMs = (int)(60_000 - (now - oldest).TotalMilliseconds) + 500; // +500ms buffer
                 if (waitMs > 0)
                 {
-                    _logger.LogInformation("[twelve-data] Rate limit reached, waiting {WaitMs}ms", waitMs);
+                    _logger.LogInformation("[twelve-data] Rate limit reached ({Used}/{Max}/min), waiting {WaitMs}ms",
+                        _requestTimestamps.Count, _maxRequestsPerMinute, waitMs);
                     await Task.Delay(waitMs);
                 }
-                // Clean again after waiting
                 now = DateTimeOffset.UtcNow;
                 while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
                     _requestTimestamps.Dequeue();
             }
 
             _requestTimestamps.Enqueue(DateTimeOffset.UtcNow);
+            _dailyRequestCount++;
+            return true;
         }
         finally
         {
@@ -79,7 +119,7 @@ public class TwelveDataProvider
     {
         if (!_configured) return null;
 
-        await ThrottleAsync();
+        if (!await ThrottleAsync()) return null;
         _logger.LogInformation("[twelve-data] calling /quote for {Ticker}", ticker);
 
         var url = $"{BaseUrl}/quote?symbol={ticker}&apikey={_apiKey}";
@@ -121,7 +161,7 @@ public class TwelveDataProvider
     {
         if (!_configured) return [];
 
-        await ThrottleAsync();
+        if (!await ThrottleAsync()) return [];
         _logger.LogInformation("[twelve-data] calling /time_series for {Ticker}", ticker);
 
         var url = $"{BaseUrl}/time_series?symbol={ticker}&interval=1day&outputsize={count}&apikey={_apiKey}";

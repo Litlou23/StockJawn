@@ -58,10 +58,12 @@ public class DailyResearchRunService
         _logger.LogInformation("[research-engine] Starting morning scan...");
         var errors = new List<string>();
 
-        // Clean up any runs stuck in 'started' for >20 min (process was likely killed)
+        // Clean up any runs stuck in 'started' for >2 hours (process was likely killed).
+        // At 430+ tickers with TwelveData rate limiting (7 req/min), a full scan can
+        // legitimately take 60–90 minutes.
         try
         {
-            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(20));
+            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(120));
             if (cleaned > 0)
                 _logger.LogWarning("[research-engine] Cleaned up {Count} stuck research run(s)", cleaned);
         }
@@ -100,8 +102,25 @@ public class DailyResearchRunService
 
             _logger.LogInformation("[research-engine] Building snapshots for {Count} research candidates: [{Tickers}]",
                 tickers.Length, string.Join(", ", tickers));
-            var snapshotTasks = tickers
-                .Select(t => _predGen.BuildMarketSnapshotAsync(t, run.Id));
+
+            // Process tickers in controlled batches to avoid overwhelming
+            // downstream APIs (TwelveData 7/min, Finnhub 60/min, StockFit).
+            // Each snapshot hits ~6 API calls, so concurrency of 5 keeps
+            // outbound connections manageable while still parallelizing I/O.
+            const int maxConcurrency = 5;
+            var throttle = new SemaphoreSlim(maxConcurrency);
+            var snapshotTasks = tickers.Select(async t =>
+            {
+                await throttle.WaitAsync();
+                try
+                {
+                    return await _predGen.BuildMarketSnapshotAsync(t, run.Id);
+                }
+                finally
+                {
+                    throttle.Release();
+                }
+            });
             var snapshots = (await Task.WhenAll(snapshotTasks)).ToList();
 
             // Save snapshots
@@ -259,10 +278,12 @@ public class DailyResearchRunService
         _logger.LogInformation("[research-engine] Starting end-of-day review...");
         var errors = new List<string>();
 
-        // Clean up any runs stuck in 'started' for >20 min (process was likely killed)
+        // Clean up any runs stuck in 'started' for >2 hours (process was likely killed).
+        // At 430+ tickers with TwelveData rate limiting (7 req/min), a full scan can
+        // legitimately take 60–90 minutes.
         try
         {
-            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(20));
+            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(120));
             if (cleaned > 0)
                 _logger.LogWarning("[research-engine] Cleaned up {Count} stuck research run(s)", cleaned);
         }
@@ -324,12 +345,37 @@ public class DailyResearchRunService
     {
         var activeAssets = await _universe.GetActiveAssetsAsync(500);
         // Deduplicate by ticker (case-insensitive), keeping highest InterestScore
-        var assetLookup = activeAssets
+        var deduped = activeAssets
             .GroupBy(a => a.Ticker, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                g => g.Key,
-                g => g.OrderByDescending(a => a.InterestScore).First(),
-                StringComparer.OrdinalIgnoreCase);
+            .Select(g => g.OrderByDescending(a => a.InterestScore).First())
+            .ToList();
+
+        // Filter: skip low-value tickers that would waste API quota.
+        // Keep tickers that are either:
+        //   - Past the Discovered stage (actively being researched), OR
+        //   - Have an interest score >= 15 (meaningful evidence accumulated)
+        // Then cap total to stay within API rate limits.
+        const int minInterestScore = 15;
+        const int maxCandidates = 150;
+
+        var qualified = deduped
+            .Where(a => a.CurrentState != ResearchState.Discovered || a.InterestScore >= minInterestScore)
+            .OrderByDescending(a => a.InterestScore)
+            .Take(maxCandidates)
+            .ToList();
+
+        var skipped = deduped.Count - qualified.Count;
+        if (skipped > 0)
+            _logger.LogInformation(
+                "[research-engine] Filtered {Skipped} low-priority tickers " +
+                "(score < {MinScore} in Discovered state or beyond cap of {Cap}). " +
+                "{Qualified} candidates proceeding.",
+                skipped, minInterestScore, maxCandidates, qualified.Count);
+
+        var assetLookup = qualified.ToDictionary(
+            a => a.Ticker,
+            a => a,
+            StringComparer.OrdinalIgnoreCase);
 
         if (assetLookup.Count > 0)
         {

@@ -100,20 +100,59 @@ public class PredictionGenerator
     // Prediction generation — signals first, AI explains
     // -----------------------------------------------------------------------
 
-    public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
-        GeneratePredictionForTickerAsync(string ticker, string runId, MarketSnapshot snapshot, ResearchAsset? researchAsset = null)
+    /// <summary>
+    /// Preloaded data that is the same for every ticker in a batch run.
+    /// Load once via <see cref="PreloadSharedContextAsync"/> and pass to each ticker.
+    /// </summary>
+    public record SharedPredictionContext(
+        Dictionary<string, double> Weights,
+        List<string> Lessons);
+
+    /// <summary>
+    /// Load scoring weights, overrides, and lessons once for the entire batch.
+    /// </summary>
+    public async Task<SharedPredictionContext> PreloadSharedContextAsync()
     {
-        // ── Step 1: Compute indicators, benchmark, and scores ────────
         var weights = (await _repo.GetScoringWeightsAsync())
             .ToDictionary(w => w.SignalName, w => w.Weight);
 
-        // Merge adaptive weight overrides from the learning engine
         var overrides = await _repo.GetActiveWeightOverridesAsync();
         foreach (var o in overrides)
             weights[o.SignalName] = o.EffectiveWeight;
 
         var lessons = (await _repo.GetRecentLearningInsightsAsync(10))
             .Select(i => i.Summary).ToList();
+
+        return new SharedPredictionContext(weights, lessons);
+    }
+
+    public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
+        GeneratePredictionForTickerAsync(string ticker, string runId, MarketSnapshot snapshot,
+            ResearchAsset? researchAsset = null, SharedPredictionContext? sharedContext = null)
+    {
+        // ── Step 1: Compute indicators, benchmark, and scores ────────
+        Dictionary<string, double> weights;
+        List<string> lessons;
+
+        if (sharedContext is not null)
+        {
+            // Use preloaded data — avoids 3 DB round trips per ticker
+            weights = new Dictionary<string, double>(sharedContext.Weights);
+            lessons = sharedContext.Lessons;
+        }
+        else
+        {
+            // Fallback for single-ticker calls
+            weights = (await _repo.GetScoringWeightsAsync())
+                .ToDictionary(w => w.SignalName, w => w.Weight);
+
+            var overrides = await _repo.GetActiveWeightOverridesAsync();
+            foreach (var o in overrides)
+                weights[o.SignalName] = o.EffectiveWeight;
+
+            lessons = (await _repo.GetRecentLearningInsightsAsync(10))
+                .Select(i => i.Summary).ToList();
+        }
 
         var indicators = IndicatorEngine.Compute(snapshot.RecentBars);
 
@@ -490,11 +529,17 @@ public class PredictionGenerator
         // Track within-batch additions to prevent intra-batch duplicates
         var batchTracker = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
+        // Preload shared data once instead of per-ticker (saves 3 DB queries × N tickers)
+        var sharedContext = await PreloadSharedContextAsync();
+        _logger.LogInformation("[prediction] Preloaded shared context: {WeightCount} weights, {LessonCount} lessons",
+            sharedContext.Weights.Count, sharedContext.Lessons.Count);
+
         foreach (var snapshot in snapshots)
         {
             ResearchAsset? asset = null;
             assetLookup?.TryGetValue(snapshot.Ticker, out asset);
-            var (pred, inputs) = await GeneratePredictionForTickerAsync(snapshot.Ticker, runId, snapshot, asset);
+            var (pred, inputs) = await GeneratePredictionForTickerAsync(
+                snapshot.Ticker, runId, snapshot, asset, sharedContext);
             if (pred is not null)
             {
                 var tickerKey = pred.Ticker.ToUpperInvariant();
