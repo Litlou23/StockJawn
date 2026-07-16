@@ -30,7 +30,8 @@ public class ResearchController : ControllerBase
         [FromQuery] string? status = null,
         [FromQuery] int limit = 30)
     {
-        var predictions = await _repo.GetRecentPredictionsAsync(limit, status);
+        var championId = await _repo.GetChampionProfileIdAsync();
+        var predictions = await _repo.GetRecentPredictionsAsync(limit, status, profileId: championId);
         return Ok(new { count = predictions.Count, predictions });
     }
 
@@ -50,6 +51,7 @@ public class ResearchController : ControllerBase
     {
         var categoryFilter = BuildCategoryFilter(category);
 
+        var championId = await _repo.GetChampionProfileIdAsync();
         List<PredictionCandidate> predictions;
 
         if (from is not null && DateTimeOffset.TryParse(from, out var fromDate))
@@ -57,11 +59,11 @@ public class ResearchController : ControllerBase
             var toDate = to is not null && DateTimeOffset.TryParse(to, out var td)
                 ? td
                 : DateTimeOffset.UtcNow;
-            predictions = await _repo.GetPredictionsByDateRangeAsync(fromDate, toDate, extraFilter: categoryFilter);
+            predictions = await _repo.GetPredictionsByDateRangeAsync(fromDate, toDate, extraFilter: categoryFilter, profileId: championId);
         }
         else
         {
-            predictions = await _repo.GetRecentPredictionsAsync(limit ?? 500, extraFilter: categoryFilter);
+            predictions = await _repo.GetRecentPredictionsAsync(limit ?? 500, extraFilter: categoryFilter, profileId: championId);
         }
 
         var predictionIds = predictions.Select(p => p.Id).ToList();
@@ -226,8 +228,9 @@ public class ResearchDebugController : ControllerBase
     [HttpGet("research-engine")]
     public async Task<IActionResult> GetResearchEngineStatus()
     {
+        var championId = await _repo.GetChampionProfileIdAsync();
         var runs = await _repo.GetRecentResearchRunsAsync(5);
-        var predictions = await _repo.GetRecentPredictionsAsync(10);
+        var predictions = await _repo.GetRecentPredictionsAsync(10, profileId: championId);
         var outcomes = await _repo.GetRecentOutcomesAsync(10);
         var signalPerf = await _repo.GetAllSignalPerformanceAsync();
         var weights = await _repo.GetScoringWeightsAsync();

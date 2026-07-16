@@ -380,8 +380,9 @@ public class ChatToolsController : ControllerBase
         ticker = ticker.Trim().ToUpperInvariant();
         var warnings = new List<string>();
 
-        // Latest prediction for this ticker
-        var predictions = await _researchRepo.GetRecentPredictionsAsync(50);
+        // Latest prediction for this ticker (champion profile only)
+        var championId = await _researchRepo.GetChampionProfileIdAsync();
+        var predictions = await _researchRepo.GetRecentPredictionsAsync(50, profileId: championId);
         var pred = predictions.FirstOrDefault(p => p.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase));
 
         // Stock candidate
@@ -716,7 +717,8 @@ public class ChatToolsController : ControllerBase
         ticker = ticker.Trim().ToUpperInvariant();
         var warnings = new List<string>();
 
-        var predictions = await _researchRepo.GetRecentPredictionsAsync(50);
+        var championId = await _researchRepo.GetChampionProfileIdAsync();
+        var predictions = await _researchRepo.GetRecentPredictionsAsync(50, profileId: championId);
         var pred = predictions.FirstOrDefault(p => p.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase));
 
         if (pred is null)

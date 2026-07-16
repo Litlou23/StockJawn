@@ -116,7 +116,8 @@ public class TheoreticalOptionsSimulator
         {
             try
             {
-                var predictions = await _repo.GetRecentPredictionsAsync(200);
+                var championId = await _repo.GetChampionProfileIdAsync();
+                var predictions = await _repo.GetRecentPredictionsAsync(200, profileId: championId);
                 var pred = predictions.FirstOrDefault(p => p.Id == request.PredictionId);
                 if (pred is not null)
                 {

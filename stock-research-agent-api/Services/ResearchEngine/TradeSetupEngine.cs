@@ -340,7 +340,7 @@ public class TradeSetupEngine
         ComputeTradeParameters(PredictionCandidate pred, ScoringEngine.ScoringResult scoring)
     {
         var entry = pred.EntryReferencePrice;
-        if (entry is null or 0) return (null, null, null, null);
+        if (entry is null || entry == 0) return (null, null, null, null);
 
         // Use prediction's own levels if available
         var target = pred.TargetPrice;

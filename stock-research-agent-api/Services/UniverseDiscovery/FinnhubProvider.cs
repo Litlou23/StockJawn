@@ -12,10 +12,11 @@ public class FinnhubProvider
 {
     private const string BaseUrl = "https://finnhub.io/api/v1";
 
-    // Free tier: 60 calls/min. Keep 5 req/min headroom.
-    private const int MaxRequestsPerMinute = 55;
+    // Free tier: 60 calls/min. Enforce minimum gap to prevent bursts.
+    // 60s/55 ≈ 1.1s + 100ms buffer = ~1.2s between requests.
+    private const int MinGapMs = 1_200;
     private static readonly SemaphoreSlim _throttle = new(1, 1);
-    private static readonly Queue<DateTimeOffset> _requestTimestamps = new();
+    private static DateTimeOffset _lastRequestTime = DateTimeOffset.MinValue;
 
     private readonly HttpClient _http;
     private readonly string _apiKey;
@@ -44,24 +45,14 @@ public class FinnhubProvider
         try
         {
             var now = DateTimeOffset.UtcNow;
-            while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
-                _requestTimestamps.Dequeue();
-
-            if (_requestTimestamps.Count >= MaxRequestsPerMinute)
+            var elapsed = (now - _lastRequestTime).TotalMilliseconds;
+            if (elapsed < MinGapMs)
             {
-                var oldest = _requestTimestamps.Peek();
-                var waitMs = (int)(60_000 - (now - oldest).TotalMilliseconds) + 500;
-                if (waitMs > 0)
-                {
-                    _logger.LogInformation("[finnhub] Rate limit reached, waiting {WaitMs}ms", waitMs);
-                    await Task.Delay(waitMs);
-                }
-                now = DateTimeOffset.UtcNow;
-                while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
-                    _requestTimestamps.Dequeue();
+                var waitMs = (int)(MinGapMs - elapsed);
+                await Task.Delay(waitMs);
             }
 
-            _requestTimestamps.Enqueue(DateTimeOffset.UtcNow);
+            _lastRequestTime = DateTimeOffset.UtcNow;
         }
         finally
         {

@@ -50,7 +50,8 @@ public class PaperOptionsService
 
     public async Task<List<PredictionCandidate>> GetEligiblePredictionsAsync(int limit = 30)
     {
-        var recent = await _researchRepo.GetRecentPredictionsAsync(limit);
+        var championId = await _researchRepo.GetChampionProfileIdAsync();
+        var recent = await _researchRepo.GetRecentPredictionsAsync(limit, profileId: championId);
         // Eligible = open, bullish/bearish (no naked C/P on neutral), and confidence
         // high enough that option premium isn't pure noise. Lowered from 30 to 15
         // because current research runs produce modest confidence scores.

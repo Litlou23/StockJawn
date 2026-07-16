@@ -166,6 +166,7 @@ try
     builder.Services.AddSingleton<IOpportunityLearningRepository, SupabaseOpportunityLearningRepository>();
     builder.Services.AddSingleton<IOpportunityLearningService, OpportunityLearningService>();
     builder.Services.AddSingleton<MarketSnapshotBuilder>();
+    builder.Services.AddSingleton<PredictionProfileRepository>();
     builder.Services.AddSingleton<PredictionGenerator>();
     builder.Services.AddSingleton<OutcomeEvaluator>();
     builder.Services.AddSingleton<VolatilityOpportunityEngine>();

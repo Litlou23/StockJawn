@@ -12,6 +12,7 @@ public class ResearchRepository
 {
     private readonly SupabaseClient _db;
     private readonly ILogger<ResearchRepository> _logger;
+    private string? _cachedChampionProfileId;
 
     public ResearchRepository(SupabaseClient db, ILogger<ResearchRepository> logger)
     {
@@ -20,6 +21,14 @@ public class ResearchRepository
     }
 
     public bool IsConfigured => _db.IsConfigured;
+
+    public async Task<string?> GetChampionProfileIdAsync()
+    {
+        if (_cachedChampionProfileId != null) return _cachedChampionProfileId;
+        var row = await _db.SelectSingleAsync("prediction_profiles", "role=eq.champion");
+        _cachedChampionProfileId = row?["id"]?.ToString();
+        return _cachedChampionProfileId;
+    }
 
     // -----------------------------------------------------------------------
     // Research Runs
@@ -156,18 +165,21 @@ public class ResearchRepository
         return (fallbackIds.Count > 0, fallbackIds);
     }
 
-    public async Task<List<PredictionCandidate>> GetOpenPredictionsAsync()
+    public async Task<List<PredictionCandidate>> GetOpenPredictionsAsync(string? profileId = null)
     {
+        var filter = "status=eq.open";
+        if (profileId is not null) filter += $"&profile_id=eq.{profileId}";
         var rows = await _db.SelectAsync("prediction_candidates",
-            filter: "status=eq.open", order: "created_at.desc");
+            filter: filter, order: "created_at.desc");
         return rows.Select(MapPrediction).ToList();
     }
 
-    public async Task<List<PredictionCandidate>> GetRecentPredictionsAsync(int limit = 30, string? status = null, string? extraFilter = null)
+    public async Task<List<PredictionCandidate>> GetRecentPredictionsAsync(int limit = 30, string? status = null, string? extraFilter = null, string? profileId = null)
     {
         var parts = new List<string>();
         if (status is not null) parts.Add($"status=eq.{status}");
         if (extraFilter is not null) parts.Add(extraFilter);
+        if (profileId is not null) parts.Add($"profile_id=eq.{profileId}");
         var filter = parts.Count > 0 ? string.Join("&", parts) : null;
         var rows = await _db.SelectAsync("prediction_candidates",
             filter: filter, order: "created_at.desc", limit: limit);
@@ -188,7 +200,7 @@ public class ResearchRepository
     }
 
     public async Task<List<PredictionCandidate>> GetPredictionsByDateRangeAsync(
-        DateTimeOffset from, DateTimeOffset to, string? status = null, string? extraFilter = null)
+        DateTimeOffset from, DateTimeOffset to, string? status = null, string? extraFilter = null, string? profileId = null)
     {
         var filters = new List<string>
         {
@@ -197,6 +209,7 @@ public class ResearchRepository
         };
         if (status is not null) filters.Add($"status=eq.{status}");
         if (extraFilter is not null) filters.Add(extraFilter);
+        if (profileId is not null) filters.Add($"profile_id=eq.{profileId}");
 
         var filter = string.Join("&", filters);
         var rows = await _db.SelectAsync("prediction_candidates",
@@ -246,9 +259,9 @@ public class ResearchRepository
         };
     }
 
-    public async Task<List<PredictionWithOutcome>> GetRecentPredictionsWithOutcomesAsync(int limit = 10)
+    public async Task<List<PredictionWithOutcome>> GetRecentPredictionsWithOutcomesAsync(int limit = 10, string? profileId = null)
     {
-        var predictions = await GetRecentPredictionsAsync(limit);
+        var predictions = await GetRecentPredictionsAsync(limit, profileId: profileId);
         if (predictions.Count == 0) return [];
 
         var predictionIds = predictions.Select(p => p.Id).ToList();
@@ -323,6 +336,17 @@ public class ResearchRepository
         var rows = await _db.SelectAsync("prediction_outcomes",
             order: "created_at.desc", limit: limit);
         return rows.Select(MapOutcome).ToList();
+    }
+
+    /// <summary>
+    /// Get outcomes only for predictions belonging to a specific profile.
+    /// Fetches the profile's prediction IDs first, then filters outcomes.
+    /// </summary>
+    public async Task<List<PredictionOutcome>> GetOutcomesForProfileAsync(string profileId, int limit = 500)
+    {
+        var predictions = await GetRecentPredictionsAsync(limit, profileId: profileId);
+        if (predictions.Count == 0) return [];
+        return await GetOutcomesForPredictionsAsync(predictions.Select(p => p.Id).ToList());
     }
 
     public async Task<List<PredictionOutcome>> GetOutcomesForPredictionsAsync(List<string> predictionIds)
@@ -452,11 +476,14 @@ public class ResearchRepository
     }
 
     public async Task<List<SignalObservation>> GetSignalObservationsAsync(
-        int limit = 500, int? windowDays = null)
+        int limit = 500, int? windowDays = null, string? profileId = null)
     {
-        var filter = windowDays.HasValue
-            ? $"created_at=gte.{DateTimeOffset.UtcNow.AddDays(-windowDays.Value):yyyy-MM-dd}"
-            : null;
+        var parts = new List<string>();
+        if (windowDays.HasValue)
+            parts.Add($"created_at=gte.{DateTimeOffset.UtcNow.AddDays(-windowDays.Value):yyyy-MM-dd}");
+        if (profileId is not null)
+            parts.Add($"profile_id=eq.{profileId}");
+        var filter = parts.Count > 0 ? string.Join("&", parts) : null;
         var rows = await _db.SelectAsync("prediction_signal_observations",
             filter: filter, order: "created_at.desc", limit: limit);
         return rows.Select(r => new SignalObservation
@@ -541,10 +568,12 @@ public class ResearchRepository
     // Supersession Learning
     // -----------------------------------------------------------------------
 
-    public async Task<List<PredictionCandidate>> GetSupersededPredictionsAsync(int limit = 200)
+    public async Task<List<PredictionCandidate>> GetSupersededPredictionsAsync(int limit = 200, string? profileId = null)
     {
+        var parts = new List<string> { "status=eq.superseded", "superseded_by=not.is.null" };
+        if (profileId is not null) parts.Add($"profile_id=eq.{profileId}");
         var rows = await _db.SelectAsync("prediction_candidates",
-            filter: "status=eq.superseded&superseded_by=not.is.null",
+            filter: string.Join("&", parts),
             order: "created_at.desc", limit: limit);
         return rows.Select(MapPrediction).ToList();
     }
@@ -678,6 +707,7 @@ public class ResearchRepository
                 prediction_id = rec.PredictionId,
                 run_id = rec.RunId,
                 ticker = rec.Ticker,
+                profile_id = rec.ProfileId,
                 opportunity_type = rec.OpportunityType,
                 opportunity_score = rec.OpportunityScore,
                 stock_volatility_regime = rec.StockVolatilityRegime,
@@ -727,11 +757,14 @@ public class ResearchRepository
         return rows.Select(MapLearningRecord).ToList();
     }
 
-    public async Task<List<VolatilityLearningRecord>> GetAllVolatilityLearningStatsAsync(int limit = 1000, int? windowDays = null)
+    public async Task<List<VolatilityLearningRecord>> GetAllVolatilityLearningStatsAsync(int limit = 1000, int? windowDays = null, string? profileId = null)
     {
-        var filter = windowDays.HasValue
-            ? $"created_at=gte.{DateTimeOffset.UtcNow.AddDays(-windowDays.Value):yyyy-MM-dd}"
-            : null;
+        var parts = new List<string>();
+        if (windowDays.HasValue)
+            parts.Add($"created_at=gte.{DateTimeOffset.UtcNow.AddDays(-windowDays.Value):yyyy-MM-dd}");
+        if (profileId is not null)
+            parts.Add($"profile_id=eq.{profileId}");
+        var filter = parts.Count > 0 ? string.Join("&", parts) : null;
         var rows = await _db.SelectAsync("volatility_learning_stats",
             filter: filter, order: "created_at.desc", limit: limit);
         return rows.Select(MapLearningRecord).ToList();
@@ -769,6 +802,7 @@ public class ResearchRepository
             BounceQualityRealized = r["bounce_quality_realized"]?.ToString(),
             OpportunitySuccess = r["opportunity_success"]?.GetValue<bool?>(),
             OpportunitySuccessReason = r["opportunity_success_reason"]?.ToString(),
+            ProfileId = r["profile_id"]?.ToString(),
         };
     }
 
@@ -1064,6 +1098,7 @@ public class ResearchRepository
         SupportLevel = GetNullableDouble(r, "support_level"),
         ResistanceLevel = GetNullableDouble(r, "resistance_level"),
         RiskRewardRatio = GetNullableDouble(r, "risk_reward_ratio"),
+        ExpectedValuePercent = GetNullableDouble(r, "expected_value_percent"),
         PricePredictionMethod = r["price_prediction_method"]?.ToString(),
         PricePredictionWarnings = GetStringList(r, "price_prediction_warnings"),
         ScoreDebugJson = r["score_debug_json"]?.ToString(),
@@ -1084,6 +1119,7 @@ public class ResearchRepository
         Status = r["status"]?.ToString() ?? "open",
         SupersededBy = r["superseded_by"]?.ToString(),
         SupersessionReason = r["supersession_reason"]?.ToString(),
+        ProfileId = r["profile_id"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };
 

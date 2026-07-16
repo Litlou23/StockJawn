@@ -59,6 +59,13 @@ const PortfolioIcon = (
   </svg>
 );
 
+const ProfilesIcon = (
+  <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0H5a2 2 0 01-2-2v-4m6 6h10a2 2 0 002-2v-4" />
+    <path strokeLinecap="round" strokeLinejoin="round" d="M14 9l-1 4h2l-1 4" />
+  </svg>
+);
+
 const SystemIcon = (
   <svg viewBox="0 0 24 24" fill="none" strokeWidth={1.8} stroke="currentColor" className="h-5 w-5">
     <circle cx="12" cy="12" r="3" />
@@ -98,6 +105,14 @@ export const navEntries: NavEntry[] = [
     label: 'Portfolio',
     icon: PortfolioIcon,
     href: '/portfolio',
+  },
+  {
+    label: 'Profiles',
+    icon: ProfilesIcon,
+    children: [
+      { href: '/profiles', label: 'Profiles' },
+      { href: '/profiles/analytics', label: 'Profile Analytics' },
+    ],
   },
   {
     label: 'System',

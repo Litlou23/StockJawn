@@ -90,7 +90,8 @@ public class DynamicWatchlistService
         var scoringWeights = (await _researchRepo.GetScoringWeightsAsync())
             .ToDictionary(w => w.SignalName, w => w.Weight);
         var recentInsights = await _researchRepo.GetRecentLearningInsightsAsync(10);
-        var recentPredictions = await _researchRepo.GetRecentPredictionsAsync(100);
+        var championId = await _researchRepo.GetChampionProfileIdAsync();
+        var recentPredictions = await _researchRepo.GetRecentPredictionsAsync(100, profileId: championId);
         var recentOutcomes = await _researchRepo.GetRecentOutcomesAsync(100);
 
         // Build prediction accuracy map per ticker

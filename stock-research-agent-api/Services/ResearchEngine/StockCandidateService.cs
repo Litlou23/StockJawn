@@ -107,13 +107,13 @@ public class StockCandidateService
 
         var dataAvailability = pred.MissingDataWarnings.Count == 0
             ? "real"
-            : (pred.EntryReferencePrice is null or 0 ? "unavailable" : "partial");
+            : (pred.EntryReferencePrice is null || pred.EntryReferencePrice == 0 ? "unavailable" : "partial");
 
         // Try to enrich entry/target/stop with current quote.
         double? entry = pred.EntryReferencePrice;
         double? target = null, stop = null;
 
-        if (entry is null or 0)
+        if (entry is null || entry == 0)
         {
             var quote = await _marketData.GetQuoteAsync(pred.Ticker);
             entry = quote?.Price;
@@ -121,7 +121,7 @@ public class StockCandidateService
                 warnings.Add("Twelve Data quote unavailable at candidate creation time.");
         }
 
-        if (entry is double e and > 0)
+        if (entry is double e && e > 0)
         {
             // Simple deterministic target/stop bands based on prediction direction.
             // Bullish: +2%/+5% targets, -2% stop. Bearish: mirror.
@@ -189,11 +189,11 @@ public class StockCandidateService
         var isActionable = candidateMode != CandidateMode.learning;
         var qualifies = PredictionCategoryHelper.IsDirectional(pred.PredictionType)
                      && _optionsProvider.IsConfigured
-                     && entry is double and > 0
+                     && entry is double entryVal && entryVal > 0
                      && pred.RiskScore <= LearningMaxRiskForOptions
                      && (pred.ConfidenceScore >= LearningMinConfidenceForOptions || isTopQuartileDirectional);
 
-        var status = (entry is null or 0)
+        var status = (entry is null || entry == 0)
             ? PaperStockStatus.unavailable
             : !PredictionCategoryHelper.IsDirectional(pred.PredictionType)
                 ? PaperStockStatus.watch_only
@@ -287,7 +287,7 @@ public class StockCandidateService
             return false;
         }
 
-        if (c.EntryPrice is null or 0)
+        if (c.EntryPrice is null || c.EntryPrice == 0)
         {
             await _stockRepo.SaveOutcomeAsync(new PaperStockOutcome
             {
@@ -674,9 +674,12 @@ public class StockCandidateService
 
     public static Dictionary<string, DirectionalRanking> BuildDirectionalRankings(List<PredictionCandidate> runPredictions)
     {
+        // Rank by Expected Value first (best risk/reward bets), then confidence as tiebreaker.
+        // Predictions without EV (missing price data) sort after those with EV.
         var directional = runPredictions
             .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType))
-            .OrderByDescending(p => p.ConfidenceScore)
+            .OrderByDescending(p => p.ExpectedValuePercent ?? double.MinValue)
+            .ThenByDescending(p => p.ConfidenceScore)
             .ThenBy(p => p.RiskScore)
             .ThenBy(p => p.Ticker)
             .ToList();

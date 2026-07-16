@@ -17,8 +17,11 @@ public class TwelveDataProvider
     // Grow tier: 30/min, 5000/day. Pro: 120/min, unlimited.
     private readonly int _maxRequestsPerMinute;
     private readonly int _maxRequestsPerDay;
+    private readonly int _minGapMs; // minimum ms between requests to avoid bursts
     private static readonly SemaphoreSlim _throttle = new(1, 1);
-    private static readonly Queue<DateTimeOffset> _requestTimestamps = new();
+    private static DateTimeOffset _lastRequestTime = DateTimeOffset.MinValue;
+    private static int _requestsThisMinute;
+    private static DateTimeOffset _minuteWindowStart = DateTimeOffset.MinValue;
     private static int _dailyRequestCount;
     private static DateTimeOffset _dailyResetDate = DateTimeOffset.MinValue;
 
@@ -40,6 +43,8 @@ public class TwelveDataProvider
         // Allow override for paid plans: TWELVE_DATA_RPM and TWELVE_DATA_DAILY
         _maxRequestsPerMinute = int.TryParse(configuration["TWELVE_DATA_RPM"], out var rpm) ? rpm : 7;
         _maxRequestsPerDay = int.TryParse(configuration["TWELVE_DATA_DAILY"], out var daily) ? daily : 750;
+        // Space requests evenly: 60s / rpm + 500ms buffer → e.g. 7 rpm = ~9s gap
+        _minGapMs = (60_000 / _maxRequestsPerMinute) + 500;
 
         if (!_configured)
             _logger.LogWarning("[twelve-data] TWELVE_DATA_API_KEY not set -- market data unavailable");
@@ -82,26 +87,17 @@ public class TwelveDataProvider
                 return false;
             }
 
-            // Per-minute throttle
-            while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
-                _requestTimestamps.Dequeue();
-
-            if (_requestTimestamps.Count >= _maxRequestsPerMinute)
+            // Enforce minimum gap between requests to prevent bursts.
+            // TwelveData rejects simultaneous requests even if under the per-minute cap.
+            var elapsed = (now - _lastRequestTime).TotalMilliseconds;
+            if (elapsed < _minGapMs)
             {
-                var oldest = _requestTimestamps.Peek();
-                var waitMs = (int)(60_000 - (now - oldest).TotalMilliseconds) + 500; // +500ms buffer
-                if (waitMs > 0)
-                {
-                    _logger.LogInformation("[twelve-data] Rate limit reached ({Used}/{Max}/min), waiting {WaitMs}ms",
-                        _requestTimestamps.Count, _maxRequestsPerMinute, waitMs);
-                    await Task.Delay(waitMs);
-                }
-                now = DateTimeOffset.UtcNow;
-                while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
-                    _requestTimestamps.Dequeue();
+                var waitMs = (int)(_minGapMs - elapsed);
+                _logger.LogDebug("[twelve-data] Spacing requests, waiting {WaitMs}ms", waitMs);
+                await Task.Delay(waitMs);
             }
 
-            _requestTimestamps.Enqueue(DateTimeOffset.UtcNow);
+            _lastRequestTime = DateTimeOffset.UtcNow;
             _dailyRequestCount++;
             return true;
         }

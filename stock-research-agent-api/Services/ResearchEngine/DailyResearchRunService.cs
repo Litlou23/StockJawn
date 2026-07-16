@@ -20,6 +20,7 @@ public class DailyResearchRunService
     private readonly DailyReportService _reports;
     private readonly ResearchRepository _repo;
     private readonly WatchlistRepository _watchlistRepo;
+    private readonly PredictionProfileRepository _profileRepo;
     private readonly IResearchUniverseService _universe;
     private readonly ILogger<DailyResearchRunService> _logger;
 
@@ -31,6 +32,7 @@ public class DailyResearchRunService
         DailyReportService reports,
         ResearchRepository repo,
         WatchlistRepository watchlistRepo,
+        PredictionProfileRepository profileRepo,
         IResearchUniverseService universe,
         ILogger<DailyResearchRunService> logger)
     {
@@ -41,6 +43,7 @@ public class DailyResearchRunService
         _reports = reports;
         _repo = repo;
         _watchlistRepo = watchlistRepo;
+        _profileRepo = profileRepo;
         _universe = universe;
         _logger = logger;
     }
@@ -103,11 +106,12 @@ public class DailyResearchRunService
             _logger.LogInformation("[research-engine] Building snapshots for {Count} research candidates: [{Tickers}]",
                 tickers.Length, string.Join(", ", tickers));
 
-            // Process tickers in controlled batches to avoid overwhelming
-            // downstream APIs (TwelveData 7/min, Finnhub 60/min, StockFit).
-            // Each snapshot hits ~6 API calls, so concurrency of 5 keeps
-            // outbound connections manageable while still parallelizing I/O.
-            const int maxConcurrency = 5;
+            // Process tickers with limited concurrency. Each snapshot hits ~6 API
+            // calls across TwelveData (7/min), StockFit, and Finnhub. The per-provider
+            // throttles enforce minimum gaps between requests, so high concurrency just
+            // means more tasks waiting. Concurrency of 2 lets one ticker's StockFit/Finnhub
+            // calls overlap with another's TwelveData wait.
+            const int maxConcurrency = 2;
             var throttle = new SemaphoreSlim(maxConcurrency);
             var snapshotTasks = tickers.Select(async t =>
             {
@@ -136,13 +140,39 @@ public class DailyResearchRunService
             }).ToList();
             await _repo.SaveMarketSnapshotsAsync(snapshotRows);
 
-            // 2. Generate predictions
-            _logger.LogInformation("[research-engine] Generating predictions...");
-            var (predictions, allInputs, pendingSupersessions) = await _predGen.GeneratePredictionsForWatchlistAsync(
-                tickers, run.Id, snapshots, assetLookup);
+            // 2. Determine which profiles to generate predictions for
+            //    Champion always runs; challengers in "testing" status also run.
+            var profilesToRun = new List<(string Id, string Name)>();
+            var champion = await _profileRepo.GetChampionProfileAsync();
+            if (champion is not null)
+                profilesToRun.Add((champion.Id, champion.ProfileName));
 
-            // Save predictions
-            var predRows = predictions.Select(p => (object)new
+            var allProfiles = await _profileRepo.GetAllProfilesAsync();
+            foreach (var p in allProfiles.Where(p => p.Role == ProfileRole.challenger && p.ExperimentStatus == ExperimentStatus.testing && p.IsEnabled))
+                profilesToRun.Add((p.Id, p.ProfileName));
+
+            _logger.LogInformation("[research-engine] Generating predictions for {Count} profile(s): {Names}",
+                profilesToRun.Count, string.Join(", ", profilesToRun.Select(p => p.Name)));
+
+            // 3. Generate predictions per profile (snapshots are shared)
+            var allPredictions = new List<PredictionCandidate>();
+            var totalAllInputs = new List<PredictionInput>();
+            var totalSupersessions = new List<PredictionGenerator.PendingSupersession>();
+
+            foreach (var (profileId, profileName) in profilesToRun)
+            {
+                _logger.LogInformation("[research-engine] Generating predictions for profile '{Name}'...", profileName);
+                var (predictions, allInputs, pendingSupersessions) = await _predGen.GeneratePredictionsForWatchlistAsync(
+                    tickers, run.Id, snapshots, assetLookup, profileId: profileId);
+
+                _logger.LogInformation("[research-engine] Profile '{Name}': {Count} predictions", profileName, predictions.Count);
+                allPredictions.AddRange(predictions);
+                totalAllInputs.AddRange(allInputs);
+                totalSupersessions.AddRange(pendingSupersessions);
+            }
+
+            // Save all predictions
+            var predRows = allPredictions.Select(p => (object)new
             {
                 run_id = p.RunId,
                 ticker = p.Ticker,
@@ -169,6 +199,7 @@ public class DailyResearchRunService
                 support_level = p.SupportLevel,
                 resistance_level = p.ResistanceLevel,
                 risk_reward_ratio = p.RiskRewardRatio,
+                expected_value_percent = p.ExpectedValuePercent,
                 price_prediction_method = p.PricePredictionMethod,
                 price_prediction_warnings = p.PricePredictionWarnings.ToArray(),
                 score_debug_json = p.ScoreDebugJson,
@@ -186,20 +217,21 @@ public class DailyResearchRunService
                 missing_data_warnings = p.MissingDataWarnings.ToArray(),
                 downgrade_reasons = p.DowngradeReasons.ToArray(),
                 status = p.Status,
+                profile_id = p.ProfileId,
             }).ToList();
             var (persisted, ids) = await _repo.SavePredictionsAsync(predRows);
 
             // Link inputs to saved prediction IDs
-            if (ids.Count > 0 && allInputs.Count > 0)
+            if (ids.Count > 0 && totalAllInputs.Count > 0)
             {
                 var inputIdx = 0;
                 var linkedInputs = new List<object>();
-                for (int i = 0; i < predictions.Count && i < ids.Count; i++)
+                for (int i = 0; i < allPredictions.Count && i < ids.Count; i++)
                 {
-                    while (inputIdx < allInputs.Count)
+                    while (inputIdx < totalAllInputs.Count)
                     {
-                        var input = allInputs[inputIdx];
-                        if (string.IsNullOrEmpty(input.PredictionId) || input.PredictionId == predictions[i].RunId)
+                        var input = totalAllInputs[inputIdx];
+                        if (string.IsNullOrEmpty(input.PredictionId) || input.PredictionId == allPredictions[i].RunId)
                         {
                             linkedInputs.Add(new
                             {
@@ -215,16 +247,16 @@ public class DailyResearchRunService
                         else break;
                     }
                 }
-                while (inputIdx < allInputs.Count)
+                while (inputIdx < totalAllInputs.Count)
                 {
                     linkedInputs.Add(new
                     {
                         prediction_id = ids[^1],
-                        input_type = allInputs[inputIdx].InputType,
-                        source_name = allInputs[inputIdx].SourceName,
-                        source_url = allInputs[inputIdx].SourceUrl,
-                        source_record_id = allInputs[inputIdx].SourceRecordId,
-                        summary = allInputs[inputIdx].Summary,
+                        input_type = totalAllInputs[inputIdx].InputType,
+                        source_name = totalAllInputs[inputIdx].SourceName,
+                        source_url = totalAllInputs[inputIdx].SourceUrl,
+                        source_record_id = totalAllInputs[inputIdx].SourceRecordId,
+                        summary = totalAllInputs[inputIdx].Summary,
                     });
                     inputIdx++;
                 }
@@ -232,12 +264,11 @@ public class DailyResearchRunService
             }
 
             // Execute deferred neutral supersessions now that we have DB-assigned IDs
-            if (persisted && ids.Count > 0 && pendingSupersessions.Count > 0)
+            if (persisted && ids.Count > 0 && totalSupersessions.Count > 0)
             {
-                foreach (var sup in pendingSupersessions)
+                foreach (var sup in totalSupersessions)
                 {
-                    // Find the replacement prediction's index by ticker+timeWindow
-                    var idx = predictions.FindIndex(p =>
+                    var idx = allPredictions.FindIndex(p =>
                         p.Ticker.Equals(sup.ReplacementTicker, StringComparison.OrdinalIgnoreCase)
                         && p.TimeWindow.Equals(sup.ReplacementTimeWindow, StringComparison.OrdinalIgnoreCase));
 
@@ -251,14 +282,15 @@ public class DailyResearchRunService
                 }
             }
 
-            // 3. Report
-            var report = _reports.GenerateMorningReport(predictions, snapshots);
+            // 4. Report
+            var report = _reports.GenerateMorningReport(allPredictions, snapshots);
 
-            // 4. Complete run
-            await _repo.CompleteResearchRunAsync(run.Id, report, predictions.Count, 0, errors);
+            // 5. Complete run
+            await _repo.CompleteResearchRunAsync(run.Id, report, allPredictions.Count, 0, errors);
 
-            _logger.LogInformation("[research-engine] Morning scan complete: {Count} predictions", predictions.Count);
-            return new MorningScanResult { RunId = run.Id, PredictionsGenerated = predictions.Count, Report = report, Errors = errors };
+            _logger.LogInformation("[research-engine] Morning scan complete: {Count} predictions across {Profiles} profile(s)",
+                allPredictions.Count, profilesToRun.Count);
+            return new MorningScanResult { RunId = run.Id, PredictionsGenerated = allPredictions.Count, Report = report, Errors = errors };
         }
         catch (Exception ex)
         {
@@ -419,8 +451,8 @@ public class DailyResearchRunService
 
         try
         {
-            // Run the unified learning pipeline
-            var result = await _learning.RunFullLearningCycleAsync();
+            // Run learning for all enabled profiles (champion + challengers)
+            var result = await _learning.RunLearningForAllProfilesAsync();
             var knowledge = await _knowledge.RunKnowledgeCycleAsync();
             result = result with { RunId = run.Id };
             result = result with

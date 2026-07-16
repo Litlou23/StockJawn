@@ -159,8 +159,8 @@ public class HistoricalSimilarityEngine : IHistoricalSimilarityEngine
         IReadOnlyList<string>? queryItems,
         IReadOnlyList<string>? candidateItems)
     {
-        if (queryItems is null or { Count: 0 } ||
-            candidateItems is null or { Count: 0 })
+        if (queryItems is null || queryItems.Count == 0 ||
+            candidateItems is null || candidateItems.Count == 0)
             return 0.5; // neutral — no penalty for missing data
 
         var qSet = new HashSet<string>(

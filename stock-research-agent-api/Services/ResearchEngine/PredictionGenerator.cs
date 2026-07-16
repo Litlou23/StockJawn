@@ -42,6 +42,7 @@ public class PredictionGenerator
     private readonly MarketSnapshotBuilder _snapshotBuilder;
     private readonly IHistoricalProfileBuilder _profileBuilder;
     private readonly VolatilityOpportunityEngine _voe;
+    private readonly PredictionProfileRepository _profileRepo;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
@@ -58,6 +59,7 @@ public class PredictionGenerator
         MarketSnapshotBuilder snapshotBuilder,
         IHistoricalProfileBuilder profileBuilder,
         VolatilityOpportunityEngine voe,
+        PredictionProfileRepository profileRepo,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
@@ -72,6 +74,7 @@ public class PredictionGenerator
         _snapshotBuilder = snapshotBuilder;
         _profileBuilder = profileBuilder;
         _voe = voe;
+        _profileRepo = profileRepo;
         _logger = logger;
         _ensembleEnabled = string.Equals(
             configuration["ENSEMBLE_SCORING_ENABLED"], "true",
@@ -106,12 +109,14 @@ public class PredictionGenerator
     /// </summary>
     public record SharedPredictionContext(
         Dictionary<string, double> Weights,
-        List<string> Lessons);
+        List<string> Lessons,
+        string? ProfileId = null,
+        string? ProfileName = null);
 
     /// <summary>
     /// Load scoring weights, overrides, and lessons once for the entire batch.
     /// </summary>
-    public async Task<SharedPredictionContext> PreloadSharedContextAsync()
+    public async Task<SharedPredictionContext> PreloadSharedContextAsync(string? profileId = null)
     {
         var weights = (await _repo.GetScoringWeightsAsync())
             .ToDictionary(w => w.SignalName, w => w.Weight);
@@ -123,7 +128,34 @@ public class PredictionGenerator
         var lessons = (await _repo.GetRecentLearningInsightsAsync(10))
             .Select(i => i.Summary).ToList();
 
-        return new SharedPredictionContext(weights, lessons);
+        // Resolve profile: use provided ID, or fall back to champion
+        string? resolvedProfileId = profileId;
+        string? resolvedProfileName = null;
+
+        if (string.IsNullOrEmpty(resolvedProfileId))
+        {
+            var champion = await _profileRepo.GetChampionProfileAsync();
+            if (champion is not null)
+            {
+                resolvedProfileId = champion.Id;
+                resolvedProfileName = champion.ProfileName;
+            }
+        }
+        else
+        {
+            var profile = await _profileRepo.GetProfileByIdAsync(resolvedProfileId);
+            resolvedProfileName = profile?.ProfileName;
+
+            // Apply profile-specific weight overrides on top of base weights
+            if (profile is not null)
+            {
+                var profileWeights = await _profileRepo.GetProfileWeightsAsync(resolvedProfileId);
+                foreach (var kv in profileWeights)
+                    weights[kv.Key] = kv.Value;
+            }
+        }
+
+        return new SharedPredictionContext(weights, lessons, resolvedProfileId, resolvedProfileName);
     }
 
     public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
@@ -470,7 +502,9 @@ public class PredictionGenerator
             ActionabilityScore = scoring.Breakdown.ActionabilityScore,
             ActionabilityTier = scoring.Breakdown.ActionabilityTier,
             DowngradeReasons = downgradeReasons,
+            ExpectedValuePercent = ComputeExpectedValue(confidence, priceCalc.TargetPrice, priceCalc.StopPrice, entryPrice),
             Status = "open",
+            ProfileId = sharedContext?.ProfileId,
         };
 
         var inputs = BuildInputs(ticker, snapshot, lessons, intelligence);
@@ -499,7 +533,7 @@ public class PredictionGenerator
     public record PendingSupersession(string NeutralPredictionId, string ReplacementTicker, string ReplacementTimeWindow, string Reason);
 
     public async Task<(List<PredictionCandidate> Predictions, List<PredictionInput> AllInputs, List<PendingSupersession> Supersessions)>
-        GeneratePredictionsForWatchlistAsync(string[] watchlist, string runId, List<MarketSnapshot> snapshots, Dictionary<string, ResearchAsset>? assetLookup = null)
+        GeneratePredictionsForWatchlistAsync(string[] watchlist, string runId, List<MarketSnapshot> snapshots, Dictionary<string, ResearchAsset>? assetLookup = null, string? profileId = null)
     {
         var predictions = new List<PredictionCandidate>();
         var allInputs = new List<PredictionInput>();
@@ -508,11 +542,17 @@ public class PredictionGenerator
         // ── Dedup: fetch recent predictions (any status) created today and build
         // ticker→time_windows lookup. This prevents duplicates within the same day
         // even if prior predictions were already evaluated/closed.
+        // Preload shared data once instead of per-ticker (saves 3 DB queries x N tickers)
+        var sharedContext = await PreloadSharedContextAsync(profileId);
+        _logger.LogInformation("[prediction] Preloaded shared context: {WeightCount} weights, {LessonCount} lessons",
+            sharedContext.Weights.Count, sharedContext.Lessons.Count);
+
+        // Scope dedup to the current profile so challenger predictions don't block champion slots
         var todayStart = DateTimeOffset.UtcNow.Date;
         var recentPredictions = await _repo.GetPredictionsByDateRangeAsync(
-            todayStart, DateTimeOffset.UtcNow);
+            todayStart, DateTimeOffset.UtcNow, profileId: sharedContext.ProfileId);
         // Also include open predictions from earlier days
-        var openPredictions = await _repo.GetOpenPredictionsAsync();
+        var openPredictions = await _repo.GetOpenPredictionsAsync(profileId: sharedContext.ProfileId);
         var allExisting = recentPredictions
             .Concat(openPredictions)
             .DistinctBy(p => p.Id)
@@ -528,11 +568,6 @@ public class PredictionGenerator
 
         // Track within-batch additions to prevent intra-batch duplicates
         var batchTracker = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
-
-        // Preload shared data once instead of per-ticker (saves 3 DB queries × N tickers)
-        var sharedContext = await PreloadSharedContextAsync();
-        _logger.LogInformation("[prediction] Preloaded shared context: {WeightCount} weights, {LessonCount} lessons",
-            sharedContext.Weights.Count, sharedContext.Lessons.Count);
 
         foreach (var snapshot in snapshots)
         {
@@ -938,6 +973,26 @@ public class PredictionGenerator
         public double? RiskRewardRatio { get; set; }
         public string Method { get; set; } = "unavailable";
         public List<string> Warnings { get; set; } = [];
+    }
+
+    /// <summary>
+    /// EV = (winProb × gain%) - (lossProb × loss%).
+    /// Uses confidence as the win probability and target/stop distances as gain/loss.
+    /// Returns null if we don't have the prices needed to compute it.
+    /// </summary>
+    private static double? ComputeExpectedValue(int confidenceScore, double? targetPrice, double? stopPrice, double? entryPrice)
+    {
+        if (entryPrice is not double entry || entry <= 0) return null;
+        if (targetPrice is not double target || target <= 0) return null;
+        if (stopPrice is not double stop || stop <= 0) return null;
+
+        var winProb = confidenceScore / 100.0;
+        var lossProb = 1.0 - winProb;
+        var gainPercent = Math.Abs((target - entry) / entry) * 100.0;
+        var lossPercent = Math.Abs((entry - stop) / entry) * 100.0;
+
+        var ev = (winProb * gainPercent) - (lossProb * lossPercent);
+        return Math.Round(ev, 4);
     }
 
     private static AtrPriceForecast ComputeAtrPriceForecast(

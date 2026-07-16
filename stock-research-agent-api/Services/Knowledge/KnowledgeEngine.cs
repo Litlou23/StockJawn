@@ -30,7 +30,8 @@ public class KnowledgeEngine : IKnowledgeEngine
 
     public async Task<KnowledgeBuildResult> RunKnowledgeCycleAsync(int limit = 500)
     {
-        var predictionsWithOutcomes = await _repo.GetRecentPredictionsWithOutcomesAsync(limit);
+        var championId = await _repo.GetChampionProfileIdAsync();
+        var predictionsWithOutcomes = await _repo.GetRecentPredictionsWithOutcomesAsync(limit, profileId: championId);
         var cases = await _caseBuilder.BuildCasesAsync(predictionsWithOutcomes);
         foreach (var @case in cases)
             await _knowledgeRepo.StoreCaseAsync(@case);

@@ -30,6 +30,9 @@ public class DashboardController : ControllerBase
     {
         try
         {
+            // Resolve champion profile for prediction filtering
+            var championId = await _researchRepo.GetChampionProfileIdAsync();
+
             // Fire all queries in parallel
             var activeTask = _watchlistRepo.GetWatchlistByStatusAsync("active");
             var reviewTask = _watchlistRepo.GetWatchlistByStatusAsync("review_needed");
@@ -42,7 +45,7 @@ public class DashboardController : ControllerBase
             var longTermStatsTask = _researchRepo.GetLongTermStockStatsAsync();
             var scanResultStatsTask = _researchRepo.GetScanResultStatsAsync();
             var paperOptionStatsTask = _researchRepo.GetPaperOptionStatsAsync();
-            var recentPredictionsTask = _researchRepo.GetRecentPredictionsWithOutcomesAsync(10);
+            var recentPredictionsTask = _researchRepo.GetRecentPredictionsWithOutcomesAsync(10, profileId: championId);
             var recentScanResultsTask = _researchRepo.GetRecentScanResultsAsync(10);
             var signalPerfTask = _researchRepo.GetAllSignalPerformanceAsync();
             var insightsTask = _researchRepo.GetRecentLearningInsightsAsync(5);

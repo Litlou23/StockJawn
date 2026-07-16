@@ -26,9 +26,10 @@ public sealed class StockFitClient
 
     // Rate limiter: allow up to 30 req/min to avoid hammering the API
     // when processing hundreds of tickers concurrently.
-    private const int MaxRequestsPerMinute = 30;
+    // Min gap: 60s/30 = 2s + 100ms buffer between requests to prevent bursts.
+    private const int MinGapMs = 2_100;
     private static readonly SemaphoreSlim _throttle = new(1, 1);
-    private static readonly Queue<DateTimeOffset> _requestTimestamps = new();
+    private static DateTimeOffset _lastRequestTime = DateTimeOffset.MinValue;
 
     private readonly HttpClient _http;
     private readonly string _baseUrl;
@@ -83,24 +84,15 @@ public sealed class StockFitClient
         try
         {
             var now = DateTimeOffset.UtcNow;
-            while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
-                _requestTimestamps.Dequeue();
-
-            if (_requestTimestamps.Count >= MaxRequestsPerMinute)
+            var elapsed = (now - _lastRequestTime).TotalMilliseconds;
+            if (elapsed < MinGapMs)
             {
-                var oldest = _requestTimestamps.Peek();
-                var waitMs = (int)(60_000 - (now - oldest).TotalMilliseconds) + 500;
-                if (waitMs > 0)
-                {
-                    _logger.LogInformation("[stockfit] Rate limit reached, waiting {WaitMs}ms", waitMs);
-                    await Task.Delay(waitMs);
-                }
-                now = DateTimeOffset.UtcNow;
-                while (_requestTimestamps.Count > 0 && (now - _requestTimestamps.Peek()).TotalSeconds > 60)
-                    _requestTimestamps.Dequeue();
+                var waitMs = (int)(MinGapMs - elapsed);
+                _logger.LogDebug("[stockfit] Spacing requests, waiting {WaitMs}ms", waitMs);
+                await Task.Delay(waitMs);
             }
 
-            _requestTimestamps.Enqueue(DateTimeOffset.UtcNow);
+            _lastRequestTime = DateTimeOffset.UtcNow;
         }
         finally
         {

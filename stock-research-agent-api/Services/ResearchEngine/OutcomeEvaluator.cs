@@ -41,7 +41,7 @@ public class OutcomeEvaluator
         if (!PredictionCategoryHelper.IsDirectional(prediction.PredictionType))
             return null;
 
-        if (prediction.EntryReferencePrice is null or 0)
+        if (prediction.EntryReferencePrice is null || prediction.EntryReferencePrice == 0)
         {
             _logger.LogWarning("[outcome-evaluator] {Ticker}: no entry reference price, cannot evaluate", prediction.Ticker);
             return null;
@@ -360,7 +360,7 @@ public class OutcomeEvaluator
     /// </summary>
     private async Task<EvaluationResult?> EvaluateAbstentionAsync(PredictionCandidate prediction)
     {
-        if (prediction.EntryReferencePrice is null or 0)
+        if (prediction.EntryReferencePrice is null || prediction.EntryReferencePrice == 0)
         {
             _logger.LogWarning("[outcome-evaluator] {Ticker} (watch): no entry price, expiring", prediction.Ticker);
             await _repo.UpdatePredictionStatusAsync(prediction.Id, "expired");
@@ -776,6 +776,7 @@ public class OutcomeEvaluator
                 BounceQualityRealized = bounceQuality.ToString(),
                 OpportunitySuccess = oppSuccess,
                 OpportunitySuccessReason = oppReason,
+                ProfileId = prediction.ProfileId,
             };
 
             await _repo.SaveVolatilityLearningRecordAsync(record);

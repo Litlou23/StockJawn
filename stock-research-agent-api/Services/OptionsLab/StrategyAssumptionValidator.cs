@@ -63,21 +63,22 @@ public static class StrategyAssumptionValidator
         return result;
     }
 
+    private static bool IsNullOrNotPositive(double? value) => value is null || value <= 0;
+
     private static void ValidateSingleLeg(
         TheoreticalOptionSimulationRequest req, string legType,
         AssumptionValidationResult result)
     {
-        if (req.StrikePrice is null or <= 0)
+        if (IsNullOrNotPositive(req.StrikePrice))
             result.Errors.Add("strikePrice is required and must be positive.");
 
         if (req.PremiumMode == PremiumMode.manual)
         {
-            if (req.ManualPremium is null or <= 0)
+            if (IsNullOrNotPositive(req.ManualPremium))
                 result.Errors.Add($"manualPremium is required when premiumMode is 'manual'. Provide the {legType} premium you want to assume.");
         }
         else if (req.PremiumMode == PremiumMode.theoretical)
         {
-            // Theoretical premium will be calculated from IV and other assumptions
             if (req.AssumedImpliedVolatility <= 0)
                 result.Errors.Add("assumedImpliedVolatility is required for theoretical premium calculation.");
         }
@@ -87,17 +88,17 @@ public static class StrategyAssumptionValidator
         TheoreticalOptionSimulationRequest req,
         AssumptionValidationResult result)
     {
-        if (req.LowerCallStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.LowerCallStrike))
             result.Errors.Add("lowerCallStrike is required for Bull Call Spread.");
 
-        if (req.UpperCallStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.UpperCallStrike))
             result.Errors.Add("upperCallStrike is required for Bull Call Spread.");
 
         if (req.LowerCallStrike.HasValue && req.UpperCallStrike.HasValue
             && req.LowerCallStrike >= req.UpperCallStrike)
             result.Errors.Add("lowerCallStrike must be less than upperCallStrike.");
 
-        if (req.NetDebit is null or <= 0)
+        if (IsNullOrNotPositive(req.NetDebit))
             result.Errors.Add("netDebit is required for Bull Call Spread.");
 
         if (req.NetDebit.HasValue && req.LowerCallStrike.HasValue && req.UpperCallStrike.HasValue)
@@ -112,17 +113,17 @@ public static class StrategyAssumptionValidator
         TheoreticalOptionSimulationRequest req,
         AssumptionValidationResult result)
     {
-        if (req.UpperPutStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.UpperPutStrike))
             result.Errors.Add("upperPutStrike is required for Bear Put Spread.");
 
-        if (req.LowerPutStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.LowerPutStrike))
             result.Errors.Add("lowerPutStrike is required for Bear Put Spread.");
 
         if (req.UpperPutStrike.HasValue && req.LowerPutStrike.HasValue
             && req.LowerPutStrike >= req.UpperPutStrike)
             result.Errors.Add("lowerPutStrike must be less than upperPutStrike.");
 
-        if (req.NetDebit is null or <= 0)
+        if (IsNullOrNotPositive(req.NetDebit))
             result.Errors.Add("netDebit is required for Bear Put Spread.");
 
         if (req.NetDebit.HasValue && req.UpperPutStrike.HasValue && req.LowerPutStrike.HasValue)
@@ -137,13 +138,13 @@ public static class StrategyAssumptionValidator
         TheoreticalOptionSimulationRequest req,
         AssumptionValidationResult result)
     {
-        if (req.LongPutStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.LongPutStrike))
             result.Errors.Add("longPutStrike is required for Iron Condor.");
-        if (req.ShortPutStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.ShortPutStrike))
             result.Errors.Add("shortPutStrike is required for Iron Condor.");
-        if (req.ShortCallStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.ShortCallStrike))
             result.Errors.Add("shortCallStrike is required for Iron Condor.");
-        if (req.LongCallStrike is null or <= 0)
+        if (IsNullOrNotPositive(req.LongCallStrike))
             result.Errors.Add("longCallStrike is required for Iron Condor.");
 
         if (req.LongPutStrike.HasValue && req.ShortPutStrike.HasValue
@@ -158,7 +159,7 @@ public static class StrategyAssumptionValidator
             && req.ShortCallStrike >= req.LongCallStrike)
             result.Errors.Add("shortCallStrike must be less than longCallStrike.");
 
-        if (req.NetCredit is null or <= 0)
+        if (IsNullOrNotPositive(req.NetCredit))
             result.Errors.Add("netCredit is required for Iron Condor.");
     }
 }

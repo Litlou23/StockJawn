@@ -38,7 +38,8 @@ public class AutomaticScenarioGenerator
     public async Task<OptionsScenarioResponse?> GenerateScenariosAsync(OptionsScenarioRequest request)
     {
         // ── 1. Load prediction ───────────────────────────────
-        var predictions = await _repo.GetRecentPredictionsAsync(200);
+        var championId = await _repo.GetChampionProfileIdAsync();
+        var predictions = await _repo.GetRecentPredictionsAsync(200, profileId: championId);
         var pred = predictions.FirstOrDefault(p => p.Id == request.PredictionId);
         if (pred is null)
         {

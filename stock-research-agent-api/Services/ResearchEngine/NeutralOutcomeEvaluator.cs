@@ -139,7 +139,7 @@ public class NeutralOutcomeEvaluator
         }
 
         var entry = pred.EntryReferencePrice;
-        if (entry is null or 0)
+        if (entry is null || entry == 0)
         {
             _logger.LogDebug("[neutral-eval] {Ticker}: no entry price, skipping", pred.Ticker);
             return false;

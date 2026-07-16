@@ -59,6 +59,7 @@ public class LearningEngine
     }
 
     private readonly ResearchRepository _repo;
+    private readonly PredictionProfileRepository _profileRepo;
     private readonly PatternDetectionService _patternDetection;
     private readonly TradeSetupEngine _setupEngine;
     private readonly IOpenAiCompletionService _ai;
@@ -66,12 +67,14 @@ public class LearningEngine
     private readonly ILogger<LearningEngine> _logger;
 
     public LearningEngine(
-        ResearchRepository repo, PatternDetectionService patternDetection,
+        ResearchRepository repo, PredictionProfileRepository profileRepo,
+        PatternDetectionService patternDetection,
         TradeSetupEngine setupEngine,
         IOpenAiCompletionService ai, WeightUpdateValidator guardrail,
         ILogger<LearningEngine> logger)
     {
         _repo = repo;
+        _profileRepo = profileRepo;
         _patternDetection = patternDetection;
         _setupEngine = setupEngine;
         _ai = ai;
@@ -95,61 +98,98 @@ public class LearningEngine
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Full learning cycle: observations → stats → calibration → weights → AI report.
+    /// Runs learning for all enabled profiles that have learning turned on.
+    /// Iterates champion first, then challengers. Returns the champion result
+    /// for backward compatibility with callers that expect a single result.
     /// </summary>
-    public async Task<LearningUpdateResult> RunFullLearningCycleAsync()
+    public async Task<LearningUpdateResult> RunLearningForAllProfilesAsync()
+    {
+        var profiles = await _profileRepo.GetEnabledProfilesAsync();
+        var learningProfiles = profiles.Where(p => p.LearningEnabled).ToList();
+
+        _logger.LogInformation("[learning-engine] Running learning for {Count} profiles", learningProfiles.Count);
+
+        LearningUpdateResult? championResult = null;
+
+        foreach (var profile in learningProfiles)
+        {
+            var isChampion = profile.Role == ProfileRole.champion;
+            _logger.LogInformation("[learning-engine] Running learning for profile {Name} ({Role})",
+                profile.ProfileName, profile.Role);
+
+            var result = await RunFullLearningCycleAsync(profile.Id, isChampion);
+
+            if (isChampion)
+                championResult = result;
+        }
+
+        // Return champion result for backward compatibility
+        return championResult ?? new LearningUpdateResult { Report = "No champion profile found." };
+    }
+
+    /// <summary>
+    /// Full learning cycle: observations → stats → calibration → weights → AI report.
+    /// When profileId is provided, all stages filter data to that profile.
+    /// When isChampion is false (challenger), weight updates route to profile configs
+    /// instead of shared scoring_weight_overrides, and expensive AI stages are skipped.
+    /// </summary>
+    public async Task<LearningUpdateResult> RunFullLearningCycleAsync(string? profileId = null, bool isChampion = true)
     {
         var errors = new List<string>();
 
         // Stage 1: Extract signal observations from evaluated predictions
-        var obsCreated = await ExtractSignalObservationsAsync(errors);
+        var obsCreated = await ExtractSignalObservationsAsync(errors, profileId);
 
         // Stage 2: Compute signal performance stats (legacy binary tracking)
-        var (perfUpdated, signalStats) = await ComputeSignalPerformanceAsync();
+        var (perfUpdated, signalStats) = await ComputeSignalPerformanceAsync(profileId, isChampion);
 
         // Stage 2b-2e: Layered signal analytics (ChatGPT-recommended approach)
-        var calibrationCount = await ComputeSignalCalibrationAsync();
-        var correlationCount = await ComputeSignalCorrelationsAsync();
-        var influenceCount = await ComputeSignalInfluenceAsync();
-        var interactionCount = await ComputeSignalInteractionsAsync();
+        var calibrationCount = await ComputeSignalCalibrationAsync(profileId, isChampion);
+        var correlationCount = await ComputeSignalCorrelationsAsync(profileId, isChampion);
+        var influenceCount = await ComputeSignalInfluenceAsync(profileId, isChampion);
+        var interactionCount = await ComputeSignalInteractionsAsync(profileId, isChampion);
 
         // Stage 3: Confidence calibration — detect AND correct overconfidence
-        var calibration = await ComputeConfidenceCalibrationAsync();
-        await ApplyCalibrationFactorAsync(calibration);
+        var calibration = await ComputeConfidenceCalibrationAsync(profileId);
+        await ApplyCalibrationFactorAsync(calibration, profileId, isChampion);
 
         // Stage 3c: Self-tuning confidence caps — detect caps that crush correct calls
-        var capTuningCount = await ComputeCapEffectivenessAsync();
+        var capTuningCount = await ComputeCapEffectivenessAsync(profileId, isChampion);
 
         // Stage 4: Optimize weights (signal-level first-order adjustments)
-        var (weightsAdjusted, weightChanges) = await OptimizeWeightsAsync(signalStats);
+        var (weightsAdjusted, weightChanges) = await OptimizeWeightsAsync(signalStats, profileId, isChampion);
 
         // Stage 4b: Pattern detection evidence (second-order adjustments)
-        var patternRecommendations = await ProducePatternRecommendationsAsync();
-        var (patternAdjusted, patternChanges) = await ApplyPatternRecommendationsAsync(patternRecommendations);
+        var patternRecommendations = await ProducePatternRecommendationsAsync(profileId);
+        var (patternAdjusted, patternChanges) = await ApplyPatternRecommendationsAsync(patternRecommendations, profileId, isChampion);
         weightsAdjusted += patternAdjusted;
         weightChanges.AddRange(patternChanges);
 
         // Stage 4c: Decision threshold optimization — learn optimal edge/score thresholds
-        var (thresholdAdjusted, thresholdChanges) = await OptimizeDecisionThresholdsAsync();
+        var (thresholdAdjusted, thresholdChanges) = await OptimizeDecisionThresholdsAsync(profileId, isChampion);
         weightsAdjusted += thresholdAdjusted;
         weightChanges.AddRange(thresholdChanges);
 
         // Stage 5: Setup Analytics — learn complete trade setups
-        var setupStatsUpdated = await ComputeSetupPerformanceAsync();
+        var setupStatsUpdated = await ComputeSetupPerformanceAsync(profileId, isChampion);
 
         // Stage 5b: Supersession Learning — learn from prediction revisions
-        var supersessionCount = await ComputeSupersessionAnalyticsAsync();
+        var supersessionCount = await ComputeSupersessionAnalyticsAsync(profileId, isChampion);
         var revisionAnalytics = await GetSupersessionAnalyticsAsync();
 
         // Stage 5c: Volatility Opportunity Learning — learn which VOE opportunities are profitable
-        var voeSummary = await ComputeVolatilityOpportunityLearningAsync();
+        var voeSummary = await ComputeVolatilityOpportunityLearningAsync(profileId, isChampion);
         weightChanges.AddRange(voeSummary.WeightChanges);
 
-        // Stage 6: Generate AI-summarized learning report
-        var aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges, voeSummary);
+        // Stage 6: Generate AI-summarized learning report (champion only — expensive)
+        string? aiSummary = null;
+        if (isChampion)
+            aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges, voeSummary, profileId);
 
-        // Stage 7: Generate structured insights (includes setup-level insights)
-        var insights = await GenerateLearningInsightsAsync();
+        // Stage 7: Generate structured insights (champion only — writes to shared tables)
+        var insights = new List<object>();
+        if (isChampion)
+            insights = await GenerateLearningInsightsAsync(profileId);
 
         var report = $"Learning cycle complete: {obsCreated} observations, {perfUpdated} signal stats, " +
                      $"{calibrationCount} calibration buckets, {correlationCount} correlations, " +
@@ -177,10 +217,12 @@ public class LearningEngine
     // Stage 1: Extract Signal Observations from score_debug_json
     // -----------------------------------------------------------------------
 
-    public async Task<int> ExtractSignalObservationsAsync(List<string>? errors = null)
+    public async Task<int> ExtractSignalObservationsAsync(List<string>? errors = null, string? profileId = null)
     {
-        var predictions = await _repo.GetRecentPredictionsAsync(500);
-        var outcomes = await _repo.GetRecentOutcomesAsync(500);
+        var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+        var outcomes = profileId is not null
+            ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
+            : await _repo.GetRecentOutcomesAsync(500);
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
         var observations = new List<object>();
@@ -264,6 +306,7 @@ public class LearningEngine
                     ["confidence"] = (double?)pred.ConfidenceScore,
                     ["outcome_score"] = outcome.OutcomeScore ?? (object?)null,
                     ["market_regime"] = DetectMarketRegime(breakdown),
+                    ["profile_id"] = pred.ProfileId ?? (object?)null,
                     ["created_at"] = DateTimeOffset.UtcNow.ToString("o"),
                 });
             }
@@ -291,10 +334,11 @@ public class LearningEngine
     // Stage 2: Compute Signal Performance from Observations
     // -----------------------------------------------------------------------
 
-    public async Task<(int Updated, List<ResearchSignalPerformance> Stats)> ComputeSignalPerformanceAsync()
+    public async Task<(int Updated, List<ResearchSignalPerformance> Stats)> ComputeSignalPerformanceAsync(
+        string? profileId = null, bool isChampion = true)
     {
         // Use 180-day window for medium-term stats
-        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180, profileId: profileId);
         if (observations.Count == 0)
             return (0, []);
 
@@ -374,17 +418,20 @@ public class LearningEngine
                 LastUpdatedAt = DateTimeOffset.UtcNow,
             };
 
-            await _repo.UpsertSignalPerformanceAsync(new
+            if (isChampion)
             {
-                signal_name = signal,
-                signal_type = perf.SignalType,
-                direction,
-                total_predictions = total,
-                correct_predictions = perf.CorrectPredictions,
-                accuracy = Math.Round(perf.Accuracy, 4),
-                average_outcome_score = Math.Round(perf.AverageOutcomeScore, 2),
-                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
-            });
+                await _repo.UpsertSignalPerformanceAsync(new
+                {
+                    signal_name = signal,
+                    signal_type = perf.SignalType,
+                    direction,
+                    total_predictions = total,
+                    correct_predictions = perf.CorrectPredictions,
+                    accuracy = Math.Round(perf.Accuracy, 4),
+                    average_outcome_score = Math.Round(perf.AverageOutcomeScore, 2),
+                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+            }
 
             results.Add(perf);
         }
@@ -398,9 +445,9 @@ public class LearningEngine
     // by signal strength ranges to learn which scores are predictive.
     // -----------------------------------------------------------------------
 
-    public async Task<int> ComputeSignalCalibrationAsync()
+    public async Task<int> ComputeSignalCalibrationAsync(string? profileId = null, bool isChampion = true)
     {
-        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180, profileId: profileId);
         if (observations.Count == 0) return 0;
 
         // Group by signal → score bucket → tally
@@ -437,18 +484,21 @@ public class LearningEngine
         var upserted = 0;
         foreach (var ((signal, direction, bucket), (total, correct, retSum, scoreSum)) in stats)
         {
-            await _repo.UpsertCalibrationBucketAsync(new
+            if (isChampion)
             {
-                signal_name = signal,
-                direction,
-                score_bucket = bucket,
-                sample_count = total,
-                correct_count = correct,
-                accuracy = total > 0 ? Math.Round((double)correct / total, 4) : 0,
-                avg_return_percent = total > 0 ? Math.Round(retSum / total, 4) : 0,
-                avg_outcome_score = total > 0 ? Math.Round(scoreSum / total, 2) : 0,
-                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
-            });
+                await _repo.UpsertCalibrationBucketAsync(new
+                {
+                    signal_name = signal,
+                    direction,
+                    score_bucket = bucket,
+                    sample_count = total,
+                    correct_count = correct,
+                    accuracy = total > 0 ? Math.Round((double)correct / total, 4) : 0,
+                    avg_return_percent = total > 0 ? Math.Round(retSum / total, 4) : 0,
+                    avg_outcome_score = total > 0 ? Math.Round(scoreSum / total, 2) : 0,
+                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+            }
             upserted++;
         }
 
@@ -461,9 +511,9 @@ public class LearningEngine
     // Compute Pearson r between each signal's net score and actual return %.
     // -----------------------------------------------------------------------
 
-    public async Task<int> ComputeSignalCorrelationsAsync()
+    public async Task<int> ComputeSignalCorrelationsAsync(string? profileId = null, bool isChampion = true)
     {
-        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180, profileId: profileId);
         if (observations.Count == 0) return 0;
 
         // Group by signal+direction, collect (netScore, return) pairs
@@ -493,16 +543,19 @@ public class LearningEngine
             var avgNet = dataPoints.Average(d => d.NetScore);
             var avgRet = dataPoints.Average(d => d.Return);
 
-            await _repo.UpsertSignalCorrelationAsync(new
+            if (isChampion)
             {
-                signal_name = signal,
-                direction,
-                correlation_r = Math.Round(r, 4),
-                sample_count = dataPoints.Count,
-                avg_net_score = Math.Round(avgNet, 2),
-                avg_return_percent = Math.Round(avgRet, 4),
-                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
-            });
+                await _repo.UpsertSignalCorrelationAsync(new
+                {
+                    signal_name = signal,
+                    direction,
+                    correlation_r = Math.Round(r, 4),
+                    sample_count = dataPoints.Count,
+                    avg_net_score = Math.Round(avgNet, 2),
+                    avg_return_percent = Math.Round(avgRet, 4),
+                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+            }
             upserted++;
         }
 
@@ -531,9 +584,9 @@ public class LearningEngine
     // how much each signal influenced the decision.
     // -----------------------------------------------------------------------
 
-    public async Task<int> ComputeSignalInfluenceAsync()
+    public async Task<int> ComputeSignalInfluenceAsync(string? profileId = null, bool isChampion = true)
     {
-        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180, profileId: profileId);
         if (observations.Count == 0) return 0;
 
         // Group observations by prediction
@@ -604,18 +657,21 @@ public class LearningEngine
         var upserted = 0;
         foreach (var ((signal, dir), (total, decisive, reinforcing, redundant, marginSum, decCorrect, decTotal)) in influence)
         {
-            await _repo.UpsertSignalInfluenceAsync(new
+            if (isChampion)
             {
-                signal_name = signal,
-                direction = dir,
-                total_predictions = total,
-                decisive_count = decisive,
-                reinforcing_count = reinforcing,
-                redundant_count = redundant,
-                avg_margin_impact = total > 0 ? Math.Round(marginSum / total, 2) : 0,
-                decisive_accuracy = decTotal > 0 ? Math.Round((double)decCorrect / decTotal, 4) : (double?)null,
-                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
-            });
+                await _repo.UpsertSignalInfluenceAsync(new
+                {
+                    signal_name = signal,
+                    direction = dir,
+                    total_predictions = total,
+                    decisive_count = decisive,
+                    reinforcing_count = reinforcing,
+                    redundant_count = redundant,
+                    avg_margin_impact = total > 0 ? Math.Round(marginSum / total, 2) : 0,
+                    decisive_accuracy = decTotal > 0 ? Math.Round((double)decCorrect / decTotal, 4) : (double?)null,
+                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+            }
             upserted++;
         }
 
@@ -630,9 +686,9 @@ public class LearningEngine
 
     private const double StrongThreshold = 10.0; // dominant score > 10 = "strong"
 
-    public async Task<int> ComputeSignalInteractionsAsync()
+    public async Task<int> ComputeSignalInteractionsAsync(string? profileId = null, bool isChampion = true)
     {
-        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180);
+        var observations = await _repo.GetSignalObservationsAsync(limit: 5000, windowDays: 180, profileId: profileId);
         if (observations.Count == 0) return 0;
 
         var byPrediction = observations
@@ -700,21 +756,24 @@ public class LearningEngine
             var avgIndividual = (asbAcc + absAcc) / 2.0;
             var synergy = avgIndividual > 0 ? (bsAcc - avgIndividual) / avgIndividual : 0;
 
-            await _repo.UpsertSignalInteractionAsync(new
+            if (isChampion)
             {
-                signal_a = a,
-                signal_b = b,
-                direction = dir,
-                both_strong_count = bs,
-                both_strong_accuracy = Math.Round(bsAcc, 4),
-                both_strong_avg_return = bs > 0 ? Math.Round(bsr / bs, 4) : 0,
-                a_strong_b_weak_count = asb,
-                a_strong_b_weak_accuracy = Math.Round(asbAcc, 4),
-                a_weak_b_strong_count = abs2,
-                a_weak_b_strong_accuracy = Math.Round(absAcc, 4),
-                synergy_score = Math.Round(synergy, 4),
-                last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
-            });
+                await _repo.UpsertSignalInteractionAsync(new
+                {
+                    signal_a = a,
+                    signal_b = b,
+                    direction = dir,
+                    both_strong_count = bs,
+                    both_strong_accuracy = Math.Round(bsAcc, 4),
+                    both_strong_avg_return = bs > 0 ? Math.Round(bsr / bs, 4) : 0,
+                    a_strong_b_weak_count = asb,
+                    a_strong_b_weak_accuracy = Math.Round(asbAcc, 4),
+                    a_weak_b_strong_count = abs2,
+                    a_weak_b_strong_accuracy = Math.Round(absAcc, 4),
+                    synergy_score = Math.Round(synergy, 4),
+                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                });
+            }
             upserted++;
         }
 
@@ -726,10 +785,12 @@ public class LearningEngine
     // Stage 3: Confidence Calibration
     // -----------------------------------------------------------------------
 
-    public async Task<ConfidenceAnalysis> ComputeConfidenceCalibrationAsync()
+    public async Task<ConfidenceAnalysis> ComputeConfidenceCalibrationAsync(string? profileId = null)
     {
-        var predictions = await _repo.GetRecentPredictionsAsync(500);
-        var outcomes = await _repo.GetRecentOutcomesAsync(500);
+        var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+        var outcomes = profileId is not null
+            ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
+            : await _repo.GetRecentOutcomesAsync(500);
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
         var buckets = new (string Range, int Min, int Max)[]
@@ -793,7 +854,8 @@ public class LearningEngine
     /// The factor is clamped to [0.85, 1.15] by both this method and
     /// the ScoringEngine consumer.
     /// </summary>
-    private async Task ApplyCalibrationFactorAsync(ConfidenceAnalysis calibration)
+    private async Task ApplyCalibrationFactorAsync(ConfidenceAnalysis calibration,
+        string? profileId = null, bool isChampion = true)
     {
         try
         {
@@ -820,7 +882,7 @@ public class LearningEngine
             var targetFactor = Math.Clamp(1.0 + (avgError * 0.5), 0.85, 1.15);
 
             // Get current calibration_factor from overrides
-            var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+            var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
             var currentFactor = currentOverrides
                 .Where(o => o.SignalName == "calibration_factor")
                 .Select(o => o.EffectiveWeight)
@@ -848,7 +910,7 @@ public class LearningEngine
                              ? "System is overconfident — dampening confidence scores."
                              : "Calibration adjustment applied.");
 
-            await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+            var fullOverride = new ScoringWeightOverride
             {
                 SignalName = "calibration_factor",
                 BaseWeight = 1.0,
@@ -858,7 +920,8 @@ public class LearningEngine
                 SampleSize = totalWeight,
                 Status = "active",
                 Reason = reason,
-            });
+            };
+            await WriteWeightUpdateAsync("calibration_factor", newFactor, fullOverride, profileId, isChampion);
 
             _logger.LogInformation(
                 "[learning-engine] Calibration factor: {Old:F4} → {New:F4} (error={Error:F1}%, overconfident={OC})",
@@ -884,11 +947,11 @@ public class LearningEngine
     // loosen or tighten caps based on observed effectiveness.
     // -----------------------------------------------------------------------
 
-    private async Task<int> ComputeCapEffectivenessAsync()
+    private async Task<int> ComputeCapEffectivenessAsync(string? profileId = null, bool isChampion = true)
     {
         try
         {
-            var predictionsWithOutcomes = await _repo.GetRecentPredictionsWithOutcomesAsync(500);
+            var predictionsWithOutcomes = await _repo.GetRecentPredictionsWithOutcomesAsync(500, profileId);
             if (predictionsWithOutcomes.Count < 20) return 0;
 
             // Group by cap reason extracted from score_debug_json
@@ -958,21 +1021,24 @@ public class LearningEngine
                     : $"Cap is INEFFECTIVE: accuracy {accuracy:P0} vs predicted {predictedProb:P0} (error {calibrationError:+0.0%;-0.0%}). " +
                       $"Recommend raising cap by {capDelta} points.";
 
-                await _repo.UpsertCapTuningStatAsync(new
+                if (isChampion)
                 {
-                    cap_reason = reason,
-                    sample_size = items.Count,
-                    accuracy = Math.Round(accuracy, 4),
-                    avg_confidence = avgConf,
-                    avg_risk = avgRisk,
-                    avg_opposition_ratio = Math.Round(avgMargin, 4),
-                    recommended_cap = recommendedCap,
-                    current_cap = currentCap,
-                    cap_delta = capDelta,
-                    is_effective = isEffective,
-                    analysis_notes = notes,
-                    computed_at = DateTimeOffset.UtcNow,
-                });
+                    await _repo.UpsertCapTuningStatAsync(new
+                    {
+                        cap_reason = reason,
+                        sample_size = items.Count,
+                        accuracy = Math.Round(accuracy, 4),
+                        avg_confidence = avgConf,
+                        avg_risk = avgRisk,
+                        avg_opposition_ratio = Math.Round(avgMargin, 4),
+                        recommended_cap = recommendedCap,
+                        current_cap = currentCap,
+                        cap_delta = capDelta,
+                        is_effective = isEffective,
+                        analysis_notes = notes,
+                        computed_at = DateTimeOffset.UtcNow,
+                    });
+                }
                 upsertCount++;
             }
 
@@ -994,7 +1060,7 @@ public class LearningEngine
 
                 // If calibration error > 5% (predictions are underconfident), boost caps.
                 // Also allows TIGHTENING: if error < -5%, reduce boost (ChatGPT recommendation).
-                var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+                var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
                 var currentBoost = currentOverrides
                     .Where(o => o.SignalName == "risk_cap_boost")
                     .Select(o => o.EffectiveWeight)
@@ -1031,7 +1097,7 @@ public class LearningEngine
                     var movement = Math.Clamp(delta, -2.0, 2.0); // max 2 pts/day
                     var newBoost = Math.Clamp(currentBoost + movement, 0, 15);
 
-                    await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+                    var capOverride = new ScoringWeightOverride
                     {
                         SignalName = "risk_cap_boost",
                         BaseWeight = 0.0,
@@ -1042,7 +1108,8 @@ public class LearningEngine
                         Status = "active",
                         Reason = $"Risk-capped: accuracy {riskCapAcc:P0} vs predicted {predictedProb:P0} " +
                                  $"(cal error {calError:+0.0%;-0.0%}, {totalRiskCapped} samples). Boost: {newBoost:F1} pts.",
-                    });
+                    };
+                    await WriteWeightUpdateAsync("risk_cap_boost", newBoost, capOverride, profileId, isChampion);
 
                     _logger.LogInformation(
                         "[learning-engine] Risk cap boost: {Old:F1} → {New:F1} (acc={Acc:P0}, predicted={Pred:P0}, calError={Err:+0.0%;-0.0%})",
@@ -1086,23 +1153,26 @@ public class LearningEngine
                     _ => true,                       // extreme risk = anything goes
                 };
 
-                await _repo.UpsertCapTuningStatAsync(new
+                if (isChampion)
                 {
-                    cap_reason = label,
-                    sample_size = inBucket.Count,
-                    accuracy = Math.Round(avgMAE, 4), // repurpose accuracy field for avg MAE
-                    avg_confidence = (int)inBucket.Average(pw => pw.Prediction.ConfidenceScore),
-                    avg_risk = (int)avgRisk,
-                    avg_opposition_ratio = Math.Round(avgMFE, 4), // repurpose for MFE
-                    recommended_cap = (int?)null,
-                    current_cap = (int?)null,
-                    cap_delta = 0,
-                    is_effective = riskCalibrated,
-                    analysis_notes = $"Risk {label}: avg MAE {avgMAE:F2}%, avg MFE {avgMFE:F2}%, " +
-                        $"avg risk score {avgRisk:F0}, {inBucket.Count} samples. " +
-                        $"Risk model {(riskCalibrated ? "CALIBRATED" : "MISCALIBRATED")}.",
-                    computed_at = DateTimeOffset.UtcNow,
-                });
+                    await _repo.UpsertCapTuningStatAsync(new
+                    {
+                        cap_reason = label,
+                        sample_size = inBucket.Count,
+                        accuracy = Math.Round(avgMAE, 4), // repurpose accuracy field for avg MAE
+                        avg_confidence = (int)inBucket.Average(pw => pw.Prediction.ConfidenceScore),
+                        avg_risk = (int)avgRisk,
+                        avg_opposition_ratio = Math.Round(avgMFE, 4), // repurpose for MFE
+                        recommended_cap = (int?)null,
+                        current_cap = (int?)null,
+                        cap_delta = 0,
+                        is_effective = riskCalibrated,
+                        analysis_notes = $"Risk {label}: avg MAE {avgMAE:F2}%, avg MFE {avgMFE:F2}%, " +
+                            $"avg risk score {avgRisk:F0}, {inBucket.Count} samples. " +
+                            $"Risk model {(riskCalibrated ? "CALIBRATED" : "MISCALIBRATED")}.",
+                        computed_at = DateTimeOffset.UtcNow,
+                    });
+                }
                 upsertCount++;
             }
 
@@ -1124,10 +1194,10 @@ public class LearningEngine
     // -----------------------------------------------------------------------
 
     public async Task<(int Adjusted, List<WeightChangeSummary> Changes)> OptimizeWeightsAsync(
-        List<ResearchSignalPerformance> signalStats)
+        List<ResearchSignalPerformance> signalStats, string? profileId = null, bool isChampion = true)
     {
         var changes = new List<WeightChangeSummary>();
-        var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+        var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
         var overrideMap = currentOverrides.ToDictionary(o => o.SignalName);
 
         var allDirectionStats = signalStats
@@ -1169,7 +1239,7 @@ public class LearningEngine
             var reason = $"Accuracy: {stat.Accuracy * 100:F1}% over {stat.TotalPredictions} obs. " +
                          $"Bayesian: {bayesianAccuracy * 100:F1}%. Target adj: {targetAdj * 100:F1}%.";
 
-            await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+            var weightOverride = new ScoringWeightOverride
             {
                 SignalName = stat.SignalName,
                 BaseWeight = baseWeight,
@@ -1179,7 +1249,8 @@ public class LearningEngine
                 SampleSize = stat.TotalPredictions,
                 Status = "active",
                 Reason = reason,
-            });
+            };
+            await WriteWeightUpdateAsync(stat.SignalName, effectiveWeight, weightOverride, profileId, isChampion);
 
             changes.Add(new WeightChangeSummary
             {
@@ -1208,14 +1279,17 @@ public class LearningEngine
     /// Stored in scoring_weight_overrides with base_weight = current default, effective_weight = the
     /// actual threshold value the ScoringEngine reads.
     /// </summary>
-    private async Task<(int Adjusted, List<WeightChangeSummary> Changes)> OptimizeDecisionThresholdsAsync()
+    private async Task<(int Adjusted, List<WeightChangeSummary> Changes)> OptimizeDecisionThresholdsAsync(
+        string? profileId = null, bool isChampion = true)
     {
         var changes = new List<WeightChangeSummary>();
 
         try
         {
-            var predictions = await _repo.GetRecentPredictionsAsync(500);
-            var outcomes = await _repo.GetRecentOutcomesAsync(500);
+            var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+            var outcomes = profileId is not null
+                ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
+                : await _repo.GetRecentOutcomesAsync(500);
             var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
             // Split into directional vs neutral predictions that have outcomes
@@ -1273,7 +1347,7 @@ public class LearningEngine
             // --- Compute target adjustment for min_edge_margin ---
             // If directional accuracy < 45% AND there are weak wrong calls, raise the margin.
             // If neutral miss rate > 40%, lower the margin (we're being too conservative).
-            var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+            var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
             var overrideMap = currentOverrides.ToDictionary(o => o.SignalName);
 
             var currentEdgeMargin = overrideMap.TryGetValue("min_edge_margin", out var emOverride)
@@ -1302,7 +1376,7 @@ public class LearningEngine
                              $"Neutral miss rate: {neutralMissRate * 100:F1}% ({neutralWithOutcomes.Count} neutrals). " +
                              $"Weak wrong calls: {weakDirectionalWrong}.";
 
-                await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+                var edgeOverride = new ScoringWeightOverride
                 {
                     SignalName = "min_edge_margin",
                     BaseWeight = 10.0, // original default
@@ -1312,7 +1386,8 @@ public class LearningEngine
                     SampleSize = directionalWithOutcomes.Count + neutralWithOutcomes.Count,
                     Status = "active",
                     Reason = reason,
-                });
+                };
+                await WriteWeightUpdateAsync("min_edge_margin", newEdgeMargin, edgeOverride, profileId, isChampion);
 
                 changes.Add(new WeightChangeSummary
                 {
@@ -1340,7 +1415,7 @@ public class LearningEngine
             {
                 var reason = $"Tracking min_edge_margin at 2:1 ratio. Edge margin now {newEdgeMargin}.";
 
-                await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+                var scoreOverride = new ScoringWeightOverride
                 {
                     SignalName = "min_score_for_direction",
                     BaseWeight = 20.0,
@@ -1350,7 +1425,8 @@ public class LearningEngine
                     SampleSize = directionalWithOutcomes.Count + neutralWithOutcomes.Count,
                     Status = "active",
                     Reason = reason,
-                });
+                };
+                await WriteWeightUpdateAsync("min_score_for_direction", newScoreThreshold, scoreOverride, profileId, isChampion);
 
                 changes.Add(new WeightChangeSummary
                 {
@@ -1380,12 +1456,14 @@ public class LearningEngine
     /// This is the heart of setup-level learning: which COMBINATIONS of
     /// signals consistently produce positive outcomes?
     /// </summary>
-    public async Task<int> ComputeSetupPerformanceAsync()
+    public async Task<int> ComputeSetupPerformanceAsync(string? profileId = null, bool isChampion = true)
     {
         try
         {
-            var predictions = await _repo.GetRecentPredictionsAsync(500);
-            var outcomes = await _repo.GetRecentOutcomesAsync(500);
+            var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+            var outcomes = profileId is not null
+                ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
+                : await _repo.GetRecentOutcomesAsync(500);
             var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
             // Group evaluated predictions by their setup fingerprint
@@ -1493,26 +1571,29 @@ public class LearningEngine
                     .Select(g => ReconstructEvidence(g.Breakdown!).Count(e => e.Value.IsActive))
                     .Average();
 
-                await _repo.UpsertSetupLearningStatAsync(new
+                if (isChampion)
                 {
-                    setup_fingerprint = fingerprint,
-                    description = sampleFp.Description,
-                    direction = sampleFp.Direction,
-                    total_occurrences = group.Count,
-                    wins,
-                    losses,
-                    win_rate = Math.Round(winRate, 4),
-                    average_win_percent = Math.Round(avgWin, 4),
-                    average_loss_percent = Math.Round(avgLoss, 4),
-                    expected_value_percent = Math.Round(ev, 4),
-                    average_holding_days = 1.0, // TODO: track actual holding days once multi-day tracking is live
-                    average_confirmation_count = (int)Math.Round(avgConfirmation),
-                    confidence = Math.Round(confidence, 4),
-                    risk_rating = riskRating,
-                    is_trusted = isTrusted,
-                    market_regime_breakdown_json = JsonSerializer.Serialize(regimeBreakdown),
-                    last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
-                });
+                    await _repo.UpsertSetupLearningStatAsync(new
+                    {
+                        setup_fingerprint = fingerprint,
+                        description = sampleFp.Description,
+                        direction = sampleFp.Direction,
+                        total_occurrences = group.Count,
+                        wins,
+                        losses,
+                        win_rate = Math.Round(winRate, 4),
+                        average_win_percent = Math.Round(avgWin, 4),
+                        average_loss_percent = Math.Round(avgLoss, 4),
+                        expected_value_percent = Math.Round(ev, 4),
+                        average_holding_days = 1.0, // TODO: track actual holding days once multi-day tracking is live
+                        average_confirmation_count = (int)Math.Round(avgConfirmation),
+                        confidence = Math.Round(confidence, 4),
+                        risk_rating = riskRating,
+                        is_trusted = isTrusted,
+                        market_regime_breakdown_json = JsonSerializer.Serialize(regimeBreakdown),
+                        last_updated_at = DateTimeOffset.UtcNow.ToString("o"),
+                    });
+                }
 
                 statsUpdated++;
             }
@@ -1535,14 +1616,16 @@ public class LearningEngine
     // before/after state and (when available) the replacement's outcome.
     // -----------------------------------------------------------------------
 
-    public async Task<int> ComputeSupersessionAnalyticsAsync()
+    public async Task<int> ComputeSupersessionAnalyticsAsync(string? profileId = null, bool isChampion = true)
     {
         try
         {
-            var superseded = await _repo.GetSupersededPredictionsAsync(200);
+            var superseded = await _repo.GetSupersededPredictionsAsync(200, profileId);
             if (superseded.Count == 0) return 0;
 
-            var outcomes = await _repo.GetRecentOutcomesAsync(500);
+            var outcomes = profileId is not null
+                ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
+                : await _repo.GetRecentOutcomesAsync(500);
             var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
             var records = new List<object>();
@@ -1601,15 +1684,15 @@ public class LearningEngine
                 });
                 processed++;
 
-                // Batch insert every 50
-                if (records.Count >= 50)
+                // Batch insert every 50 (champion only writes to shared tables)
+                if (isChampion && records.Count >= 50)
                 {
                     await _repo.SaveSupersessionLearningRecordsAsync(records);
                     records.Clear();
                 }
             }
 
-            if (records.Count > 0)
+            if (isChampion && records.Count > 0)
                 await _repo.SaveSupersessionLearningRecordsAsync(records);
 
             _logger.LogInformation("[learning-engine] Supersession learning: created {Count} records from {Total} superseded predictions",
@@ -1880,13 +1963,14 @@ public class LearningEngine
     // Stage 5c: Volatility Opportunity Learning
     // -----------------------------------------------------------------------
 
-    public async Task<VolatilityOpportunityLearningSummary> ComputeVolatilityOpportunityLearningAsync()
+    public async Task<VolatilityOpportunityLearningSummary> ComputeVolatilityOpportunityLearningAsync(
+        string? profileId = null, bool isChampion = true)
     {
         var summary = new VolatilityOpportunityLearningSummary();
 
         try
         {
-            var records = await _repo.GetAllVolatilityLearningStatsAsync(limit: 1000, windowDays: 90);
+            var records = await _repo.GetAllVolatilityLearningStatsAsync(limit: 1000, windowDays: 90, profileId: profileId);
             var resolved = records.Where(r => r.DirectionCorrect is not null).ToList();
 
             summary.TotalRecords = resolved.Count;
@@ -2042,7 +2126,7 @@ public class LearningEngine
             }
 
             // Weight recommendations — adjust volatility bucket based on opportunity success rates
-            var weightChanges = await ApplyVolatilityWeightRecommendationsAsync(resolved, summary);
+            var weightChanges = await ApplyVolatilityWeightRecommendationsAsync(resolved, summary, profileId, isChampion);
             summary.WeightChanges = weightChanges;
 
             _logger.LogInformation(
@@ -2058,7 +2142,8 @@ public class LearningEngine
     }
 
     private async Task<List<WeightChangeSummary>> ApplyVolatilityWeightRecommendationsAsync(
-        List<VolatilityLearningRecord> resolved, VolatilityOpportunityLearningSummary summary)
+        List<VolatilityLearningRecord> resolved, VolatilityOpportunityLearningSummary summary,
+        string? profileId = null, bool isChampion = true)
     {
         var changes = new List<WeightChangeSummary>();
 
@@ -2096,7 +2181,7 @@ public class LearningEngine
             return changes;
         }
 
-        var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+        var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
         var existing = currentOverrides.FirstOrDefault(o => o.SignalName == signal);
         var baseWeight = DefaultBaseWeights.GetValueOrDefault(signal, 0.7);
         var currentAdj = existing?.AdjustmentPercent ?? 0.0;
@@ -2109,7 +2194,7 @@ public class LearningEngine
 
         var effectiveWeight = baseWeight * (1.0 + newAdj);
 
-        await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+        var volOverride = new ScoringWeightOverride
         {
             SignalName = signal,
             BaseWeight = baseWeight,
@@ -2119,7 +2204,8 @@ public class LearningEngine
             SampleSize = voeTagged.Count,
             Status = "active",
             Reason = $"VOE Stage 5c: {voeTagged.Count} tagged predictions, win rate {voeWinRate:P0} vs baseline {baselineWinRate:P0}",
-        });
+        };
+        await WriteWeightUpdateAsync(signal, effectiveWeight, volOverride, profileId, isChampion);
 
         changes.Add(new WeightChangeSummary
         {
@@ -2309,7 +2395,7 @@ public class LearningEngine
     // Stage 4b: Pattern Detection Evidence Producer
     // -----------------------------------------------------------------------
 
-    public async Task<List<PatternRecommendation>> ProducePatternRecommendationsAsync()
+    public async Task<List<PatternRecommendation>> ProducePatternRecommendationsAsync(string? profileId = null)
     {
         var recommendations = new List<PatternRecommendation>();
 
@@ -2403,12 +2489,12 @@ public class LearningEngine
     /// Respects the same daily movement limits and max adjustment caps.
     /// </summary>
     private async Task<(int Adjusted, List<WeightChangeSummary> Changes)> ApplyPatternRecommendationsAsync(
-        List<PatternRecommendation> recommendations)
+        List<PatternRecommendation> recommendations, string? profileId = null, bool isChampion = true)
     {
         var changes = new List<WeightChangeSummary>();
         if (recommendations.Count == 0) return (0, changes);
 
-        var currentOverrides = await _repo.GetActiveWeightOverridesAsync();
+        var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
         var overrideMap = currentOverrides.ToDictionary(o => o.SignalName);
 
         // Group synergy recommendations by signal and average them
@@ -2450,7 +2536,7 @@ public class LearningEngine
                 .Where(r => r.Type == "synergy_weight" && r.SignalName == signal)
                 .Select(r => r.Reason).ToList();
 
-            await _repo.UpsertWeightOverrideAsync(new ScoringWeightOverride
+            var synergyOverride = new ScoringWeightOverride
             {
                 SignalName = signal,
                 BaseWeight = baseWeight,
@@ -2460,7 +2546,8 @@ public class LearningEngine
                 SampleSize = recommendations.Where(r => r.SignalName == signal).Sum(r => r.Evidence),
                 Status = "active",
                 Reason = $"Synergy adjustment: {string.Join("; ", reasons.Take(2))}",
-            });
+            };
+            await WriteWeightUpdateAsync(signal, effectiveWeight, synergyOverride, profileId, isChampion);
 
             changes.Add(new WeightChangeSummary
             {
@@ -2474,7 +2561,7 @@ public class LearningEngine
 
         // Log regime recommendations as insights (these affect confidence at scoring time, not weights)
         var regimeRecs = recommendations.Where(r => r.Type == "regime_confidence_cap").ToList();
-        if (regimeRecs.Count > 0)
+        if (regimeRecs.Count > 0 && isChampion)
         {
             var insights = regimeRecs.Select(r => new
             {
@@ -2500,7 +2587,8 @@ public class LearningEngine
         List<ResearchSignalPerformance> signalStats,
         ConfidenceAnalysis calibration,
         List<WeightChangeSummary> weightChanges,
-        VolatilityOpportunityLearningSummary? voeSummary = null)
+        VolatilityOpportunityLearningSummary? voeSummary = null,
+        string? profileId = null)
     {
         if (!_ai.IsConfigured)
         {
@@ -2508,8 +2596,10 @@ public class LearningEngine
             return null;
         }
 
-        var predictions = await _repo.GetRecentPredictionsAsync(200);
-        var outcomes = await _repo.GetRecentOutcomesAsync(200);
+        var predictions = await _repo.GetRecentPredictionsAsync(200, profileId: profileId);
+        var outcomes = profileId is not null
+            ? await _repo.GetOutcomesForProfileAsync(profileId, 200)
+            : await _repo.GetRecentOutcomesAsync(200);
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 
         // Include all evaluated predictions: directional and neutral
@@ -2700,11 +2790,13 @@ INSTRUCTIONS:
     // Stage 6: Structured Insights
     // -----------------------------------------------------------------------
 
-    public async Task<List<object>> GenerateLearningInsightsAsync()
+    public async Task<List<object>> GenerateLearningInsightsAsync(string? profileId = null)
     {
         var perfStats = await _repo.GetAllSignalPerformanceAsync();
-        var outcomes = await _repo.GetRecentOutcomesAsync(100);
-        var predictions = await _repo.GetRecentPredictionsAsync(100);
+        var outcomes = profileId is not null
+            ? await _repo.GetOutcomesForProfileAsync(profileId, 100)
+            : await _repo.GetRecentOutcomesAsync(100);
+        var predictions = await _repo.GetRecentPredictionsAsync(100, profileId: profileId);
         var insights = new List<object>();
 
         // 1. Reliable signals (direction-aware)
@@ -2945,6 +3037,73 @@ INSTRUCTIONS:
         var (adjusted, changes) = await OptimizeWeightsAsync(signalStats);
         return (adjusted, changes.Select(c => new WeightChange(
             c.SignalName, c.PreviousWeight, c.NewWeight, c.Reason ?? "")).ToList());
+    }
+
+    // -----------------------------------------------------------------------
+    // Profile-Aware Weight Routing Helpers
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Routes a weight update to the correct storage:
+    /// - Champion profiles write to scoring_weight_overrides (shared table).
+    /// - Challenger profiles write to prediction_profile_configs (per-profile table).
+    /// </summary>
+    private async Task WriteWeightUpdateAsync(string signalName, double effectiveWeight,
+        ScoringWeightOverride fullOverride, string? profileId, bool isChampion)
+    {
+        if (isChampion)
+        {
+            await _repo.UpsertWeightOverrideAsync(fullOverride);
+        }
+        else if (profileId is not null)
+        {
+            await _profileRepo.SetProfileConfigAsync(profileId, signalName, effectiveWeight);
+        }
+    }
+
+    /// <summary>
+    /// Reads current weight overrides appropriate for the profile:
+    /// - Champion: reads from scoring_weight_overrides directly.
+    /// - Challenger: starts with champion base overrides, then layers profile-specific weights.
+    /// </summary>
+    private async Task<List<ScoringWeightOverride>> GetEffectiveOverridesAsync(string? profileId, bool isChampion)
+    {
+        if (isChampion)
+            return await _repo.GetActiveWeightOverridesAsync();
+
+        if (profileId is null)
+            return await _repo.GetActiveWeightOverridesAsync();
+
+        // For challengers, start with champion base overrides then layer profile-specific
+        var baseOverrides = await _repo.GetActiveWeightOverridesAsync();
+        var profileWeights = await _profileRepo.GetProfileWeightsAsync(profileId);
+
+        // Convert profile weights to override format for compatibility
+        var overrideMap = baseOverrides.ToDictionary(o => o.SignalName);
+        foreach (var (key, value) in profileWeights)
+        {
+            if (overrideMap.TryGetValue(key, out var existing))
+            {
+                overrideMap[key] = existing with
+                {
+                    EffectiveWeight = value,
+                    AdjustmentPercent = existing.BaseWeight > 0 ? (value / existing.BaseWeight) - 1.0 : 0,
+                };
+            }
+            else
+            {
+                overrideMap[key] = new ScoringWeightOverride
+                {
+                    SignalName = key,
+                    BaseWeight = 1.0,
+                    AdjustmentPercent = value - 1.0,
+                    EffectiveWeight = value,
+                    Status = "active",
+                };
+            }
+        }
+
+        return overrideMap.Values.ToList();
     }
 
     // -----------------------------------------------------------------------

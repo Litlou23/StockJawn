@@ -15,7 +15,7 @@ These items block the portfolio growth objective. Without them, the system canno
 - [ ] **Position sizing engine** — Calculate how much of the portfolio to allocate per trade based on confidence, expected value, and current balance. Without this, every trade is an arbitrary bet. *(Portfolio AI)*
 - [ ] **Portfolio equity curve** — Visualize portfolio value over time. Infrastructure complete (tables, balance engine, orchestrator integration). Remaining: periodic `portfolio_snapshots` table for historical equity curve data, frontend chart. *(Performance Analytics / Portfolio AI)*
 - [ ] **Budget-aware option selection** — Filter options contracts the portfolio can actually afford. A $100 account cannot buy a $500 premium contract. *(Options Intelligence)*
-- [ ] **Expected value calculations** — Every prediction should compute `(probability × potential gain) - ((1 - probability) × potential loss)`. Select trades by EV, not confidence alone. *(Prediction Engine)*
+- [x] **Expected value calculations** — Every prediction computes `(probability × potential gain) - ((1 - probability) × potential loss)`. Directional rankings sort by EV instead of confidence alone. *(Prediction Engine)*
 - [ ] **Concurrent position limits** — Prevent the portfolio from going all-in on correlated trades. *(Portfolio AI)*
 
 ## High Priority

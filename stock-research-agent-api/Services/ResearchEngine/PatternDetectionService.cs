@@ -47,7 +47,8 @@ public class PatternDetectionService
 
     public async Task<FailureClusterResult> AnalyzeFailureClustersAsync()
     {
-        var predictions = await _repo.GetRecentPredictionsAsync(500);
+        var championId = await _repo.GetChampionProfileIdAsync();
+        var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: championId);
         var outcomes = await _repo.GetRecentOutcomesAsync(500);
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 

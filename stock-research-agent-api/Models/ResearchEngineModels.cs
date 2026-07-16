@@ -351,6 +351,12 @@ public record PredictionCandidate
     public double? SupportLevel { get; init; }
     public double? ResistanceLevel { get; init; }
     public double? RiskRewardRatio { get; init; }
+    /// <summary>
+    /// Expected Value = (winProb × potentialGain%) - (lossProb × potentialLoss%).
+    /// Positive EV means the trade is worth taking over many repetitions.
+    /// Computed from confidence, target price, and stop price.
+    /// </summary>
+    public double? ExpectedValuePercent { get; init; }
     public string? PricePredictionMethod { get; init; }
     public List<string> PricePredictionWarnings { get; init; } = [];
     public string BullishCase { get; init; } = "";
@@ -370,6 +376,7 @@ public record PredictionCandidate
     public string Status { get; init; } = "open";
     public string? SupersededBy { get; init; }
     public string? SupersessionReason { get; init; }
+    public string? ProfileId { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
 
@@ -957,6 +964,9 @@ public record VolatilityLearningRecord
     // Opportunity success
     public bool? OpportunitySuccess { get; init; }
     public string? OpportunitySuccessReason { get; init; }
+
+    // Profile linkage
+    public string? ProfileId { get; init; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]

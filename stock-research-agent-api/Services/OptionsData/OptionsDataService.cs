@@ -76,7 +76,8 @@ public class OptionsDataService
     public async Task<PaperCandidateResponse?> CreatePaperCandidateFromPredictionAsync(string predictionId)
     {
         // 1. Look up the prediction
-        var predictions = await _researchRepo.GetRecentPredictionsAsync(limit: 100);
+        var championId = await _researchRepo.GetChampionProfileIdAsync();
+        var predictions = await _researchRepo.GetRecentPredictionsAsync(limit: 100, profileId: championId);
         var prediction = predictions.FirstOrDefault(p => p.Id == predictionId);
         if (prediction is null)
         {
