@@ -378,14 +378,25 @@ export default function ProfileAnalyticsPage() {
           <h3 className="text-sm font-medium text-zinc-300 mb-1">Expected Value by Confidence</h3>
           <p className="text-xs text-zinc-500 mb-4">Average percent move at each confidence level</p>
           <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={analytics[0]?.evByBucket || []}>
+            <BarChart data={(() => {
+              const buckets = new Set<number>();
+              analytics.forEach(a => a.evByBucket?.forEach(b => buckets.add(b.bucket)));
+              return Array.from(buckets).sort((x, y) => x - y).map(bucket => {
+                const row: Record<string, unknown> = { bucket };
+                analytics.forEach(a => {
+                  const found = a.evByBucket?.find(b => b.bucket === bucket);
+                  row[a.profileName] = found?.avgEv ?? 0;
+                });
+                return row;
+              });
+            })()}>
               <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
               <XAxis dataKey="bucket" tick={{ fill: '#a1a1aa', fontSize: 12 }} label={{ value: 'Confidence Bucket', position: 'insideBottom', offset: -5, fill: '#71717a', fontSize: 11 }} />
               <YAxis tick={{ fill: '#a1a1aa', fontSize: 12 }} />
               <Tooltip contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8 }} />
               <ReferenceLine y={0} stroke="#3f3f46" />
               {analytics.map((a, i) => (
-                <Bar key={a.profileId} dataKey="avgEv" name={a.profileName} fill={COLORS[i % COLORS.length]} radius={[4, 4, 0, 0]} data={a.evByBucket} />
+                <Bar key={a.profileId} dataKey={a.profileName} name={a.profileName} fill={COLORS[i % COLORS.length]} radius={[4, 4, 0, 0]} />
               ))}
             </BarChart>
           </ResponsiveContainer>
