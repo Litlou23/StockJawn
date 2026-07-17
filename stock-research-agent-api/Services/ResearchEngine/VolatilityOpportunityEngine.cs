@@ -245,9 +245,6 @@ public class VolatilityOpportunityEngine
             return (null, null);
         }
 
-        int count = bars.Count;
-        int minBarsForPercentile = 20 + HistoryWindowDays; // 20 for BB + 60 for history
-
         var bwHistory = ComputeRollingBandwidth(bars, 20, HistoryWindowDays);
         double? percentile = null;
         if (bwHistory.Count >= 10)

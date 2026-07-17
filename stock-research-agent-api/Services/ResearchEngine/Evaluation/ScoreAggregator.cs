@@ -4,10 +4,32 @@ namespace StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 
 public class ScoreAggregator : IScoreAggregator
 {
+    // Evaluator kinds whose contributions can be scaled by profile weight configs.
+    // Keys must match the config_key values stored in prediction_profile_configs.
+    internal static readonly Dictionary<EvaluatorKind, string> WeightableKinds = new()
+    {
+        { EvaluatorKind.trend, "trend" },
+        { EvaluatorKind.momentum, "momentum" },
+        { EvaluatorKind.volume, "volume" },
+    };
+
     public AggregateScoreResult Aggregate(IReadOnlyList<EvaluatorOutput> outputs, string winningDirection, EvaluationContext context)
     {
-        var bullishScore = Math.Clamp(outputs.Sum(o => o.BullishContribution), 0, 100);
-        var bearishScore = Math.Clamp(outputs.Sum(o => o.BearishContribution), 0, 100);
+        // Apply profile weight scaling: if a weight key (e.g. "trend") exists in the
+        // weights dictionary, scale that evaluator's contribution accordingly.
+        // Missing keys default to 1.0 (no change) — champion uses base weights.
+        var weights = context.LearningData.Weights;
+        double bullishScore = 0, bearishScore = 0;
+        foreach (var o in outputs)
+        {
+            double scale = 1.0;
+            if (WeightableKinds.TryGetValue(o.Kind, out var weightKey))
+                scale = weights.TryGetValue(weightKey, out var w) ? w : 1.0;
+            bullishScore += o.BullishContribution * scale;
+            bearishScore += o.BearishContribution * scale;
+        }
+        bullishScore = Math.Clamp(bullishScore, 0, 100);
+        bearishScore = Math.Clamp(bearishScore, 0, 100);
         var directionalScore = bullishScore - bearishScore;
 
         int aligned = 0, conflicting = 0;

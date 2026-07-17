@@ -20,7 +20,6 @@ public class TwelveDataProvider
     private readonly int _minGapMs; // minimum ms between requests to avoid bursts
     private static readonly SemaphoreSlim _throttle = new(1, 1);
     private static DateTimeOffset _lastRequestTime = DateTimeOffset.MinValue;
-    private static int _requestsThisMinute;
     private static DateTimeOffset _minuteWindowStart = DateTimeOffset.MinValue;
     private static int _dailyRequestCount;
     private static DateTimeOffset _dailyResetDate = DateTimeOffset.MinValue;

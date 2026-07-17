@@ -151,8 +151,18 @@ public class ScoringEngine : IScoringEngine
             _researchSignalEvaluator.Evaluate(context),
         };
 
-        var tentativeBull = Math.Clamp(outputs.Sum(o => o.BullishContribution), 0, 100);
-        var tentativeBear = Math.Clamp(outputs.Sum(o => o.BearishContribution), 0, 100);
+        // Apply profile weight scaling to tentative scores (mirrors ScoreAggregator logic)
+        double rawBull = 0, rawBear = 0;
+        foreach (var o in outputs)
+        {
+            double scale = 1.0;
+            if (ScoreAggregator.WeightableKinds.TryGetValue(o.Kind, out var wk))
+                scale = weights.TryGetValue(wk, out var wv) ? wv : 1.0;
+            rawBull += o.BullishContribution * scale;
+            rawBear += o.BearishContribution * scale;
+        }
+        var tentativeBull = Math.Clamp(rawBull, 0, 100);
+        var tentativeBear = Math.Clamp(rawBear, 0, 100);
         var (winningDirection, predType) = DeterminePredictionType(tentativeBull, tentativeBear, snapshot, indicators, weights);
 
         var aggregate = _scoreAggregator.Aggregate(outputs, winningDirection, context);

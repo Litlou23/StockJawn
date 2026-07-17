@@ -282,11 +282,25 @@ public class DailyResearchRunService
                 }
             }
 
+            // Track save failures
+            if (!persisted || ids.Count == 0)
+            {
+                var msg = $"CRITICAL: Prediction save failed — {allPredictions.Count} predictions generated in memory but {ids.Count} persisted to database.";
+                _logger.LogError("[research-engine] {Message}", msg);
+                errors.Add(msg);
+            }
+            else if (ids.Count < allPredictions.Count)
+            {
+                var msg = $"Partial save: {ids.Count}/{allPredictions.Count} predictions persisted.";
+                _logger.LogWarning("[research-engine] {Message}", msg);
+                errors.Add(msg);
+            }
+
             // 4. Report
             var report = _reports.GenerateMorningReport(allPredictions, snapshots);
 
-            // 5. Complete run
-            await _repo.CompleteResearchRunAsync(run.Id, report, allPredictions.Count, 0, errors);
+            // 5. Complete run — report actual persisted count, not in-memory count
+            await _repo.CompleteResearchRunAsync(run.Id, report, ids.Count, 0, errors);
 
             _logger.LogInformation("[research-engine] Morning scan complete: {Count} predictions across {Profiles} profile(s)",
                 allPredictions.Count, profilesToRun.Count);

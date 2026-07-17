@@ -85,13 +85,24 @@ public class DynamicPickOrchestrator
         }
 
         // 2. Load the just-saved predictions for this run.
-        var runPredictions = await _researchRepo.GetPredictionsByRunAsync(scan.RunId);
+        var allRunPredictions = await _researchRepo.GetPredictionsByRunAsync(scan.RunId);
 
-        // 2b. Record evidence from predictions into the Evidence Engine.
+        // 2a. Resolve champion profile so we can filter predictions.
+        //     Paper stock candidates + portfolio positions only come from the champion.
+        //     Challenger predictions are stored for analysis but don't generate trades.
+        var championProfileId = await _researchRepo.GetChampionProfileIdAsync();
+        var runPredictions = championProfileId is not null
+            ? allRunPredictions.Where(p => p.ProfileId == championProfileId || p.ProfileId is null).ToList()
+            : allRunPredictions;
+
+        _logger.LogInformation("[dynamic] Loaded {Total} predictions for run, {Champion} from champion profile",
+            allRunPredictions.Count, runPredictions.Count);
+
+        // 2b. Record evidence from ALL predictions (including challengers) into the Evidence Engine.
         try
         {
             var evidenceRecorded = 0;
-            foreach (var pred in runPredictions)
+            foreach (var pred in allRunPredictions)
             {
                 await _evidence.RecordAsync(new EvidenceRecord
                 {
@@ -115,26 +126,46 @@ public class DynamicPickOrchestrator
             errors.Add($"evidence-recording: {ex.Message}");
         }
 
-        _logger.LogInformation("[dynamic] Wrapping {Count} predictions as paper stock candidates", runPredictions.Count);
+        _logger.LogInformation("[dynamic] Wrapping {Count} champion predictions as paper stock candidates", runPredictions.Count);
 
-        // 3. Build stock candidates via extracted service, then batch-save
+        // 3. Build stock candidates from champion predictions, then batch-save
         var directionalRankings = StockCandidateService.BuildDirectionalRankings(runPredictions);
         var builtCandidates = new List<(PredictionCandidate Pred, PaperStockCandidate Candidate, StockCandidateService.DirectionalRanking? Ranking)>();
         foreach (var pred in runPredictions)
         {
-            directionalRankings.TryGetValue(pred.Id, out var ranking);
-            var candidate = await _stockCandidates.BuildStockCandidateFromPredictionAsync(
-                pred,
-                scan.RunId,
-                ranking?.Percentile ?? 0,
-                ranking?.IsTopQuartile ?? false);
-            builtCandidates.Add((pred, candidate, ranking));
+            try
+            {
+                directionalRankings.TryGetValue(pred.Id, out var ranking);
+                var candidate = await _stockCandidates.BuildStockCandidateFromPredictionAsync(
+                    pred,
+                    scan.RunId,
+                    ranking?.Percentile ?? 0,
+                    ranking?.IsTopQuartile ?? false);
+                builtCandidates.Add((pred, candidate, ranking));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[dynamic] Failed to build stock candidate for {Ticker}", pred.Ticker);
+                errors.Add($"build-candidate {pred.Ticker}: {ex.Message}");
+            }
         }
 
         // Batch save all candidates at once (chunks of 50 internally)
-        var allCandidatesToSave = builtCandidates.Select(b => b.Candidate).ToList();
-        var savedList = await _stockRepo.SaveCandidatesBatchAsync(allCandidatesToSave);
-        var stockSaveFailures = allCandidatesToSave.Count - savedList.Count;
+        List<PaperStockCandidate> savedList;
+        var stockSaveFailures = 0;
+        try
+        {
+            var allCandidatesToSave = builtCandidates.Select(b => b.Candidate).ToList();
+            savedList = await _stockRepo.SaveCandidatesBatchAsync(allCandidatesToSave);
+            stockSaveFailures = allCandidatesToSave.Count - savedList.Count;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[dynamic] PIPELINE BREAK: Batch save of paper stock candidates failed entirely");
+            errors.Add($"batch-save-candidates: {ex.Message}");
+            savedList = [];
+            stockSaveFailures = builtCandidates.Count;
+        }
 
         // Match saved rows back by prediction_id — ticker+runId is not unique
         // (same ticker can appear per time window and per profile in one run).

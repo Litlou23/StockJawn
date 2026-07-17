@@ -146,23 +146,43 @@ public class ResearchRepository
 
         // Use RPC function to bypass PostgREST schema-cache issues with text[] columns.
         // The SQL function handles jsonb→text[] casting explicitly.
-        var rpcResult = await _db.RpcAsync("insert_prediction_candidates",
-            new { payload = predictions });
-
         try
         {
+            var rpcResult = await _db.RpcAsync("insert_prediction_candidates",
+                new { payload = predictions });
+
             var parsed = System.Text.Json.JsonSerializer.Deserialize<List<Dictionary<string, string>>>(rpcResult);
             var ids = parsed?.Select(r => r.GetValueOrDefault("id", "")).Where(id => id != "").ToList() ?? [];
             if (ids.Count > 0)
+            {
+                _logger.LogInformation("[research-repo] RPC saved {Count}/{Total} predictions", ids.Count, predictions.Count);
                 return (true, ids);
-        }
-        catch { /* fall through to legacy path */ }
+            }
 
-        // Fallback: try direct INSERT (in case RPC function doesn't exist yet)
-        _logger.LogWarning("[research-repo] RPC insert returned no IDs, falling back to direct INSERT");
-        var rows = await _db.InsertAsync("prediction_candidates", predictions);
-        var fallbackIds = rows.Select(r => r["id"]?.ToString() ?? "").Where(id => id != "").ToList();
-        return (fallbackIds.Count > 0, fallbackIds);
+            _logger.LogWarning("[research-repo] RPC insert returned 0 IDs for {Count} predictions — response was empty or unparseable",
+                predictions.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[research-repo] RPC insert_prediction_candidates failed for {Count} predictions. Falling back to direct INSERT",
+                predictions.Count);
+        }
+
+        // Fallback: try direct INSERT (in case RPC function doesn't exist yet or failed)
+        try
+        {
+            _logger.LogWarning("[research-repo] Attempting direct INSERT fallback for {Count} predictions", predictions.Count);
+            var rows = await _db.InsertAsync("prediction_candidates", predictions);
+            var fallbackIds = rows.Select(r => r["id"]?.ToString() ?? "").Where(id => id != "").ToList();
+            _logger.LogInformation("[research-repo] Direct INSERT saved {Count}/{Total} predictions", fallbackIds.Count, predictions.Count);
+            return (fallbackIds.Count > 0, fallbackIds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[research-repo] CRITICAL: Both RPC and direct INSERT failed for {Count} predictions. Zero predictions persisted!",
+                predictions.Count);
+            return (false, []);
+        }
     }
 
     public async Task<List<PredictionCandidate>> GetOpenPredictionsAsync(string? profileId = null)
