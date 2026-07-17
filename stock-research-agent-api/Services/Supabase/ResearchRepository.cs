@@ -391,7 +391,7 @@ public class ResearchRepository
             filter: $"ticker=eq.{ticker}", select: "id", limit: 500);
         if (predictions.Count > 0)
         {
-            var predIds = predictions.Select(p => p["id"]?.ToString()).Where(id => id is not null).ToList();
+            var predIds = predictions.Select(p => p["id"]?.ToString()).Where(id => id is not null).Select(id => id!).ToList();
             if (predIds.Count > 0)
             {
                 var idsFilter = $"prediction_id=in.({string.Join(",", predIds!)})";
