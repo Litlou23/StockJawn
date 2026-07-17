@@ -136,14 +136,19 @@ public class DynamicPickOrchestrator
         var savedList = await _stockRepo.SaveCandidatesBatchAsync(allCandidatesToSave);
         var stockSaveFailures = allCandidatesToSave.Count - savedList.Count;
 
-        // Build a lookup from ticker+runId to saved candidate for matching
-        var savedLookup = savedList.ToDictionary(
-            s => $"{s.Ticker}:{s.RunId}", s => s, StringComparer.OrdinalIgnoreCase);
+        // Match saved rows back by prediction_id — ticker+runId is not unique
+        // (same ticker can appear per time window and per profile in one run).
+        var savedLookup = new Dictionary<string, PaperStockCandidate>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in savedList)
+        {
+            if (!string.IsNullOrEmpty(s.PredictionId))
+                savedLookup.TryAdd(s.PredictionId, s);
+        }
 
         var stockBuilds = new List<StockCandidateService.StockCandidateBuild>();
         foreach (var (pred, candidate, ranking) in builtCandidates)
         {
-            savedLookup.TryGetValue($"{candidate.Ticker}:{candidate.RunId}", out var saved);
+            savedLookup.TryGetValue(pred.Id, out var saved);
 
             if (saved is null)
             {

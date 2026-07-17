@@ -27,6 +27,13 @@ public class SupabaseClient
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
+    // Inserts must keep null properties: PostgREST rejects bulk inserts whose
+    // rows have mismatched keys (PGRST102), which happens when nulls are dropped.
+    private static readonly JsonSerializerOptions InsertJsonOpts = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+    };
+
     public bool IsConfigured => _configured;
 
     public SupabaseClient(IConfiguration configuration, ILogger<SupabaseClient> logger)
@@ -184,7 +191,7 @@ public class SupabaseClient
         if (!_configured) return [];
 
         var url = $"{_baseUrl}/{table}";
-        var json = JsonSerializer.Serialize(rows, JsonOpts);
+        var json = JsonSerializer.Serialize(rows, InsertJsonOpts);
         var req = new HttpRequestMessage(HttpMethod.Post, url)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
