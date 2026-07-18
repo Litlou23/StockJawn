@@ -11,11 +11,13 @@ public class PredictionProfileController : ControllerBase
 {
     private readonly PredictionProfileRepository _profileRepo;
     private readonly ResearchRepository _repo;
+    private readonly NeutralOutcomeRepository _neutralRepo;
 
-    public PredictionProfileController(PredictionProfileRepository profileRepo, ResearchRepository repo)
+    public PredictionProfileController(PredictionProfileRepository profileRepo, ResearchRepository repo, NeutralOutcomeRepository neutralRepo)
     {
         _profileRepo = profileRepo;
         _repo = repo;
+        _neutralRepo = neutralRepo;
     }
 
     [HttpGet]
@@ -191,7 +193,7 @@ public class PredictionProfileController : ControllerBase
         foreach (var p in profiles)
         {
             var preds = await _repo.GetRecentPredictionsAsync(limit: 10000, profileId: p.Id);
-            var evaluated = preds.Count(pr => pr.Status is "closed" or "superseded");
+            var evaluated = preds.Count(pr => pr.Status is "evaluated" or "superseded");
             stats.Add(new { profileId = p.Id, totalPredictions = preds.Count, evaluatedPredictions = evaluated });
         }
         return Ok(stats);
@@ -213,7 +215,7 @@ public class PredictionProfileController : ControllerBase
         [FromQuery] string? ticker = null,
         [FromQuery] string? predictionType = null)
     {
-        var ids = string.IsNullOrEmpty(profileIds)
+        List<string> ids = string.IsNullOrEmpty(profileIds)
             ? (await _profileRepo.GetAllProfilesAsync()).Select(p => p.Id).ToList()
             : profileIds.Split(',').ToList();
 
@@ -234,15 +236,23 @@ public class PredictionProfileController : ControllerBase
 
             if (preds.Count == 0) { results.Add(new { profileId = pid, profileName = profile.ProfileName, role = profile.Role.ToString(), total = 0 }); continue; }
 
-            var outcomes = await _repo.GetOutcomesForPredictionsAsync(preds.Select(p => p.Id).ToList());
+            List<string> predIds = preds.Select(p => p.Id).ToList();
+            var outcomes = await _repo.GetOutcomesForPredictionsAsync(predIds);
             var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+
+            // Neutral outcomes from dedicated evaluator (newer system)
+            var neutralOutcomes = await _neutralRepo.GetForPredictionsAsync(predIds);
+            var neutralOutcomeMap = neutralOutcomes.ToDictionary(o => o.PredictionId);
 
             var withOutcome = preds.Where(p => outcomeMap.ContainsKey(p.Id)).ToList();
             var bulls = withOutcome.Where(p => p.PredictionType.ToString().Contains("bullish", StringComparison.OrdinalIgnoreCase)).ToList();
             var bears = withOutcome.Where(p => p.PredictionType.ToString().Contains("bearish", StringComparison.OrdinalIgnoreCase)).ToList();
-            var neutrals = withOutcome.Where(p => p.PredictionType.ToString().Contains("neutral", StringComparison.OrdinalIgnoreCase)).ToList();
+            // Neutrals: include those with neutral outcomes OR legacy directional outcomes
+            var neutrals = preds.Where(p =>
+                PredictionCategoryHelper.IsNeutralEvaluable(p.PredictionType)
+                && (neutralOutcomeMap.ContainsKey(p.Id) || outcomeMap.ContainsKey(p.Id))).ToList();
 
-            double acc(List<PredictionCandidate> set) => set.Count == 0 ? 0 : Math.Round(100.0 * set.Count(p => outcomeMap[p.Id].DirectionCorrect == true) / set.Count, 1);
+            double acc(List<PredictionCandidate> set) => set.Count == 0 ? 0 : Math.Round(100.0 * set.Count(p => outcomeMap.ContainsKey(p.Id) && outcomeMap[p.Id].DirectionCorrect == true) / set.Count, 1);
             int wins = withOutcome.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
             int losses = withOutcome.Count(p => outcomeMap[p.Id].DirectionCorrect == false);
             double avgReturn = withOutcome.Count > 0 ? Math.Round(withOutcome.Where(p => outcomeMap[p.Id].PercentMove.HasValue).Select(p => outcomeMap[p.Id].PercentMove!.Value).DefaultIfEmpty(0).Average(), 2) : 0;
@@ -297,12 +307,20 @@ public class PredictionProfileController : ControllerBase
                 profileName = profile.ProfileName,
                 role = profile.Role.ToString(),
                 total = preds.Count,
-                evaluated = withOutcome.Count,
+                evaluated = preds.Count(p => outcomeMap.ContainsKey(p.Id) || neutralOutcomeMap.ContainsKey(p.Id)),
                 wins, losses,
                 winRate = wins + losses > 0 ? Math.Round(100.0 * wins / (wins + losses), 1) : 0,
                 bullAccuracy = acc(bulls), bullCount = bulls.Count,
                 bearAccuracy = acc(bears), bearCount = bears.Count,
-                neutralAccuracy = acc(neutrals), neutralCount = neutrals.Count,
+                neutralAccuracy = neutrals.Count > 0
+                    ? Math.Round(neutrals.Average(p =>
+                        neutralOutcomeMap.ContainsKey(p.Id)
+                            ? neutralOutcomeMap[p.Id].NeutralAccuracyScore
+                            : outcomeMap.ContainsKey(p.Id) && outcomeMap[p.Id].OutcomeScore.HasValue
+                                ? outcomeMap[p.Id].OutcomeScore!.Value
+                                : 50), 1)
+                    : 0,
+                neutralCount = neutrals.Count,
                 avgReturn,
                 avgEv = withOutcome.Where(p => p.ExpectedValuePercent.HasValue).Select(p => p.ExpectedValuePercent!.Value).DefaultIfEmpty(0).Average(),
                 calibration, evByBucket, weekly, byTicker,
@@ -330,7 +348,7 @@ public class PredictionProfileController : ControllerBase
         if (!string.IsNullOrEmpty(predictionType))
             preds = preds.Where(p => p.PredictionType.ToString().Equals(predictionType, StringComparison.OrdinalIgnoreCase)).ToList();
 
-        var predIds = preds.Select(p => p.Id).ToList();
+        List<string> predIds = preds.Select(p => p.Id).ToList();
         var outcomes = predIds.Count > 0 ? await _repo.GetOutcomesForPredictionsAsync(predIds) : new List<PredictionOutcome>();
         var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
 

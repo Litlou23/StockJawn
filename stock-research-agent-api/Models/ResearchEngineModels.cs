@@ -312,7 +312,22 @@ public static class PredictionCategoryHelper
     private static readonly HashSet<PredictionType> DirectionalTypes =
         [PredictionType.bullish, PredictionType.bearish];
 
+    /// <summary>Neutral types that the NeutralOutcomeEvaluator should evaluate.</summary>
+    private static readonly HashSet<PredictionType> NeutralEvaluableTypes =
+    [
+        PredictionType.neutral_high_volatility,
+        PredictionType.neutral_no_edge,
+        PredictionType.neutral_range_bound,
+        PredictionType.neutral,
+    ];
+
     public static bool IsDirectional(PredictionType type) => DirectionalTypes.Contains(type);
+
+    /// <summary>True for neutral_* types that need evaluation by NeutralOutcomeEvaluator.</summary>
+    public static bool IsNeutralEvaluable(PredictionType type) => NeutralEvaluableTypes.Contains(type);
+
+    /// <summary>True for types that need no evaluation at all (watch_only, unavailable, rejected).</summary>
+    public static bool IsPassThrough(PredictionType type) => !IsDirectional(type) && !IsNeutralEvaluable(type);
 
     public static PredictionCategory Categorize(PredictionType type, string timeWindow) =>
         IsDirectional(type)

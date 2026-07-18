@@ -70,6 +70,16 @@ public class NeutralOutcomeRepository
         return row is not null ? MapOutcome(row) : null;
     }
 
+    public async Task<List<NeutralPredictionOutcome>> GetForPredictionsAsync(List<string> predictionIds)
+    {
+        if (predictionIds.Count == 0) return new();
+        // PostgREST in() filter
+        var ids = string.Join(",", predictionIds.Select(id => $"\"{id}\""));
+        var rows = await _db.SelectAsync("neutral_prediction_outcomes",
+            filter: $"prediction_id=in.({ids})", limit: predictionIds.Count);
+        return rows.Select(MapOutcome).ToList();
+    }
+
     public async Task<List<NeutralPredictionOutcome>> GetByTypeAsync(string predictionType, int limit = 100)
     {
         var rows = await _db.SelectAsync("neutral_prediction_outcomes",

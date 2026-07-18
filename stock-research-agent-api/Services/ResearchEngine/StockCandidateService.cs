@@ -34,7 +34,7 @@ public class StockCandidateService
     /// </summary>
     public static readonly Dictionary<StockTimeframe, int> MinEvalHours = new()
     {
-        [StockTimeframe.one_day] = 6,
+        [StockTimeframe.one_day] = 24,     // full trading day close-to-close
         [StockTimeframe.two_day] = 30,
         [StockTimeframe.one_week] = 120,      // 5 trading days
         [StockTimeframe.one_month] = 504,      // 21 trading days

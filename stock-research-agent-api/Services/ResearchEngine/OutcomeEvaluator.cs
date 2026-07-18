@@ -270,7 +270,7 @@ public class OutcomeEvaluator
             var minHours = prediction.TimeWindow switch
             {
                 "intraday" => 4,
-                "1_day" => 6,
+                "1_day" => 24,   // full trading day close-to-close
                 "3_day" => 48,
                 "1_week" => 120,
                 "1_month" => 504,    // 21 days

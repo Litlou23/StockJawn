@@ -56,7 +56,7 @@ public class NeutralOutcomeEvaluator
     private static readonly Dictionary<string, int> MinEvalHours = new()
     {
         ["intraday"] = 4,
-        ["1_day"] = 6,
+        ["1_day"] = 24,
         ["3_day"] = 48,
         ["1_week"] = 120,
         ["1_month"] = 504,

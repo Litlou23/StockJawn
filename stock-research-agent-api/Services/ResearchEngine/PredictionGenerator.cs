@@ -503,7 +503,7 @@ public class PredictionGenerator
             ActionabilityTier = scoring.Breakdown.ActionabilityTier,
             DowngradeReasons = downgradeReasons,
             ExpectedValuePercent = ComputeExpectedValue(confidence, priceCalc.TargetPrice, priceCalc.StopPrice, entryPrice),
-            Status = "open",
+            Status = PredictionCategoryHelper.IsPassThrough(pt) ? "passed" : "open",
             ProfileId = sharedContext?.ProfileId,
         };
 
