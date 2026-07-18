@@ -15,7 +15,7 @@ public class LearningEngine
 {
     private const int MinObservationsForAdjustment = 50;
     private const double MaxAdjustmentPercent = 0.50;   // ±50% max — let the learning engine express conviction
-    private const double MaxDailyMovement = 0.01;       // 1% per day
+    private const double MaxDailyMovement = 0.05;       // 5% per day — converge in days not months
     private const double TimeDecayHalfLifeDays = 45.0;
 
     // Base weights for the 8 scoring buckets (Layer 1 — never modified)
@@ -60,6 +60,7 @@ public class LearningEngine
 
     private readonly ResearchRepository _repo;
     private readonly PredictionProfileRepository _profileRepo;
+    private readonly NeutralOutcomeRepository _neutralRepo;
     private readonly PatternDetectionService _patternDetection;
     private readonly TradeSetupEngine _setupEngine;
     private readonly IOpenAiCompletionService _ai;
@@ -68,6 +69,7 @@ public class LearningEngine
 
     public LearningEngine(
         ResearchRepository repo, PredictionProfileRepository profileRepo,
+        NeutralOutcomeRepository neutralRepo,
         PatternDetectionService patternDetection,
         TradeSetupEngine setupEngine,
         IOpenAiCompletionService ai, WeightUpdateValidator guardrail,
@@ -75,11 +77,63 @@ public class LearningEngine
     {
         _repo = repo;
         _profileRepo = profileRepo;
+        _neutralRepo = neutralRepo;
         _patternDetection = patternDetection;
         _setupEngine = setupEngine;
         _ai = ai;
         _guardrail = guardrail;
         _logger = logger;
+    }
+
+    // -----------------------------------------------------------------------
+    // Unified outcome map — merges prediction_outcomes + neutral_prediction_outcomes
+    // so neutral evaluations feed into all learning stages.
+    // -----------------------------------------------------------------------
+
+    private async Task<Dictionary<string, PredictionOutcome>> BuildUnifiedOutcomeMapAsync(
+        List<PredictionCandidate> predictions, string? profileId)
+    {
+        var outcomes = profileId is not null
+            ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
+            : await _repo.GetRecentOutcomesAsync(500);
+        var map = outcomes.ToDictionary(o => o.PredictionId);
+
+        // Find neutral predictions that aren't in directional outcomes
+        var neutralPredIds = predictions
+            .Where(p => PredictionCategoryHelper.IsNeutralEvaluable(p.PredictionType)
+                        && !map.ContainsKey(p.Id))
+            .Select(p => p.Id).ToList();
+
+        if (neutralPredIds.Count > 0)
+        {
+            var neutralOutcomes = await _neutralRepo.GetForPredictionsAsync(neutralPredIds);
+            foreach (var no in neutralOutcomes)
+            {
+                // Convert NeutralPredictionOutcome → PredictionOutcome so existing
+                // ResolveCorrectness and downstream code works unchanged.
+                map[no.PredictionId] = new PredictionOutcome
+                {
+                    Id = no.Id,
+                    PredictionId = no.PredictionId,
+                    EvaluationTime = no.EvaluationTime,
+                    StartPrice = no.EntryPrice,
+                    ClosePrice = no.ExitPrice,
+                    HighAfterPrediction = no.HighAfter,
+                    LowAfterPrediction = no.LowAfter,
+                    PercentMove = no.RealizedMovePercent,
+                    OutcomeScore = no.NeutralAccuracyScore,
+                    MaxFavorablePercent = no.MaxRunUp,
+                    MaxAdversePercent = no.MaxDrawdown,
+                    OutcomeSummary = no.OutcomeSummary,
+                    Lesson = no.Lesson,
+                    // DirectionCorrect is null for neutrals — ResolveCorrectness uses PercentMove instead
+                };
+            }
+            if (neutralOutcomes.Count > 0)
+                _logger.LogInformation("[learning-engine] Merged {Count} neutral outcomes into unified map", neutralOutcomes.Count);
+        }
+
+        return map;
     }
 
     // Evidence records produced by pattern detection for the optimizer
@@ -220,10 +274,7 @@ public class LearningEngine
     public async Task<int> ExtractSignalObservationsAsync(List<string>? errors = null, string? profileId = null)
     {
         var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
-        var outcomes = profileId is not null
-            ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
-            : await _repo.GetRecentOutcomesAsync(500);
-        var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
         var observations = new List<object>();
         var processedCount = 0;
@@ -788,10 +839,7 @@ public class LearningEngine
     public async Task<ConfidenceAnalysis> ComputeConfidenceCalibrationAsync(string? profileId = null)
     {
         var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
-        var outcomes = profileId is not null
-            ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
-            : await _repo.GetRecentOutcomesAsync(500);
-        var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
         var buckets = new (string Range, int Min, int Max)[]
         {
@@ -1287,10 +1335,7 @@ public class LearningEngine
         try
         {
             var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
-            var outcomes = profileId is not null
-                ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
-                : await _repo.GetRecentOutcomesAsync(500);
-            var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+            var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
             // Split into directional vs neutral predictions that have outcomes
             var directionalWithOutcomes = predictions
@@ -1461,10 +1506,7 @@ public class LearningEngine
         try
         {
             var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
-            var outcomes = profileId is not null
-                ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
-                : await _repo.GetRecentOutcomesAsync(500);
-            var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+            var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
             // Group evaluated predictions by their setup fingerprint
             var setupGroups = new Dictionary<string, List<(PredictionCandidate Pred, PredictionOutcome Outcome, ScoringBreakdown? Breakdown)>>();
@@ -1623,10 +1665,9 @@ public class LearningEngine
             var superseded = await _repo.GetSupersededPredictionsAsync(200, profileId);
             if (superseded.Count == 0) return 0;
 
-            var outcomes = profileId is not null
-                ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
-                : await _repo.GetRecentOutcomesAsync(500);
-            var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+            // Get all predictions (superseded + their replacements) for unified outcome lookup
+            var allPreds = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+            var outcomeMap = await BuildUnifiedOutcomeMapAsync(allPreds, profileId);
 
             var records = new List<object>();
             var processed = 0;
@@ -2422,9 +2463,10 @@ public class LearningEngine
                 if (failureRate < 0.2) continue; // cluster must represent ≥20% of failures
 
                 // Recommend a confidence multiplier reduction proportional to the cluster severity
+                // With 5% daily movement cap, allow meaningful adjustments per cycle
                 var multiplier = regime == "overconfidence"
                     ? -0.05 // tighten confidence cap by 5%
-                    : -0.03 * failureRate; // scale by how concentrated failures are
+                    : -0.05 * Math.Min(failureRate * 2, 1.0); // up to 5% penalty, scaled by failure concentration
 
                 recommendations.Add(new PatternRecommendation
                 {
@@ -2438,10 +2480,13 @@ public class LearningEngine
             }
 
             // Synergy-based weight recommendations from signal combinations
-            foreach (var combo in combos.BestCombinations.Where(c => c.SynergyScore > 5 && c.CoOccurrences >= 10))
+            // Scale adjustment proportionally to synergy strength and evidence.
+            // With ≥20 co-occurrences and strong synergy, allow up to the full daily movement cap.
+            foreach (var combo in combos.BestCombinations.Where(c => c.SynergyScore > 3 && c.CoOccurrences >= 8))
             {
-                // Boost both signals slightly when they have positive synergy
-                var boost = Math.Min(combo.SynergyScore / 200.0, 0.03); // max 3% boost
+                var evidenceScale = Math.Min((double)combo.CoOccurrences / 20, 1.0);
+                var boost = combo.SynergyScore / 100.0 * evidenceScale; // proportional to synergy %
+                boost = Math.Min(boost, MaxDailyMovement); // respect daily cap
                 foreach (var signal in new[] { combo.Signal1, combo.Signal2 })
                 {
                     recommendations.Add(new PatternRecommendation
@@ -2449,17 +2494,18 @@ public class LearningEngine
                         Type = "synergy_weight",
                         SignalName = signal,
                         RecommendedAdjustment = Math.Round(boost, 4),
-                        Confidence = Math.Min((double)combo.CoOccurrences / 30, 1.0),
+                        Confidence = Math.Min((double)combo.CoOccurrences / 20, 1.0),
                         Evidence = combo.CoOccurrences,
                         Reason = $"Synergy: {combo.Signal1}+{combo.Signal2} joint accuracy {combo.JointAccuracy:F1}% ({combo.SynergyScore:+0.0}% synergy, n={combo.CoOccurrences})",
                     });
                 }
             }
 
-            foreach (var combo in combos.WorstCombinations.Where(c => c.SynergyScore < -5 && c.CoOccurrences >= 10))
+            foreach (var combo in combos.WorstCombinations.Where(c => c.SynergyScore < -3 && c.CoOccurrences >= 8))
             {
-                // Penalize both signals slightly when they have negative synergy
-                var penalty = Math.Max(combo.SynergyScore / 200.0, -0.03); // max 3% penalty
+                var evidenceScale = Math.Min((double)combo.CoOccurrences / 20, 1.0);
+                var penalty = combo.SynergyScore / 100.0 * evidenceScale; // negative = penalty
+                penalty = Math.Max(penalty, -MaxDailyMovement); // respect daily cap
                 foreach (var signal in new[] { combo.Signal1, combo.Signal2 })
                 {
                     recommendations.Add(new PatternRecommendation
@@ -2467,7 +2513,7 @@ public class LearningEngine
                         Type = "synergy_weight",
                         SignalName = signal,
                         RecommendedAdjustment = Math.Round(penalty, 4),
-                        Confidence = Math.Min((double)combo.CoOccurrences / 30, 1.0),
+                        Confidence = Math.Min((double)combo.CoOccurrences / 20, 1.0),
                         Evidence = combo.CoOccurrences,
                         Reason = $"Negative synergy: {combo.Signal1}+{combo.Signal2} joint accuracy {combo.JointAccuracy:F1}% ({combo.SynergyScore:+0.0}% synergy, n={combo.CoOccurrences})",
                     });
@@ -2559,21 +2605,69 @@ public class LearningEngine
             });
         }
 
-        // Log regime recommendations as insights (these affect confidence at scoring time, not weights)
+        // Apply regime recommendations as actual weight overrides that ConfidenceEngine reads
         var regimeRecs = recommendations.Where(r => r.Type == "regime_confidence_cap").ToList();
+        foreach (var rec in regimeRecs)
+        {
+            // Map regime names to weight keys that ConfidenceEngine reads
+            var weightKey = rec.SignalName switch
+            {
+                "bull_market" => "regime_bull_penalty",
+                "bear_market" => "regime_bear_penalty",
+                "overconfidence" => "regime_overconfidence_penalty",
+                _ => "regime_sideways_penalty", // sideways or unknown
+            };
+
+            var currentPenalty = overrideMap.TryGetValue(weightKey, out var existing)
+                ? existing.EffectiveWeight : 1.0;
+
+            // Regime penalty moves toward 1.0 + adjustment (which is negative, so < 1.0)
+            var targetPenalty = Math.Clamp(1.0 + rec.RecommendedAdjustment, 0.70, 1.0);
+            var movement = Math.Clamp(targetPenalty - currentPenalty, -MaxDailyMovement, MaxDailyMovement);
+            var newPenalty = Math.Clamp(currentPenalty + movement, 0.70, 1.0);
+
+            if (Math.Abs(movement) < 0.001) continue;
+
+            var regimeOverride = new ScoringWeightOverride
+            {
+                SignalName = weightKey,
+                BaseWeight = 1.0,
+                AdjustmentPercent = newPenalty - 1.0,
+                EffectiveWeight = newPenalty,
+                Confidence = rec.Confidence,
+                SampleSize = rec.Evidence,
+                Status = "active",
+                Reason = $"[pattern-detection] {rec.Reason}",
+            };
+            await WriteWeightUpdateAsync(weightKey, newPenalty, regimeOverride, profileId, isChampion);
+
+            changes.Add(new WeightChangeSummary
+            {
+                SignalName = weightKey,
+                PreviousWeight = currentPenalty,
+                NewWeight = newPenalty,
+                ChangePercent = movement * 100,
+                Reason = $"[pattern-detection] Regime penalty: {rec.Reason}",
+            });
+
+            _logger.LogInformation(
+                "[learning-engine] Applied regime penalty {Key}: {Prev:F3} → {New:F3} ({Movement:+0.0;-0.0}%)",
+                weightKey, currentPenalty, newPenalty, movement * 100);
+        }
+
+        // Also save as insights for visibility in the learning report
         if (regimeRecs.Count > 0 && isChampion)
         {
             var insights = regimeRecs.Select(r => new
             {
                 insight_type = "pattern_detection",
                 summary = r.Reason,
-                evidence = $"{r.Evidence} failures in cluster. Recommended confidence adjustment: {r.RecommendedAdjustment * 100:F1}%.",
-                action_recommendation = "Regime-aware confidence cap applied to scoring engine.",
+                evidence = $"{r.Evidence} failures in cluster. Applied confidence penalty: {r.RecommendedAdjustment * 100:F1}%.",
+                action_recommendation = "Regime-aware confidence penalty written to scoring weights.",
                 confidence = r.Confidence,
             }).Cast<object>().ToList();
 
             await _repo.SaveLearningInsightsAsync(insights);
-            _logger.LogInformation("[learning-engine] Saved {Count} regime-aware pattern insights", regimeRecs.Count);
         }
 
         return (changes.Count, changes);
@@ -2597,10 +2691,7 @@ public class LearningEngine
         }
 
         var predictions = await _repo.GetRecentPredictionsAsync(200, profileId: profileId);
-        var outcomes = profileId is not null
-            ? await _repo.GetOutcomesForProfileAsync(profileId, 200)
-            : await _repo.GetRecentOutcomesAsync(200);
-        var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
         // Include all evaluated predictions: directional and neutral
         var evaluated = predictions
@@ -2608,12 +2699,95 @@ public class LearningEngine
             .ToList();
 
         var correct = evaluated.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
+
+        // New predictions since last report (for freshness — even without outcomes)
+        var lastReportDate = DateTimeOffset.UtcNow.AddHours(-25);
+        var newPredictions = predictions.Where(p => p.CreatedAt >= lastReportDate).ToList();
+        var newByType = newPredictions.GroupBy(p => p.PredictionType)
+            .Select(g => $"{g.Key}: {g.Count()}").ToList();
+        var pendingEval = predictions.Count(p => !outcomeMap.ContainsKey(p.Id) && p.Status == "open");
         var bullPreds = evaluated.Where(p => p.PredictionType == PredictionType.bullish).ToList();
         var bearPreds = evaluated.Where(p => p.PredictionType == PredictionType.bearish).ToList();
         var neutralPreds = evaluated.Where(p => !PredictionCategoryHelper.IsDirectional(p.PredictionType)).ToList();
         var bullCorrect = bullPreds.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
         var bearCorrect = bearPreds.Count(p => outcomeMap[p.Id].DirectionCorrect == true);
         var neutralCorrect = neutralPreds.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
+
+        // --- Per-timeframe accuracy breakdown ---
+        var timeframeLines = evaluated
+            .GroupBy(p => p.TimeWindow)
+            .Where(g => g.Count() >= 3)
+            .Select(g =>
+            {
+                var twCorrect = g.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
+                return $"  {g.Key}: {(double)twCorrect / g.Count() * 100:F0}% accuracy ({g.Count()} predictions)";
+            }).ToList();
+
+        // --- Per-ticker performance (best and worst) ---
+        var tickerGroups = evaluated
+            .GroupBy(p => p.Ticker)
+            .Where(g => g.Count() >= 2)
+            .Select(g =>
+            {
+                var tCorrect = g.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true);
+                var avgReturn = g.Where(p => outcomeMap[p.Id].PercentMove.HasValue)
+                    .Select(p => outcomeMap[p.Id].PercentMove!.Value).DefaultIfEmpty(0).Average();
+                return new { Ticker = g.Key, Count = g.Count(), Accuracy = (double)tCorrect / g.Count(), AvgReturn = avgReturn };
+            })
+            .OrderByDescending(t => t.Accuracy).ToList();
+        var bestTickers = tickerGroups.Take(5)
+            .Select(t => $"  {t.Ticker}: {t.Accuracy * 100:F0}% acc, {t.AvgReturn:+0.00;-0.00}% avg return ({t.Count} preds)").ToList();
+        var worstTickers = tickerGroups.TakeLast(Math.Min(3, tickerGroups.Count))
+            .Select(t => $"  {t.Ticker}: {t.Accuracy * 100:F0}% acc, {t.AvgReturn:+0.00;-0.00}% avg return ({t.Count} preds)").ToList();
+
+        // --- Price prediction accuracy (target/stop hit rates, MFE/MAE) ---
+        var withOutcomeDetails = evaluated.Where(p => outcomeMap[p.Id].MaxFavorablePercent.HasValue).ToList();
+        var targetHits = evaluated.Count(p => outcomeMap[p.Id].TargetHit == true);
+        var stopHits = evaluated.Count(p => outcomeMap[p.Id].StopHit == true);
+        var avgMfe = withOutcomeDetails.Count > 0
+            ? withOutcomeDetails.Average(p => outcomeMap[p.Id].MaxFavorablePercent!.Value) : 0;
+        var avgMae = withOutcomeDetails.Count > 0
+            ? withOutcomeDetails.Average(p => outcomeMap[p.Id].MaxAdversePercent ?? 0) : 0;
+        var avgReturn = evaluated.Where(p => outcomeMap[p.Id].PercentMove.HasValue).Select(p => outcomeMap[p.Id].PercentMove!.Value)
+            .DefaultIfEmpty(0).Average();
+
+        // --- Recent specific examples (last 5 evaluated, most recent first) ---
+        var recentExamples = evaluated
+            .OrderByDescending(p => outcomeMap[p.Id].EvaluationTime)
+            .Take(5)
+            .Select(p =>
+            {
+                var o = outcomeMap[p.Id];
+                var result = ResolveCorrectness(p, o) == true ? "CORRECT" : "WRONG";
+                var move = o.PercentMove.HasValue ? $"{o.PercentMove.Value:+0.00;-0.00}%" : "n/a";
+                return $"  {p.Ticker} {p.PredictionType} ({p.TimeWindow}, conf {p.ConfidenceScore}): {result}, moved {move}";
+            }).ToList();
+
+        // --- Trend: last 7 days vs prior 7 days ---
+        var now = DateTimeOffset.UtcNow;
+        var last7 = evaluated.Where(p => outcomeMap[p.Id].EvaluationTime >= now.AddDays(-7)).ToList();
+        var prior7 = evaluated.Where(p => outcomeMap[p.Id].EvaluationTime >= now.AddDays(-14) && outcomeMap[p.Id].EvaluationTime < now.AddDays(-7)).ToList();
+        var last7Acc = last7.Count > 0 ? (double)last7.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true) / last7.Count * 100 : 0;
+        var prior7Acc = prior7.Count > 0 ? (double)prior7.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true) / prior7.Count * 100 : 0;
+
+        // --- Confidence vs return (do high-confidence picks actually return more?) ---
+        var highConfPreds = evaluated.Where(p => p.ConfidenceScore >= 60).ToList();
+        var lowConfPreds = evaluated.Where(p => p.ConfidenceScore < 40).ToList();
+        var highConfReturn = highConfPreds.Where(p => outcomeMap[p.Id].PercentMove.HasValue)
+            .Select(p => outcomeMap[p.Id].PercentMove!.Value).DefaultIfEmpty(0).Average();
+        var lowConfReturn = lowConfPreds.Where(p => outcomeMap[p.Id].PercentMove.HasValue)
+            .Select(p => outcomeMap[p.Id].PercentMove!.Value).DefaultIfEmpty(0).Average();
+        var highConfAcc = highConfPreds.Count > 0
+            ? (double)highConfPreds.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true) / highConfPreds.Count * 100 : 0;
+        var lowConfAcc = lowConfPreds.Count > 0
+            ? (double)lowConfPreds.Count(p => ResolveCorrectness(p, outcomeMap[p.Id]) == true) / lowConfPreds.Count * 100 : 0;
+
+        // --- Current weight snapshot ---
+        var currentOverrides = await GetEffectiveOverridesAsync(profileId, profileId is null);
+        var weightSnapshot = currentOverrides
+            .Where(o => o.EffectiveWeight != 1.0)
+            .Select(o => $"  {o.SignalName}: {o.EffectiveWeight:F3}")
+            .ToList();
 
         var topSignals = signalStats
             .Where(s => s.Direction == "all" && s.TotalPredictions >= 10)
@@ -2671,14 +2845,44 @@ public class LearningEngine
         }
 
         var prompt = $@"You are the learning analyst for STOCKJAWN, an AI stock prediction system.
-Summarize what the system learned today in a concise, actionable report for the system owner.
+Write a daily learning report for the system owner. This must be DIFFERENT from yesterday's report — focus on new data, changing trends, and specific actionable recommendations.
 
-DATA:
+OVERALL PERFORMANCE:
 - Total evaluated predictions: {evaluated.Count}
 - Overall accuracy: {(evaluated.Count > 0 ? (double)correct / evaluated.Count * 100 : 0):F1}%
-- Bullish accuracy: {(bullPreds.Count > 0 ? (double)bullCorrect / bullPreds.Count * 100 : 0):F1}% ({bullPreds.Count} predictions)
-- Bearish accuracy: {(bearPreds.Count > 0 ? (double)bearCorrect / bearPreds.Count * 100 : 0):F1}% ({bearPreds.Count} predictions)
-- Neutral accuracy: {(neutralPreds.Count > 0 ? (double)neutralCorrect / neutralPreds.Count * 100 : 0):F1}% ({neutralPreds.Count} predictions, correct = abs move < 2%)
+- Average return per prediction: {avgReturn:+0.00;-0.00}%
+- Bullish: {(bullPreds.Count > 0 ? (double)bullCorrect / bullPreds.Count * 100 : 0):F1}% accuracy ({bullPreds.Count} predictions)
+- Bearish: {(bearPreds.Count > 0 ? (double)bearCorrect / bearPreds.Count * 100 : 0):F1}% accuracy ({bearPreds.Count} predictions)
+- Neutral: {(neutralPreds.Count > 0 ? (double)neutralCorrect / neutralPreds.Count * 100 : 0):F1}% accuracy ({neutralPreds.Count} predictions, correct = abs move < 2%)
+
+TREND (is accuracy improving or declining?):
+  Last 7 days: {last7Acc:F1}% accuracy ({last7.Count} predictions)
+  Prior 7 days: {prior7Acc:F1}% accuracy ({prior7.Count} predictions)
+  Direction: {(last7.Count >= 3 && prior7.Count >= 3 ? (last7Acc > prior7Acc + 5 ? "IMPROVING" : last7Acc < prior7Acc - 5 ? "DECLINING" : "STABLE") : "insufficient data to compare")}
+
+ACCURACY BY TIMEFRAME:
+{(timeframeLines.Count > 0 ? string.Join("\n", timeframeLines) : "  Not enough data per timeframe yet")}
+
+CONFIDENCE VS ACTUAL RETURNS:
+  High confidence (≥60): {highConfAcc:F0}% accuracy, {highConfReturn:+0.00;-0.00}% avg return ({highConfPreds.Count} predictions)
+  Low confidence (<40): {lowConfAcc:F0}% accuracy, {lowConfReturn:+0.00;-0.00}% avg return ({lowConfPreds.Count} predictions)
+  {(highConfPreds.Count >= 5 && lowConfPreds.Count >= 5 ? (highConfAcc > lowConfAcc ? "Confidence IS predictive of accuracy" : "WARNING: Confidence is NOT predictive — high-conf picks aren't better") : "Not enough samples to compare")}
+
+PRICE PREDICTION QUALITY:
+  Target hit rate: {(evaluated.Count > 0 ? (double)targetHits / evaluated.Count * 100 : 0):F0}% ({targetHits}/{evaluated.Count})
+  Stop hit rate: {(evaluated.Count > 0 ? (double)stopHits / evaluated.Count * 100 : 0):F0}% ({stopHits}/{evaluated.Count})
+  Avg max favorable excursion (MFE): {avgMfe:F2}%
+  Avg max adverse excursion (MAE): {avgMae:F2}%
+  MFE/MAE ratio: {(avgMae > 0 ? avgMfe / avgMae : 0):F2} {(avgMae > 0 && avgMfe / avgMae > 1.5 ? "(good — winners run further than losers)" : avgMae > 0 && avgMfe / avgMae < 1.0 ? "(BAD — losers run further than winners)" : "")}
+
+BEST PERFORMING TICKERS:
+{(bestTickers.Count > 0 ? string.Join("\n", bestTickers) : "  Not enough per-ticker data yet")}
+
+WORST PERFORMING TICKERS:
+{(worstTickers.Count > 0 ? string.Join("\n", worstTickers) : "  Not enough per-ticker data yet")}
+
+RECENT PREDICTIONS AND OUTCOMES (most recent 5):
+{(recentExamples.Count > 0 ? string.Join("\n", recentExamples) : "  No recent evaluated predictions")}
 
 TOP SIGNALS (legacy binary tracking — treat with skepticism if all signals show same accuracy):
 {string.Join("\n", topSignals)}
@@ -2702,8 +2906,15 @@ CONFIDENCE CALIBRATION:
 {string.Join("\n", calibBuckets)}
 Calibration status: {calibration.Summary}
 
-WEIGHT CHANGES APPLIED:
+CURRENT SIGNAL WEIGHTS (non-default only):
+{(weightSnapshot.Count > 0 ? string.Join("\n", weightSnapshot) : "  All weights at default (1.0)")}
+
+WEIGHT CHANGES APPLIED THIS CYCLE:
 {(weightChangeLines.Count > 0 ? string.Join("\n", weightChangeLines) : "  None today")}
+
+NEW PREDICTIONS SINCE LAST REPORT:
+  New predictions: {newPredictions.Count} ({string.Join(", ", newByType)})
+  Pending evaluation: {pendingEval} open predictions awaiting outcome data
 
 PREDICTION REVISIONS (supersession learning):
 {await BuildSupersessionReportSectionAsync()}
@@ -2712,20 +2923,15 @@ VOLATILITY OPPORTUNITY LEARNING (VOE Stage 5c):
 {BuildVolatilityOpportunitySummarySection(voeSummary ?? new VolatilityOpportunityLearningSummary())}
 
 INSTRUCTIONS:
-- Write 3-5 short paragraphs, conversational tone
-- Lead with the most important finding from the NEW analytics (calibration, correlation, influence, interactions)
-- If calibration data shows that higher signal scores DO predict better returns, highlight which signals
-- If correlation data shows some signals have strong r values vs weak ones, call out the difference
-- If influence data shows certain signals are mostly redundant, recommend downweighting them
-- If interaction data shows strong synergies, highlight the best signal pairs
-- If all legacy signals show the same accuracy, note this is a known attribution flaw being fixed
-- Highlight any concerning patterns or improvements
-- If confidence is miscalibrated, flag it clearly
-- Note any directional asymmetry (bull vs bear performance)
-- If supersession data exists, note which transition types improve accuracy and which don't
-- If VOE data exists, highlight which opportunity types and regimes perform best/worst
-- Keep under 500 words
-- Do NOT use bullet points or headers — write in flowing prose";
+- Write 4-6 paragraphs, conversational but data-driven. No bullet points, no headers — flowing prose only.
+- PARAGRAPH 1: Open with the single most important change or finding. Name specific numbers. Compare to prior period if trend data exists. Example: ""Accuracy dropped from 52% to 41% this week, driven entirely by bearish calls going 1-for-7.""
+- PARAGRAPH 2: Analyze which predictions actually worked and which didn't. Reference specific tickers and recent examples. Don't just say ""bullish outperformed bearish"" — say ""AAPL and MSFT bullish calls both hit targets while TSLA bearish was stopped out twice.""
+- PARAGRAPH 3: Evaluate price prediction quality. Are targets being set too aggressively (low hit rate, high stop rate)? Is the MFE/MAE ratio healthy? Are we leaving money on the table (high MFE but low target hits)?
+- PARAGRAPH 4: Assess signal effectiveness. Which signals actually drive correct predictions vs. which are along for the ride? If influence data shows redundant signals, name them and recommend downweighting. If correlations show a signal with strong predictive power, highlight it.
+- PARAGRAPH 5: Provide 2-3 specific, actionable recommendations. Not generic advice — concrete changes. Examples: ""Consider dropping the sentiment signal weight below 0.5 — it's been redundant in 80% of predictions."" Or ""1_day timeframe is at 55% accuracy vs 30% for 3_day — the system should favor shorter holds until 3_day improves."" Or ""Stop prices are too tight — MAE of 3.2% exceeds average stop distance.""
+- PARAGRAPH 6 (optional): Note what data is still missing or pending, and what you'd want to see before making stronger recommendations.
+- CRITICAL: Every report must contain specific numbers, ticker names, and concrete recommendations. A report that could apply to any day is a BAD report.
+- Keep under 700 words";
 
         try
         {
@@ -2733,10 +2939,10 @@ INSTRUCTIONS:
             {
                 Messages =
                 [
-                    new() { Role = "system", Content = "You are a quantitative finance analyst providing learning summaries for an AI stock prediction system." },
+                    new() { Role = "system", Content = "You are a quantitative finance analyst writing a daily learning report for STOCKJAWN, an AI stock prediction system. Your job is to identify what changed, what's working, what's failing, and recommend specific weight or threshold adjustments. Every report must cite concrete numbers and ticker names. Never write a generic report." },
                     new() { Role = "user", Content = prompt },
                 ],
-                MaxOutputTokens = 600,
+                MaxOutputTokens = 1000,
             }, CancellationToken.None);
 
             var summary = result.Text;
@@ -2793,10 +2999,8 @@ INSTRUCTIONS:
     public async Task<List<object>> GenerateLearningInsightsAsync(string? profileId = null)
     {
         var perfStats = await _repo.GetAllSignalPerformanceAsync();
-        var outcomes = profileId is not null
-            ? await _repo.GetOutcomesForProfileAsync(profileId, 100)
-            : await _repo.GetRecentOutcomesAsync(100);
         var predictions = await _repo.GetRecentPredictionsAsync(100, profileId: profileId);
+        // Unified outcome map not needed here — outcomeMap built after perfStats section
         var insights = new List<object>();
 
         // 1. Reliable signals (direction-aware)
@@ -2853,7 +3057,7 @@ INSTRUCTIONS:
         }
 
         // 4. Per-ticker patterns (includes directional and neutral predictions)
-        var outcomeMap = outcomes.ToDictionary(o => o.PredictionId);
+        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
         var tickerStats = new Dictionary<string, (int Correct, int Wrong, int Total)>();
         foreach (var pred in predictions)
         {

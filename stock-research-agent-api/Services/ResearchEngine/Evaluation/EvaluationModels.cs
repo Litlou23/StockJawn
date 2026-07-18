@@ -199,6 +199,7 @@ public record ConfidenceResult
     public double RiskAdjustment { get; init; }
     public double CalibrationFactor { get; init; }
     public double OppositionPenalty { get; init; }
+    public double RegimePenalty { get; init; } = 1.0;
     public double DecisionMargin { get; init; }
     public bool ClearDirection { get; init; }
     public string? ConfidenceCap { get; init; }

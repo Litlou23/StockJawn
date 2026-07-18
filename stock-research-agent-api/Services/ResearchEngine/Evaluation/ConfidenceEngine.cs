@@ -69,9 +69,40 @@ public class ConfidenceEngine : IConfidenceEngine
         if (decisionMargin < 0.48)
             oppositionPenalty = Math.Max(0.6, 0.6 + (decisionMargin / 0.48) * 0.4);
 
-        var rawConfidence = winningScore * dataQualityFactor * confirmMult * riskAdj * calFactor * oppositionPenalty;
+        // ── Regime-aware confidence penalty (learned from pattern detection) ──
+        // Pattern detection identifies which market regimes produce the most failures
+        // and writes penalty multipliers to scoring_weight_overrides. Detect current
+        // regime from market_context scores and apply the corresponding penalty.
+        double regimePenalty = 1.0;
+        var mktBull = market.BullishContribution;
+        var mktBear = market.BearishContribution;
+        var mktDiff = Math.Abs(mktBull - mktBear);
+        var weights = context.LearningData.Weights;
+
+        if (mktDiff < 5) // sideways: bull and bear scores within 5 points
+        {
+            regimePenalty = Math.Clamp(weights.GetValueOrDefault("regime_sideways_penalty", 1.0), 0.70, 1.0);
+        }
+        else if (mktBull > mktBear) // bull market
+        {
+            regimePenalty = Math.Clamp(weights.GetValueOrDefault("regime_bull_penalty", 1.0), 0.70, 1.0);
+        }
+        else // bear market
+        {
+            regimePenalty = Math.Clamp(weights.GetValueOrDefault("regime_bear_penalty", 1.0), 0.70, 1.0);
+        }
+
+        // Overconfidence penalty: learned cap when high-confidence predictions fail disproportionately
+        var overconfidencePenalty = Math.Clamp(weights.GetValueOrDefault("regime_overconfidence_penalty", 1.0), 0.70, 1.0);
+
+        var rawConfidence = winningScore * dataQualityFactor * confirmMult * riskAdj * calFactor * oppositionPenalty * regimePenalty;
 
         string? capReason = null;
+        if (regimePenalty < 0.99)
+        {
+            var regimeLabel = mktDiff < 5 ? "sideways" : mktBull > mktBear ? "bull" : "bear";
+            capReason = $"Regime penalty {regimePenalty:F2} ({regimeLabel} market, learned from failure patterns)";
+        }
         if (context.Indicators.IndicatorsComputed.Count <= 3)
         {
             rawConfidence = Math.Min(rawConfidence, 45);
@@ -95,6 +126,14 @@ public class ConfidenceEngine : IConfidenceEngine
         }
 
         int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, 85));
+
+        // Apply overconfidence penalty to high-confidence predictions only
+        if (overconfidencePenalty < 1.0 && confidence >= 60)
+        {
+            confidence = (int)Math.Round(confidence * overconfidencePenalty);
+            capReason ??= $"Overconfidence penalty {overconfidencePenalty:F2} (learned from high-conf failures)";
+        }
+
         bool clearDirection = decisionMargin > 0.54;
         var riskCapBoost = context.LearningData.RiskCapBoost;
 
@@ -153,6 +192,7 @@ public class ConfidenceEngine : IConfidenceEngine
             RiskAdjustment = riskAdj,
             CalibrationFactor = calFactor,
             OppositionPenalty = oppositionPenalty,
+            RegimePenalty = regimePenalty * overconfidencePenalty,
             DecisionMargin = decisionMargin,
             ClearDirection = clearDirection,
             ConfidenceCap = capReason,
