@@ -303,7 +303,7 @@ public class StockCandidateService
             return true;
         }
 
-        var quote = await _marketData.GetQuoteAsync(c.Ticker);
+        var quote = await _marketData.GetQuoteWithFallbackAsync(c.Ticker);
         if (quote is null)
         {
             await _stockRepo.SaveOutcomeAsync(new PaperStockOutcome
@@ -312,7 +312,7 @@ public class StockCandidateService
                 PredictionId = c.PredictionId,
                 Ticker = c.Ticker,
                 EvaluationTime = DateTimeOffset.UtcNow,
-                OutcomeSummary = "Twelve Data quote unavailable — outcome not computed.",
+                OutcomeSummary = "Market data unavailable (quote + bar fallback both failed) — outcome not computed.",
                 Warnings = ["market_data_unavailable"],
             });
             return false; // do not mark evaluated — try again next run
@@ -410,7 +410,7 @@ public class StockCandidateService
                     var ticker = setupRow["ticker"]?.ToString();
                     if (string.IsNullOrEmpty(ticker)) continue;
 
-                    var quote = await _marketData.GetQuoteAsync(ticker);
+                    var quote = await _marketData.GetQuoteWithFallbackAsync(ticker);
                     if (quote is null || quote.Price <= 0) continue;
 
                     var setupId = setupRow["id"]?.ToString() ?? "";

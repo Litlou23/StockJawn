@@ -237,6 +237,286 @@ public class TwelveDataProvider
     }
 
     // -----------------------------------------------------------------------
+    // Technical Indicators (API-sourced — new signals not computable from bars)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Fetches MACD (12, 26, 9) from the TwelveData /macd endpoint.
+    /// Returns (macdLine, signalLine, histogram) or null if unavailable.
+    /// </summary>
+    public async Task<(double MacdLine, double Signal, double Histogram)?> GetMacdAsync(string ticker)
+    {
+        if (!_configured) return null;
+        if (!await ThrottleAsync()) return null;
+        _logger.LogDebug("[twelve-data] calling /macd for {Ticker}", ticker);
+
+        var url = $"{BaseUrl}/macd?symbol={ticker}&interval=1day&fast_period=12&slow_period=26&signal_period=9&outputsize=1&apikey={_apiKey}";
+        try
+        {
+            var resp = await _http.GetStringAsync(url);
+            var json = JsonNode.Parse(resp);
+            if (json is null || json["status"]?.ToString() == "error") return null;
+
+            var values = json["values"]?.AsArray();
+            if (values is null || values.Count == 0) return null;
+
+            var v = values[0];
+            var macd = ParseDouble(v?["macd"]);
+            var signal = ParseDouble(v?["macd_signal"]);
+            var hist = ParseDouble(v?["macd_hist"]);
+
+            return (Math.Round(macd, 4), Math.Round(signal, 4), Math.Round(hist, 4));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[twelve-data] MACD fetch failed for {Ticker}", ticker);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Fetches EMA values (12, 26, 50) in a single call using TwelveData /ema endpoint.
+    /// Makes 3 separate calls (one per period) but each is small.
+    /// </summary>
+    public async Task<(double? Ema12, double? Ema26, double? Ema50)> GetEmaAsync(string ticker)
+    {
+        if (!_configured) return (null, null, null);
+
+        async Task<double?> FetchEma(int period)
+        {
+            if (!await ThrottleAsync()) return null;
+            _logger.LogDebug("[twelve-data] calling /ema({Period}) for {Ticker}", period, ticker);
+
+            var url = $"{BaseUrl}/ema?symbol={ticker}&interval=1day&time_period={period}&outputsize=1&apikey={_apiKey}";
+            try
+            {
+                var resp = await _http.GetStringAsync(url);
+                var json = JsonNode.Parse(resp);
+                if (json is null || json["status"]?.ToString() == "error") return null;
+                var values = json["values"]?.AsArray();
+                if (values is null || values.Count == 0) return null;
+                var emaStr = values[0]?["ema"]?.ToString();
+                return double.TryParse(emaStr, out var ema) ? Math.Round(ema, 4) : null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[twelve-data] EMA({Period}) fetch failed for {Ticker}", period, ticker);
+                return null;
+            }
+        }
+
+        // Sequential to respect rate limits
+        var ema12 = await FetchEma(12);
+        var ema26 = await FetchEma(26);
+        var ema50 = await FetchEma(50);
+        return (ema12, ema26, ema50);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fundamentals (company profile + statistics)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Fetches company profile from TwelveData /profile endpoint.
+    /// Returns sector, industry, market cap, employees, etc.
+    /// </summary>
+    public async Task<FundamentalsContext?> GetFundamentalsAsync(string ticker)
+    {
+        if (!_configured) return null;
+
+        var warnings = new List<string>();
+        var dataPoints = new List<string>();
+
+        // Fetch profile
+        if (!await ThrottleAsync()) return null;
+        _logger.LogDebug("[twelve-data] calling /profile for {Ticker}", ticker);
+
+        JsonNode? profileJson = null;
+        try
+        {
+            var resp = await _http.GetStringAsync($"{BaseUrl}/profile?symbol={ticker}&apikey={_apiKey}");
+            profileJson = JsonNode.Parse(resp);
+            if (profileJson?["status"]?.ToString() == "error")
+            {
+                warnings.Add($"profile_error: {profileJson["message"]}");
+                profileJson = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[twelve-data] Profile fetch failed for {Ticker}", ticker);
+            warnings.Add($"profile_exception: {ex.Message}");
+        }
+
+        // Fetch statistics
+        if (!await ThrottleAsync()) return null;
+        _logger.LogDebug("[twelve-data] calling /statistics for {Ticker}", ticker);
+
+        JsonNode? statsJson = null;
+        try
+        {
+            var resp = await _http.GetStringAsync($"{BaseUrl}/statistics?symbol={ticker}&apikey={_apiKey}");
+            statsJson = JsonNode.Parse(resp);
+            if (statsJson?["status"]?.ToString() == "error")
+            {
+                warnings.Add($"statistics_error: {statsJson["message"]}");
+                statsJson = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[twelve-data] Statistics fetch failed for {Ticker}", ticker);
+            warnings.Add($"statistics_exception: {ex.Message}");
+        }
+
+        if (profileJson is null && statsJson is null) return null;
+
+        // Parse profile fields
+        string? sector = null, industry = null, exchange = null;
+        long? marketCap = null;
+        int? employees = null;
+
+        if (profileJson is not null)
+        {
+            sector = profileJson["sector"]?.ToString();
+            industry = profileJson["industry"]?.ToString();
+            exchange = profileJson["exchange"]?.ToString();
+            if (!string.IsNullOrEmpty(sector)) dataPoints.Add("sector");
+            if (!string.IsNullOrEmpty(industry)) dataPoints.Add("industry");
+        }
+
+        // Parse statistics fields
+        var stats = statsJson?["statistics"];
+        // TwelveData /statistics actual response nesting (verified against docs sample):
+        //   statistics.valuations_metrics       — P/E, P/B, EV/EBITDA, market cap
+        //   statistics.financials               — profit_margin, operating_margin, return_on_equity_ttm
+        //   statistics.financials.income_statement — quarterly_revenue_growth, quarterly_earnings_growth_yoy
+        //   statistics.financials.balance_sheet    — total_debt_to_equity_mrq, current_ratio_mrq
+        //   statistics.stock_statistics            — short_percent_of_shares_outstanding
+        //   statistics.stock_price_summary         — beta, fifty_two_week_high/low
+        //   statistics.dividends_and_splits        — forward_annual_dividend_yield, payout_ratio
+        var valuations = stats?["valuations_metrics"];
+        var financials = stats?["financials"];
+        var incomeStatement = financials?["income_statement"];
+        var balanceSheet = financials?["balance_sheet"];
+        var stockStats = stats?["stock_statistics"];
+        var priceSummary = stats?["stock_price_summary"];
+
+        double? peRatio = null, forwardPe = null, pbRatio = null, psRatio = null, evToEbitda = null;
+        double? dividendYield = null, payoutRatio = null;
+        double? profitMargin = null, operatingMargin = null, roe = null, debtToEquity = null, currentRatio = null;
+        double? revenueGrowthYoy = null, earningsGrowthYoy = null, qRevGrowth = null, qEarnGrowth = null;
+        double? shortPct = null, beta = null;
+        double? fiftyTwoHigh = null, fiftyTwoLow = null;
+
+        if (valuations is not null)
+        {
+            peRatio = ParseNullableDouble(valuations["trailing_pe"]);
+            forwardPe = ParseNullableDouble(valuations["forward_pe"]);
+            pbRatio = ParseNullableDouble(valuations["price_to_book_mrq"]);
+            psRatio = ParseNullableDouble(valuations["price_to_sales_ttm"]);
+            evToEbitda = ParseNullableDouble(valuations["enterprise_to_ebitda"]);
+            marketCap = ParseNullableLong(valuations["market_capitalization"]);
+            if (peRatio is not null) dataPoints.Add("pe_ratio");
+            if (forwardPe is not null) dataPoints.Add("forward_pe");
+            if (marketCap is not null) dataPoints.Add("market_cap");
+        }
+
+        // Margins and ROE are direct children of financials (not inside income_statement)
+        if (financials is not null)
+        {
+            profitMargin = ParseNullableDouble(financials["profit_margin"]);
+            operatingMargin = ParseNullableDouble(financials["operating_margin"]);
+            roe = ParseNullableDouble(financials["return_on_equity_ttm"]);
+            if (profitMargin is not null) dataPoints.Add("profit_margin");
+            if (roe is not null) dataPoints.Add("roe");
+        }
+
+        // Growth metrics are inside income_statement
+        if (incomeStatement is not null)
+        {
+            qRevGrowth = ParseNullableDouble(incomeStatement["quarterly_revenue_growth"]);
+            qEarnGrowth = ParseNullableDouble(incomeStatement["quarterly_earnings_growth_yoy"]);
+            if (qRevGrowth is not null) dataPoints.Add("quarterly_revenue_growth");
+        }
+
+        // Debt and liquidity ratios are inside balance_sheet
+        if (balanceSheet is not null)
+        {
+            debtToEquity = ParseNullableDouble(balanceSheet["total_debt_to_equity_mrq"]);
+            currentRatio = ParseNullableDouble(balanceSheet["current_ratio_mrq"]);
+            if (debtToEquity is not null) dataPoints.Add("debt_to_equity");
+        }
+
+        // Use quarterly growth as YoY proxy (TwelveData doesn't provide annual growth fields)
+        revenueGrowthYoy = qRevGrowth;
+        earningsGrowthYoy = qEarnGrowth;
+
+        if (stats is not null)
+        {
+            dividendYield = ParseNullableDouble(stats["dividends_and_splits"]?["forward_annual_dividend_yield"]);
+            payoutRatio = ParseNullableDouble(stats["dividends_and_splits"]?["payout_ratio"]);
+            if (dividendYield is not null) dataPoints.Add("dividend_yield");
+        }
+
+        // Beta and 52-week range are under stock_price_summary (not stock_statistics)
+        if (priceSummary is not null)
+        {
+            beta = ParseNullableDouble(priceSummary["beta"]);
+            fiftyTwoHigh = ParseNullableDouble(priceSummary["fifty_two_week_high"]);
+            fiftyTwoLow = ParseNullableDouble(priceSummary["fifty_two_week_low"]);
+            if (beta is not null) dataPoints.Add("beta");
+            if (fiftyTwoHigh is not null) dataPoints.Add("52w_range");
+        }
+
+        // Short interest is under stock_statistics
+        if (stockStats is not null)
+        {
+            shortPct = ParseNullableDouble(stockStats["short_percent_of_shares_outstanding"]);
+            if (shortPct is not null) dataPoints.Add("short_interest");
+        }
+
+        if (profileJson is not null)
+        {
+            var empStr = profileJson["employees"]?.ToString();
+            if (int.TryParse(empStr, out var emp)) employees = emp;
+        }
+
+        _logger.LogInformation("[twelve-data] Fundamentals for {Ticker}: {Count} data points", ticker, dataPoints.Count);
+
+        return new FundamentalsContext
+        {
+            Sector = sector,
+            Industry = industry,
+            Exchange = exchange,
+            MarketCap = marketCap,
+            Employees = employees,
+            PeRatio = peRatio,
+            ForwardPe = forwardPe,
+            PbRatio = pbRatio,
+            PsRatio = psRatio,
+            EvToEbitda = evToEbitda,
+            DividendYield = dividendYield,
+            PayoutRatio = payoutRatio,
+            ProfitMargin = profitMargin,
+            OperatingMargin = operatingMargin,
+            ReturnOnEquity = roe,
+            DebtToEquity = debtToEquity,
+            CurrentRatio = currentRatio,
+            RevenueGrowthYoy = revenueGrowthYoy,
+            EarningsGrowthYoy = earningsGrowthYoy,
+            QuarterlyRevenueGrowth = qRevGrowth,
+            QuarterlyEarningsGrowth = qEarnGrowth,
+            ShortPercentOfFloat = shortPct,
+            Beta = beta,
+            FiftyTwoWeekHigh = fiftyTwoHigh,
+            FiftyTwoWeekLow = fiftyTwoLow,
+            DataPoints = dataPoints,
+            Warnings = warnings,
+        };
+    }
+
+    // -----------------------------------------------------------------------
     // Provider health
     // -----------------------------------------------------------------------
 
@@ -267,5 +547,21 @@ public class TwelveDataProvider
         if (node is null) return 0;
         var s = node.ToString();
         return double.TryParse(s, out var d) ? d : 0;
+    }
+
+    private static double? ParseNullableDouble(JsonNode? node)
+    {
+        if (node is null) return null;
+        var s = node.ToString();
+        if (string.IsNullOrWhiteSpace(s) || s == "null") return null;
+        return double.TryParse(s, out var d) ? d : null;
+    }
+
+    private static long? ParseNullableLong(JsonNode? node)
+    {
+        if (node is null) return null;
+        var s = node.ToString();
+        if (string.IsNullOrWhiteSpace(s) || s == "null") return null;
+        return long.TryParse(s, out var l) ? l : null;
     }
 }

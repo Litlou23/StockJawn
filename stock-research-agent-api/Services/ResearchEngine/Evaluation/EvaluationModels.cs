@@ -203,4 +203,5 @@ public record ConfidenceResult
     public double DecisionMargin { get; init; }
     public bool ClearDirection { get; init; }
     public string? ConfidenceCap { get; init; }
+    public List<string> DebugSignals { get; init; } = [];
 }

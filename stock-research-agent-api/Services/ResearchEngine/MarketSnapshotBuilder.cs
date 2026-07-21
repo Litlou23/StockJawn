@@ -33,6 +33,21 @@ public class MarketSnapshotBuilder
     {
         var (quote, bars, technical, warnings) = await _marketData.GetFullContextAsync(ticker);
 
+        // Fetch fundamentals from TwelveData (best-effort, non-blocking)
+        FundamentalsContext? fundamentals = null;
+        try
+        {
+            fundamentals = await _marketData.GetFundamentalsAsync(ticker);
+            if (fundamentals is not null)
+                _logger.LogInformation("[snapshot] Fundamentals loaded for {Ticker}: {DataPoints} data points",
+                    ticker, fundamentals.DataPoints.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[snapshot] Fundamentals fetch failed for {Ticker}", ticker);
+            warnings.Add($"fundamentals_exception:{ex.Message}");
+        }
+
         var newsContext = new List<MarketSnapshotNews>();
 
         // StockFit — company news + SEC filings + earnings context.
@@ -149,6 +164,7 @@ public class MarketSnapshotBuilder
         {
             MarketDataAvailable = quote is not null,
             NewsAvailable = newsContext.Count > 0,
+            FundamentalsAvailable = fundamentals is not null,
             OptionsChainAvailable = false,
             Warnings = warnings,
         };
@@ -168,6 +184,7 @@ public class MarketSnapshotBuilder
             RecentBars = recentBars,
             TechnicalContext = technical,
             NewsContext = newsContext,
+            Fundamentals = fundamentals,
             DataAvailability = availability,
             CreatedAt = DateTimeOffset.UtcNow,
         };

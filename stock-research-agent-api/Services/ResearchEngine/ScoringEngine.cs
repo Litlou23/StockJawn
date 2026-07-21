@@ -172,6 +172,7 @@ public class ScoringEngine : IScoringEngine
         var signals = outputs
             .SelectMany(o => o.DebugSignals)
             .Concat(riskAssessment.DebugSignals)
+            .Concat(confidence.DebugSignals)
             .ToList();
 
         var catalystStrength = _catalystEvaluator.ScoreCatalystStrength(context);

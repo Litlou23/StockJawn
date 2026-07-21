@@ -257,6 +257,56 @@ public static class IndicatorEngine
         };
     }
 
+    /// <summary>
+    /// Merges API-sourced indicator values (MACD, EMA) into an existing TechnicalIndicators record.
+    /// These indicators require full price history and cannot be accurately computed from 20 bars.
+    /// RSI and Bollinger Bands are already computed from bars by <see cref="Compute"/>.
+    /// </summary>
+    public static TechnicalIndicators MergeApiIndicators(
+        TechnicalIndicators manual,
+        (double MacdLine, double Signal, double Histogram)? apiMacd = null,
+        (double? Ema12, double? Ema26, double? Ema50)? apiEma = null)
+    {
+        var computed = new List<string>(manual.IndicatorsComputed);
+
+        // MACD: only available from API (needs 26+ bars of EMA history)
+        double? macdLine = null, macdSignal = null, macdHist = null;
+        bool? macdBullish = null;
+        if (apiMacd is not null)
+        {
+            macdLine = apiMacd.Value.MacdLine;
+            macdSignal = apiMacd.Value.Signal;
+            macdHist = apiMacd.Value.Histogram;
+            macdBullish = apiMacd.Value.Histogram > 0 &&
+                          apiMacd.Value.MacdLine > apiMacd.Value.Signal;
+            computed.Add("MACD_API");
+        }
+
+        // EMA: only available from API (needs full history for proper exponential smoothing)
+        double? ema12 = null, ema26 = null, ema50 = null;
+        if (apiEma is not null)
+        {
+            ema12 = apiEma.Value.Ema12;
+            ema26 = apiEma.Value.Ema26;
+            ema50 = apiEma.Value.Ema50;
+            if (ema12 is not null) computed.Add("EMA12_API");
+            if (ema26 is not null) computed.Add("EMA26_API");
+            if (ema50 is not null) computed.Add("EMA50_API");
+        }
+
+        return manual with
+        {
+            MacdLine = macdLine,
+            MacdSignal = macdSignal,
+            MacdHistogram = macdHist,
+            MacdBullishCrossover = macdBullish,
+            Ema12 = ema12,
+            Ema26 = ema26,
+            Ema50 = ema50,
+            IndicatorsComputed = computed,
+        };
+    }
+
     private static double ComputeLinearRegressionSlope(List<double> values)
     {
         int n = values.Count;

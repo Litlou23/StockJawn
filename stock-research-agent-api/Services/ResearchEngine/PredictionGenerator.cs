@@ -188,6 +188,25 @@ public class PredictionGenerator
 
         var indicators = IndicatorEngine.Compute(snapshot.RecentBars);
 
+        // Enrich indicators with TwelveData API values (MACD, EMA)
+        // These are new signals not computable from 20 bars — MACD needs 26+ bars of EMA history,
+        // EMA needs full price history for proper exponential smoothing.
+        // Sequential calls — each goes through the rate-limited throttle in TwelveDataProvider.
+        try
+        {
+            var apiMacd = await _marketData.GetMacdAsync(ticker);
+            var apiEma = await _marketData.GetEmaAsync(ticker);
+
+            indicators = IndicatorEngine.MergeApiIndicators(
+                indicators,
+                apiMacd: apiMacd,
+                apiEma: apiEma);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] API indicator fetch failed for {Ticker}, using manual values", ticker);
+        }
+
         // Fetch SPY/QQQ for market context (best-effort)
         MarketSnapshotQuote? spyQuote = null, qqqQuote = null;
         try
@@ -732,6 +751,10 @@ public class PredictionGenerator
               High confidence on sparse data is reckless.
             - Never present a prediction as a certainty. Use language that reflects the
               probability: "signals favor", "setup suggests", "weight of evidence leans".
+            - If fundamentals data is provided, reference it in your explanation.
+              Mention how valuation (P/E), growth, profitability, or short interest
+              supports or conflicts with the technical direction. If a "Confidence:
+              fundamentals boost/drag" signal is present, explain what drove it.
             """;
     }
 
@@ -789,6 +812,24 @@ public class PredictionGenerator
                 sb.AppendLine($"  - [{n.CatalystType ?? "news"}] {n.Title} (sentiment: {n.Sentiment ?? "unknown"})");
         }
 
+        if (snapshot.Fundamentals is not null)
+        {
+            var f = snapshot.Fundamentals;
+            sb.AppendLine("### Fundamentals:");
+            if (f.Sector is not null) sb.AppendLine($"  Sector: {f.Sector} | Industry: {f.Industry}");
+            if (f.MarketCap is not null) sb.AppendLine($"  Market Cap: ${f.MarketCap:N0}");
+            if (f.PeRatio is not null) sb.AppendLine($"  P/E: {f.PeRatio:F1} | Forward P/E: {(f.ForwardPe?.ToString("F1") ?? "n/a")}");
+            if (f.PbRatio is not null) sb.AppendLine($"  P/B: {f.PbRatio:F2} | P/S: {(f.PsRatio?.ToString("F2") ?? "n/a")}");
+            if (f.DividendYield is not null) sb.AppendLine($"  Dividend Yield: {f.DividendYield:P2}");
+            if (f.ProfitMargin is not null) sb.AppendLine($"  Profit Margin: {f.ProfitMargin:P1} | Operating Margin: {(f.OperatingMargin?.ToString("P1") ?? "n/a")}");
+            if (f.ReturnOnEquity is not null) sb.AppendLine($"  ROE: {f.ReturnOnEquity:P1} | Debt/Equity: {(f.DebtToEquity?.ToString("F2") ?? "n/a")}");
+            if (f.RevenueGrowthYoy is not null) sb.AppendLine($"  Revenue Growth YoY: {f.RevenueGrowthYoy:P1} | Earnings Growth YoY: {(f.EarningsGrowthYoy?.ToString("P1") ?? "n/a")}");
+            if (f.QuarterlyRevenueGrowth is not null) sb.AppendLine($"  Quarterly Rev Growth: {f.QuarterlyRevenueGrowth:P1} | Quarterly Earnings Growth: {(f.QuarterlyEarningsGrowth?.ToString("P1") ?? "n/a")}");
+            if (f.Beta is not null) sb.AppendLine($"  Beta: {f.Beta:F2}");
+            if (f.ShortPercentOfFloat is not null) sb.AppendLine($"  Short % of Float: {f.ShortPercentOfFloat:P1}");
+            if (f.FiftyTwoWeekHigh is not null) sb.AppendLine($"  52-Week Range: ${f.FiftyTwoWeekLow:F2} - ${f.FiftyTwoWeekHigh:F2}");
+        }
+
         if (weights.Count > 0)
         {
             var adjusted = weights.Where(w => Math.Abs(w.Value - 1.0) > 0.1).ToList();
@@ -842,6 +883,28 @@ public class PredictionGenerator
                 SourceName = "twelve-data-computed",
                 Summary = $"Trend: {snapshot.TechnicalContext.TrendDirection}. {snapshot.TechnicalContext.MomentumSummary}",
             });
+        }
+
+        if (snapshot.Fundamentals is not null)
+        {
+            var f = snapshot.Fundamentals;
+            var fundamentalParts = new List<string>();
+            if (f.Sector is not null) fundamentalParts.Add($"Sector: {f.Sector}");
+            if (f.PeRatio is not null) fundamentalParts.Add($"P/E: {f.PeRatio:F1}");
+            if (f.MarketCap is not null) fundamentalParts.Add($"MktCap: ${f.MarketCap:N0}");
+            if (f.RevenueGrowthYoy is not null) fundamentalParts.Add($"RevGrowth: {f.RevenueGrowthYoy:P1}");
+            if (f.Beta is not null) fundamentalParts.Add($"Beta: {f.Beta:F2}");
+
+            if (fundamentalParts.Count > 0)
+            {
+                inputs.Add(new PredictionInput
+                {
+                    PredictionId = "",
+                    InputType = "fundamentals",
+                    SourceName = "twelve-data-fundamentals",
+                    Summary = string.Join(" | ", fundamentalParts),
+                });
+            }
         }
 
         foreach (var news in snapshot.NewsContext.Take(3))

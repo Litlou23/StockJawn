@@ -10,6 +10,7 @@ public class ConfidenceEngine : IConfidenceEngine
         RiskAssessment riskAssessment,
         string winningDirection)
     {
+        var debugSignals = new List<string>();
         var outputs = aggregate.Outputs;
         var trend = outputs[EvaluatorKind.trend];
         var momentum = outputs[EvaluatorKind.momentum];
@@ -45,6 +46,57 @@ public class ConfidenceEngine : IConfidenceEngine
 
             dataQualityFactor += evidenceBoost + stateBoost;
             dataQualityFactor = Math.Min(dataQualityFactor, 1.05); // soft cap
+        }
+
+        // ── Fundamentals-based confidence modifier ─────────────────
+        // Strong fundamentals boost conviction; weak fundamentals add caution.
+        // This uses the data fetched from TwelveData /profile and /statistics.
+        double fundamentalsMod = 0.0;
+        var fundamentals = context.Snapshot.Fundamentals;
+        if (fundamentals is not null)
+        {
+            // Growth signals boost confidence
+            if (fundamentals.RevenueGrowthYoy is double revGrowth && revGrowth > 0.10)
+                fundamentalsMod += 0.03; // >10% YoY revenue growth
+            if (fundamentals.EarningsGrowthYoy is double earningsGrowth && earningsGrowth > 0.15)
+                fundamentalsMod += 0.02; // >15% YoY earnings growth
+
+            // Profitability signals
+            if (fundamentals.ReturnOnEquity is double roe2 && roe2 > 0.15)
+                fundamentalsMod += 0.02; // >15% ROE
+
+            // Valuation caution — extreme P/E with bearish direction is higher conviction bearish,
+            // but it also means bullish calls should be more cautious
+            if (fundamentals.PeRatio is double pe)
+            {
+                if (pe > 60 && winningDirection == "bullish")
+                    fundamentalsMod -= 0.03; // very expensive stock, caution on bull calls
+                else if (pe > 60 && winningDirection == "bearish")
+                    fundamentalsMod += 0.02; // expensive stock confirms bearish thesis
+                else if (pe > 0 && pe < 15)
+                    fundamentalsMod += 0.01; // reasonably valued
+            }
+
+            // High short interest = caution on bullish, confirmation on bearish
+            if (fundamentals.ShortPercentOfFloat is double shortPct && shortPct > 0.10)
+            {
+                if (winningDirection == "bullish")
+                    fundamentalsMod -= 0.02; // heavy shorting against bull thesis
+                else
+                    fundamentalsMod += 0.02; // shorts confirm bear thesis
+            }
+
+            // High beta = less predictable outcomes
+            if (fundamentals.Beta is double beta2 && beta2 > 2.0)
+                fundamentalsMod -= 0.02;
+
+            fundamentalsMod = Math.Clamp(fundamentalsMod, -0.08, 0.08);
+            dataQualityFactor += fundamentalsMod;
+
+            if (fundamentalsMod > 0.005)
+                debugSignals.Add($"Confidence: fundamentals boost +{fundamentalsMod:F2} (growth/profitability/valuation)");
+            else if (fundamentalsMod < -0.005)
+                debugSignals.Add($"Confidence: fundamentals drag {fundamentalsMod:F2} (valuation/short interest/beta risk)");
         }
 
         double confirmMult = aggregate.AlignedBuckets switch
@@ -197,6 +249,7 @@ public class ConfidenceEngine : IConfidenceEngine
             DecisionMargin = decisionMargin,
             ClearDirection = clearDirection,
             ConfidenceCap = capReason,
+            DebugSignals = debugSignals,
         };
     }
 }

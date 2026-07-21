@@ -136,7 +136,7 @@ public class PortfolioLifecycleService
                 var portfolioPositions = await _portfolioRepo.GetOpenPositionsByPredictionIdAsync(c.PredictionId);
                 if (portfolioPositions.Count == 0) continue;
 
-                var quote = await _marketData.GetQuoteAsync(c.Ticker);
+                var quote = await _marketData.GetQuoteWithFallbackAsync(c.Ticker);
                 if (quote is null || quote.Price <= 0) continue;
 
                 foreach (var pos in portfolioPositions)
@@ -339,7 +339,7 @@ public class PortfolioLifecycleService
             await semaphore.WaitAsync();
             try
             {
-                var quote = await _marketData.GetQuoteAsync(ticker);
+                var quote = await _marketData.GetQuoteWithFallbackAsync(ticker);
                 lock (quoteMap) { quoteMap[ticker] = quote?.Price ?? 0; }
             }
             catch (Exception ex)

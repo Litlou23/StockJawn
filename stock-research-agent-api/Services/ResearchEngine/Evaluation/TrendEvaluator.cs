@@ -35,11 +35,41 @@ public class TrendEvaluator : ITrendEvaluator
         if (ind.DonchianBreakout == true) { bull += 5; signals.Add("Trend: Donchian 20 breakout"); }
         else if (ind.DonchianBreakdown == true) { bear += 5; signals.Add("Trend: Donchian 20 breakdown"); }
 
+        // EMA alignment (API-sourced) — exponential MAs respond faster than SMAs
+        if (ind.Ema12 is double ema12 && ind.Ema26 is double ema26)
+        {
+            if (ema12 > ema26) { bull += 4; signals.Add($"Trend: EMA12 above EMA26 (bullish alignment)"); }
+            else { bear += 4; signals.Add($"Trend: EMA12 below EMA26 (bearish alignment)"); }
+        }
+
+        // Price vs EMA50 — long-term trend anchor
+        if (ind.Ema50 is double ema50 && context.Snapshot.Quote is not null)
+        {
+            var price = context.Snapshot.Quote.Price;
+            if (price > ema50 * 1.02) { bull += 3; signals.Add($"Trend: price above EMA50 (${price:F2} vs ${ema50:F2})"); }
+            else if (price < ema50 * 0.98) { bear += 3; signals.Add($"Trend: price below EMA50 (${price:F2} vs ${ema50:F2})"); }
+        }
+
+        // 52-week range position — confirms long-term trend strength
+        var fundamentals = context.Snapshot.Fundamentals;
+        if (fundamentals?.FiftyTwoWeekHigh is double high52 && fundamentals?.FiftyTwoWeekLow is double low52
+            && context.Snapshot.Quote is not null && high52 > low52)
+        {
+            var currentPrice = context.Snapshot.Quote.Price;
+            var range = high52 - low52;
+            var position = (currentPrice - low52) / range; // 0.0 = at 52w low, 1.0 = at 52w high
+
+            if (position >= 0.95) { bull += 3; signals.Add($"Trend: within 5% of 52-week high (${currentPrice:F2} vs ${high52:F2})"); }
+            else if (position >= 0.80) { bull += 2; signals.Add($"Trend: in upper 20% of 52-week range ({position:P0})"); }
+            else if (position <= 0.05) { bear += 3; signals.Add($"Trend: within 5% of 52-week low (${currentPrice:F2} vs ${low52:F2})"); }
+            else if (position <= 0.20) { bear += 2; signals.Add($"Trend: in lower 20% of 52-week range ({position:P0})"); }
+        }
+
         return new EvaluatorOutput
         {
             Kind = Kind,
-            BullishContribution = Math.Clamp(bull, 0, 25),
-            BearishContribution = Math.Clamp(bear, 0, 25),
+            BullishContribution = Math.Clamp(bull, 0, 30),
+            BearishContribution = Math.Clamp(bear, 0, 30),
             DebugSignals = signals,
             DebugInformation = new EvaluatorReasoning
             {

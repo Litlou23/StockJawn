@@ -55,6 +55,17 @@ public class MarketFactService : IMarketFactService
         AddOptionalBooleanFact(facts, ticker, "bollinger_breakout", "Bollinger Breakout", FactCategory.market_structure, indicators.BollingerBreakout, observedAt, "TechnicalIndicators.BollingerBreakout");
         AddOptionalBooleanFact(facts, ticker, "price_volume_confirmation", "Price Volume Confirmation", FactCategory.volume, indicators.PriceVolumeConfirmation, observedAt, "TechnicalIndicators.PriceVolumeConfirmation");
 
+        // MACD (API-sourced)
+        AddOptionalNumberFact(facts, ticker, "macd_line", "MACD Line", FactCategory.momentum, FactSource.technical_indicator, indicators.MacdLine, "value", observedAt, "TechnicalIndicators.MacdLine");
+        AddOptionalNumberFact(facts, ticker, "macd_signal", "MACD Signal", FactCategory.momentum, FactSource.technical_indicator, indicators.MacdSignal, "value", observedAt, "TechnicalIndicators.MacdSignal");
+        AddOptionalNumberFact(facts, ticker, "macd_histogram", "MACD Histogram", FactCategory.momentum, FactSource.technical_indicator, indicators.MacdHistogram, "value", observedAt, "TechnicalIndicators.MacdHistogram");
+        AddOptionalBooleanFact(facts, ticker, "macd_bullish_crossover", "MACD Bullish Crossover", FactCategory.momentum, indicators.MacdBullishCrossover, observedAt, "TechnicalIndicators.MacdBullishCrossover");
+
+        // EMA (API-sourced)
+        AddOptionalNumberFact(facts, ticker, "ema12", "EMA 12", FactCategory.trend, FactSource.technical_indicator, indicators.Ema12, "usd", observedAt, "TechnicalIndicators.Ema12");
+        AddOptionalNumberFact(facts, ticker, "ema26", "EMA 26", FactCategory.trend, FactSource.technical_indicator, indicators.Ema26, "usd", observedAt, "TechnicalIndicators.Ema26");
+        AddOptionalNumberFact(facts, ticker, "ema50", "EMA 50", FactCategory.trend, FactSource.technical_indicator, indicators.Ema50, "usd", observedAt, "TechnicalIndicators.Ema50");
+
         AddOptionalNumberFact(facts, ticker, "relative_strength_vs_spy", "Relative Strength vs SPY", FactCategory.benchmark, FactSource.benchmark_context, benchmark.RelativeStrengthVsSpy, "percent", observedAt, "BenchmarkContext.RelativeStrengthVsSpy");
         AddOptionalNumberFact(facts, ticker, "relative_strength_vs_qqq", "Relative Strength vs QQQ", FactCategory.benchmark, FactSource.benchmark_context, benchmark.RelativeStrengthVsQqq, "percent", observedAt, "BenchmarkContext.RelativeStrengthVsQqq");
         AddOptionalNumberFact(facts, ticker, "spy_change_percent", "SPY Change %", FactCategory.benchmark, FactSource.benchmark_context, benchmark.SpyChangePercent, "percent", observedAt, "BenchmarkContext.SpyChangePercent");

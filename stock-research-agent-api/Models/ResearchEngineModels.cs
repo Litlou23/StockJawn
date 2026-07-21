@@ -38,6 +38,7 @@ public record MarketSnapshot
     public List<MarketSnapshotBar> RecentBars { get; init; } = [];
     public MarketSnapshotTechnical? TechnicalContext { get; init; }
     public List<MarketSnapshotNews> NewsContext { get; init; } = [];
+    public FundamentalsContext? Fundamentals { get; init; }
     public MarketSnapshotAvailability DataAvailability { get; init; } = new();
     public DateTimeOffset CreatedAt { get; init; }
 }
@@ -89,6 +90,7 @@ public record MarketSnapshotAvailability
 {
     public bool MarketDataAvailable { get; init; }
     public bool NewsAvailable { get; init; }
+    public bool FundamentalsAvailable { get; init; }
     public bool OptionsChainAvailable { get; init; }
     public List<string> Warnings { get; init; } = [];
 }
@@ -101,11 +103,22 @@ public record TechnicalIndicators
     public bool Sma5AboveSma20 { get; init; }
     public bool CloseAboveSma20 { get; init; }
 
+    // Moving averages (exponential)
+    public double? Ema12 { get; init; }
+    public double? Ema26 { get; init; }
+    public double? Ema50 { get; init; }
+
     // Momentum
     public double? Roc5 { get; init; }
     public double? Roc10 { get; init; }
     public double? Rsi14 { get; init; }
     public double? StochasticCloseLocation { get; init; }
+
+    // MACD
+    public double? MacdLine { get; init; }
+    public double? MacdSignal { get; init; }
+    public double? MacdHistogram { get; init; }
+    public bool? MacdBullishCrossover { get; init; }
 
     // Trend
     public double? LinearRegressionSlope { get; init; }
@@ -144,6 +157,59 @@ public record BenchmarkContext
     public string? QqqTrend { get; init; }
     public double? RelativeStrengthVsSpy { get; init; }
     public double? RelativeStrengthVsQqq { get; init; }
+}
+
+/// <summary>
+/// Fundamental data for a ticker from TwelveData /profile and /statistics.
+/// Enhances prediction quality by factoring in financial health, valuation,
+/// and upcoming catalysts.
+/// </summary>
+public record FundamentalsContext
+{
+    // Company profile
+    public string? Sector { get; init; }
+    public string? Industry { get; init; }
+    public string? Exchange { get; init; }
+    public long? MarketCap { get; init; }
+    public int? Employees { get; init; }
+
+    // Valuation
+    public double? PeRatio { get; init; }
+    public double? ForwardPe { get; init; }
+    public double? PbRatio { get; init; }
+    public double? PsRatio { get; init; }
+    public double? EvToEbitda { get; init; }
+
+    // Dividends
+    public double? DividendYield { get; init; }
+    public double? PayoutRatio { get; init; }
+
+    // Financial health
+    public double? ProfitMargin { get; init; }
+    public double? OperatingMargin { get; init; }
+    public double? ReturnOnEquity { get; init; }
+    public double? DebtToEquity { get; init; }
+    public double? CurrentRatio { get; init; }
+
+    // Growth
+    public double? RevenueGrowthYoy { get; init; }
+    public double? EarningsGrowthYoy { get; init; }
+    public double? QuarterlyRevenueGrowth { get; init; }
+    public double? QuarterlyEarningsGrowth { get; init; }
+
+    // Short interest
+    public double? ShortPercentOfFloat { get; init; }
+
+    // Beta
+    public double? Beta { get; init; }
+
+    // 52-week range
+    public double? FiftyTwoWeekHigh { get; init; }
+    public double? FiftyTwoWeekLow { get; init; }
+
+    // Metadata
+    public List<string> DataPoints { get; init; } = [];
+    public List<string> Warnings { get; init; } = [];
 }
 
 /// <summary>

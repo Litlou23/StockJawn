@@ -164,6 +164,72 @@ Financial Modeling Prep (FMP) is registered as an `IDiscoveryProvider` and parti
 
 **Rate limiting:** Built-in semaphore-based throttle in `FmpClient` enforces `RequestsPerMinute`. Each scan uses ~6 API calls (news + press releases + earnings + SEC filings + analyst grades + insider trades).
 
+## TwelveData API Integration
+
+**Plan:** Growing (55 req/min, unlimited daily). Caching: 5-minute in-memory for quotes/indicators, 12-hour for fundamentals/EMA.
+
+**Endpoints used by `TwelveDataProvider`:**
+- `/quote` — real-time quote (price, change, volume)
+- `/time_series` — OHLCV bars (20 bars, used by `IndicatorEngine.Compute` for local indicator calculation)
+- `/macd` — MACD line, signal, histogram (needs 26+ bars of EMA history, cannot compute locally from 20 bars)
+- `/ema` — EMA12, EMA26, EMA50 (needs full price history for proper exponential smoothing)
+- `/profile` — company name, sector, industry, description
+- `/statistics` — fundamentals (P/E, margins, growth, beta, short interest, etc.)
+
+**RSI and Bollinger Bands are NOT fetched from the API.** They are computed locally by `IndicatorEngine.Compute` from the 20 OHLCV bars. The API methods were removed as duplicates.
+
+### /statistics JSON nesting (verified against TwelveData docs)
+
+```
+stats = root["statistics"]
+├── valuations_metrics
+│   ├── trailing_pe, forward_pe, price_to_book_mrq
+│   ├── price_to_sales_ttm, enterprise_to_ebitda
+│   └── market_capitalization
+├── financials                          ← direct children (NOT inside income_statement)
+│   ├── profit_margin, operating_margin, return_on_equity_ttm
+│   ├── income_statement
+│   │   ├── quarterly_revenue_growth
+│   │   └── quarterly_earnings_growth_yoy
+│   └── balance_sheet
+│       ├── total_debt_to_equity_mrq
+│       └── current_ratio_mrq
+├── stock_statistics
+│   └── short_percent_of_shares_outstanding
+├── stock_price_summary
+│   ├── beta
+│   ├── fifty_two_week_high
+│   └── fifty_two_week_low
+└── dividends_and_splits
+    ├── forward_annual_dividend_yield
+    └── payout_ratio
+```
+
+### Indicator wiring into scoring
+
+**MACD → MomentumEvaluator** (cap raised from 0-20 to 0-25):
+- `MacdBullishCrossover` — ±4 points for crossover direction
+- `MacdHistogram` — ±2 points when |histogram| > 0.5
+
+**EMA → TrendEvaluator** (cap raised from 0-25 to 0-30):
+- EMA12 vs EMA26 alignment — ±4 points
+- Price vs EMA50 (±2% threshold) — ±3 points
+
+**Fundamentals → ConfidenceEngine** (dataQualityFactor modifier, clamped ±0.08):
+- Revenue growth >10% YoY → +0.03
+- Earnings growth >15% YoY → +0.02
+- ROE >15% → +0.02
+- P/E >60 + bullish direction → -0.03; P/E >60 + bearish → +0.02; P/E 0-15 → +0.01
+- Short interest >10% + bullish → -0.02; + bearish → +0.02
+- Beta >2.0 → -0.02
+
+### Key files
+
+- `TwelveDataProvider.cs` — API client with `GetMacdAsync`, `GetEmaAsync`, `GetFundamentalsAsync`
+- `MarketDataService.cs` — cached wrappers (5-min for MACD, 12-hour for EMA/fundamentals)
+- `IndicatorEngine.cs` — `MergeApiIndicators(manual, apiMacd, apiEma)` merges API data into local indicators
+- `PredictionGenerator.cs` — calls MACD + EMA APIs, merges via `IndicatorEngine.MergeApiIndicators`
+
 ## Research Asset Enrichment (FUTURE — not yet implemented)
 
 Documented in `RESEARCH_ASSET_ENRICHMENT.md`. A future initiative to evolve Research Assets into complete research dossiers with historical market data, company intelligence, fundamentals, corporate event patterns, and market behavior profiles. Key constraints: provides context only (not scores), does not modify the scoring/prediction/learning engines, extends the existing Research Universe rather than introducing new services. See the doc for enrichment categories, roadmap phases, and the architectural decision record.

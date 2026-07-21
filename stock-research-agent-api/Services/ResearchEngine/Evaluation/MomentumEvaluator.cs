@@ -40,11 +40,25 @@ public class MomentumEvaluator : IMomentumEvaluator
             else if (stoch < 20) { bear += 3; signals.Add($"Momentum: close near lows ({stoch:F0}%)"); }
         }
 
+        // MACD (API-sourced) — crossover direction and histogram strength
+        if (ind.MacdBullishCrossover is bool macdCross)
+        {
+            if (macdCross) { bull += 4; signals.Add("Momentum: MACD bullish crossover"); }
+            else { bear += 4; signals.Add("Momentum: MACD bearish crossover"); }
+        }
+
+        if (ind.MacdHistogram is double hist)
+        {
+            // Histogram magnitude confirms momentum strength
+            if (hist > 0.5) { bull += 2; signals.Add($"Momentum: MACD histogram strong positive ({hist:F2})"); }
+            else if (hist < -0.5) { bear += 2; signals.Add($"Momentum: MACD histogram strong negative ({hist:F2})"); }
+        }
+
         return new EvaluatorOutput
         {
             Kind = Kind,
-            BullishContribution = Math.Clamp(bull, 0, 20),
-            BearishContribution = Math.Clamp(bear, 0, 20),
+            BullishContribution = Math.Clamp(bull, 0, 25),
+            BearishContribution = Math.Clamp(bear, 0, 25),
             DebugSignals = signals,
             DebugInformation = new EvaluatorReasoning
             {

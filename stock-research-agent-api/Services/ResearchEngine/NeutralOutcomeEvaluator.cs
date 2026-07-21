@@ -146,7 +146,7 @@ public class NeutralOutcomeEvaluator
         }
 
         // Fetch current quote + recent bars for volatility calc
-        var quote = await _marketData.GetQuoteAsync(pred.Ticker);
+        var quote = await _marketData.GetQuoteWithFallbackAsync(pred.Ticker);
         if (quote is null) return false; // try again next run
 
         var bars = await _marketData.GetRecentBarsAsync(pred.Ticker, 30);

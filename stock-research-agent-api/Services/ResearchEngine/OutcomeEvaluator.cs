@@ -47,10 +47,10 @@ public class OutcomeEvaluator
             return null;
         }
 
-        var quote = await _marketData.GetQuoteAsync(prediction.Ticker);
+        var quote = await _marketData.GetQuoteWithFallbackAsync(prediction.Ticker);
         if (quote is null)
         {
-            _logger.LogWarning("[outcome-evaluator] {Ticker}: market data unavailable, skipping", prediction.Ticker);
+            _logger.LogWarning("[outcome-evaluator] {Ticker}: market data unavailable (quote + bar fallback both failed), skipping", prediction.Ticker);
             return null;
         }
 
@@ -62,7 +62,7 @@ public class OutcomeEvaluator
         double? relativePerformance = null;
         if (PredictionTimeWindows.ShortTerm.Contains(prediction.TimeWindow))
         {
-            var spyQuote = await _marketData.GetQuoteAsync("SPY");
+            var spyQuote = await _marketData.GetQuoteWithFallbackAsync("SPY");
             if (spyQuote is not null && spyQuote.PreviousClose > 0)
             {
                 var spyMove = ((spyQuote.Price - spyQuote.PreviousClose) / spyQuote.PreviousClose) * 100;
@@ -367,10 +367,10 @@ public class OutcomeEvaluator
             return null;
         }
 
-        var quote = await _marketData.GetQuoteAsync(prediction.Ticker);
+        var quote = await _marketData.GetQuoteWithFallbackAsync(prediction.Ticker);
         if (quote is null)
         {
-            _logger.LogWarning("[outcome-evaluator] {Ticker} (watch): market data unavailable", prediction.Ticker);
+            _logger.LogWarning("[outcome-evaluator] {Ticker} (watch): market data unavailable (quote + bar fallback both failed)", prediction.Ticker);
             return null;
         }
 
