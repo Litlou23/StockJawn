@@ -203,6 +203,8 @@ public class DailyResearchRunService
                 price_prediction_method = p.PricePredictionMethod,
                 price_prediction_warnings = p.PricePredictionWarnings.ToArray(),
                 score_debug_json = p.ScoreDebugJson,
+                indicators_json = p.IndicatorsJson,
+                weights_snapshot_json = p.WeightsSnapshotJson,
                 bullish_score = p.BullishScore,
                 bearish_score = p.BearishScore,
                 winning_direction = p.WinningDirection,

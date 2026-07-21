@@ -248,12 +248,32 @@ public class ResearchRepository
             new { status = "superseded", superseded_by = supersededBy, supersession_reason = reason });
     }
 
-    public async Task<PredictionStatsAggregate> GetPredictionStatsAsync()
+    public async Task<PredictionStatsAggregate> GetPredictionStatsAsync(string? profileId = null)
     {
-        var totalTask = _db.CountAsync("prediction_candidates");
-        var outcomesTotalTask = _db.CountAsync("prediction_outcomes");
-        var correctTask = _db.CountAsync("prediction_outcomes", "direction_correct=eq.true");
-        var incorrectTask = _db.CountAsync("prediction_outcomes", "direction_correct=eq.false");
+        var predFilter = profileId is not null ? $"profile_id=eq.{profileId}" : null;
+        // For outcomes, filter via prediction_candidates join isn't possible with PostgREST count,
+        // so we fetch matching prediction IDs first when profile-scoped
+        string? outcomeFilter = null;
+        if (profileId is not null)
+        {
+            var predRows = await _db.SelectAsync("prediction_candidates",
+                filter: predFilter, select: "id", limit: 5000);
+            var ids = predRows.Select(r => r["id"]?.ToString()).Where(id => id is not null).ToList();
+            if (ids.Count == 0)
+                return new PredictionStatsAggregate();
+            outcomeFilter = $"prediction_id=in.({string.Join(",", ids)})";
+        }
+
+        var totalTask = _db.CountAsync("prediction_candidates", predFilter);
+        var outcomesTotalTask = _db.CountAsync("prediction_outcomes", outcomeFilter);
+        var correctFilter = outcomeFilter is not null
+            ? $"{outcomeFilter}&direction_correct=eq.true"
+            : "direction_correct=eq.true";
+        var incorrectFilter = outcomeFilter is not null
+            ? $"{outcomeFilter}&direction_correct=eq.false"
+            : "direction_correct=eq.false";
+        var correctTask = _db.CountAsync("prediction_outcomes", correctFilter);
+        var incorrectTask = _db.CountAsync("prediction_outcomes", incorrectFilter);
 
         await Task.WhenAll(totalTask, outcomesTotalTask, correctTask, incorrectTask);
 
@@ -1122,6 +1142,8 @@ public class ResearchRepository
         PricePredictionMethod = r["price_prediction_method"]?.ToString(),
         PricePredictionWarnings = GetStringList(r, "price_prediction_warnings"),
         ScoreDebugJson = r["score_debug_json"]?.ToString(),
+        IndicatorsJson = r["indicators_json"]?.ToString(),
+        WeightsSnapshotJson = r["weights_snapshot_json"]?.ToString(),
         ActionabilityScore = r["actionability_score"] is null ? null : GetInt(r, "actionability_score"),
         ActionabilityTier = Enum.TryParse<ActionabilityTier>(r["actionability_tier"]?.ToString(), out var actTier)
             ? actTier : (ActionabilityTier?)null,

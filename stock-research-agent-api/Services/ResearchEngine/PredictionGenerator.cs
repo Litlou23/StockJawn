@@ -398,7 +398,7 @@ public class PredictionGenerator
                 int n = tickerOutcomes.Value.Total;
                 double tickerAccuracy = (double)tickerOutcomes.Value.Correct / n;
 
-                var globalStats = await _repo.GetPredictionStatsAsync();
+                var globalStats = await _repo.GetPredictionStatsAsync(profileId: sharedContext?.ProfileId);
                 double globalAccuracy = globalStats.EvaluatedPredictions > 0
                     ? (double)globalStats.CorrectPredictions / globalStats.EvaluatedPredictions
                     : 0.50;
@@ -518,6 +518,8 @@ public class PredictionGenerator
                         },
                     },
                 new JsonSerializerOptions { WriteIndented = false }),
+            IndicatorsJson = JsonSerializer.Serialize(indicators, new JsonSerializerOptions { WriteIndented = false }),
+            WeightsSnapshotJson = JsonSerializer.Serialize(weights, new JsonSerializerOptions { WriteIndented = false }),
             ActionabilityScore = scoring.Breakdown.ActionabilityScore,
             ActionabilityTier = scoring.Breakdown.ActionabilityTier,
             DowngradeReasons = downgradeReasons,

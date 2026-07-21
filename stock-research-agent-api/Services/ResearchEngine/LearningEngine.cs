@@ -242,7 +242,7 @@ public class LearningEngine
         weightChanges.AddRange(voeSummary.WeightChanges);
 
         // Stage 5d: Risk Management Learning — learn from stop-loss/take-profit/trailing-stop exits
-        var riskLearningSummary = await ComputeRiskManagementLearningAsync(isChampion);
+        var riskLearningSummary = await ComputeRiskManagementLearningAsync(profileId, isChampion);
 
         // Stage 6: Generate AI-summarized learning report (champion only — expensive)
         string? aiSummary = null;
@@ -2689,7 +2689,7 @@ public class LearningEngine
     // prediction quality and risk threshold calibration.
     // -----------------------------------------------------------------------
 
-    public async Task<RiskLearningSummary> ComputeRiskManagementLearningAsync(bool isChampion = true)
+    public async Task<RiskLearningSummary> ComputeRiskManagementLearningAsync(string? profileId = null, bool isChampion = true)
     {
         var summary = new RiskLearningSummary();
 
@@ -2794,6 +2794,13 @@ public class LearningEngine
                 }
             }
 
+            // Write learned risk thresholds to scoring_weight_overrides so
+            // PortfolioLifecycleService picks them up via GetActiveWeightOverridesAsync
+            if (summary.TotalEvents >= 10)
+            {
+                await LearnRiskThresholdsAsync(riskCloses, candidateMap, profileId, isChampion);
+            }
+
             _logger.LogInformation(
                 "[learning-engine] Risk management learning: {Total} events — " +
                 "{SL} stop-losses, {TP} take-profits, {TS} trailing-stops",
@@ -2808,6 +2815,93 @@ public class LearningEngine
         {
             _logger.LogWarning(ex, "[learning-engine] Risk management learning failed");
             return summary;
+        }
+    }
+
+    /// <summary>
+    /// Computes optimal stop-loss/take-profit thresholds from closed position data
+    /// and writes them to scoring_weight_overrides for PortfolioLifecycleService to consume.
+    /// </summary>
+    private async Task LearnRiskThresholdsAsync(
+        List<PortfolioPosition> riskCloses,
+        Dictionary<string, PaperStockCandidate> candidateMap,
+        string? profileId, bool isChampion)
+    {
+        // Group positions by tier (day/swing/longterm)
+        var tiers = new Dictionary<string, List<(double PnlPct, string Reason)>>();
+        foreach (var pos in riskCloses)
+        {
+            if (pos.EntryPrice <= 0) continue;
+            var timeframe = StockTimeframe.one_day;
+            if (pos.PredictionId is not null && candidateMap.TryGetValue(pos.PredictionId, out var cand))
+                timeframe = cand.Timeframe;
+            var tier = timeframe switch
+            {
+                StockTimeframe.one_day => "day",
+                StockTimeframe.two_day or StockTimeframe.one_week => "swing",
+                _ => "longterm",
+            };
+            var pnlPct = ((pos.ExitPrice ?? pos.EntryPrice) - pos.EntryPrice) / pos.EntryPrice;
+            var reason = pos.ReasonExited ?? "";
+            if (!tiers.ContainsKey(tier)) tiers[tier] = [];
+            tiers[tier].Add((pnlPct, reason));
+        }
+
+        // For each tier with enough data, compute and write thresholds
+        foreach (var (tier, positions) in tiers)
+        {
+            if (positions.Count < 5) continue;
+
+            var stopLossExits = positions.Where(p => p.Reason.StartsWith("STOP-LOSS")).ToList();
+            var takeProfitExits = positions.Where(p => p.Reason.StartsWith("TAKE-PROFIT")).ToList();
+
+            // Stop-loss: use median loss magnitude, clamped to [0.02, 0.15]
+            if (stopLossExits.Count >= 3)
+            {
+                var losses = stopLossExits.Select(p => Math.Abs(p.PnlPct)).OrderBy(x => x).ToList();
+                var medianLoss = losses[losses.Count / 2];
+                var newSl = Math.Clamp(medianLoss * 1.1, 0.02, 0.15); // 10% wider than median
+                var slKey = $"risk_sl_{tier}";
+
+                var slOverride = new ScoringWeightOverride
+                {
+                    SignalName = slKey,
+                    BaseWeight = tier == "day" ? 0.05 : tier == "swing" ? 0.08 : 0.10,
+                    AdjustmentPercent = 0,
+                    EffectiveWeight = newSl,
+                    Confidence = Math.Min(stopLossExits.Count / 30.0, 1.0),
+                    SampleSize = stopLossExits.Count,
+                    Status = "active",
+                    Reason = $"Learned from {stopLossExits.Count} stop-loss exits (median loss {medianLoss:P1})",
+                };
+                await WriteWeightUpdateAsync(slKey, newSl, slOverride, profileId, isChampion);
+            }
+
+            // Take-profit: use median gain magnitude, clamped to [0.03, 0.25]
+            if (takeProfitExits.Count >= 3)
+            {
+                var gains = takeProfitExits.Select(p => Math.Abs(p.PnlPct)).OrderBy(x => x).ToList();
+                var medianGain = gains[gains.Count / 2];
+                var newTp = Math.Clamp(medianGain * 0.9, 0.03, 0.25); // 10% tighter than median
+                var tpKey = $"risk_tp_{tier}";
+
+                var tpOverride = new ScoringWeightOverride
+                {
+                    SignalName = tpKey,
+                    BaseWeight = tier == "day" ? 0.08 : tier == "swing" ? 0.15 : 0.20,
+                    AdjustmentPercent = 0,
+                    EffectiveWeight = newTp,
+                    Confidence = Math.Min(takeProfitExits.Count / 30.0, 1.0),
+                    SampleSize = takeProfitExits.Count,
+                    Status = "active",
+                    Reason = $"Learned from {takeProfitExits.Count} take-profit exits (median gain {medianGain:P1})",
+                };
+                await WriteWeightUpdateAsync(tpKey, newTp, tpOverride, profileId, isChampion);
+            }
+
+            _logger.LogInformation(
+                "[learning-engine] Risk thresholds updated for tier={Tier}: {SL} SL samples, {TP} TP samples",
+                tier, stopLossExits.Count, takeProfitExits.Count);
         }
     }
 

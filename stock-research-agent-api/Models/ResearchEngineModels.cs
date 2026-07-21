@@ -386,6 +386,7 @@ public static class PredictionCategoryHelper
         PredictionType.neutral_no_edge,
         PredictionType.neutral_range_bound,
         PredictionType.neutral,
+        PredictionType.watch_only,
     ];
 
     public static bool IsDirectional(PredictionType type) => DirectionalTypes.Contains(type);
@@ -393,7 +394,7 @@ public static class PredictionCategoryHelper
     /// <summary>True for neutral_* types that need evaluation by NeutralOutcomeEvaluator.</summary>
     public static bool IsNeutralEvaluable(PredictionType type) => NeutralEvaluableTypes.Contains(type);
 
-    /// <summary>True for types that need no evaluation at all (watch_only, unavailable, rejected).</summary>
+    /// <summary>True for types that need no evaluation at all (unavailable, rejected).</summary>
     public static bool IsPassThrough(PredictionType type) => !IsDirectional(type) && !IsNeutralEvaluable(type);
 
     public static PredictionCategory Categorize(PredictionType type, string timeWindow) =>
@@ -452,6 +453,8 @@ public record PredictionCandidate
     public string? WinningDirection { get; init; }
     public double? DirectionConfidence { get; init; }
     public string? ScoreDebugJson { get; init; }
+    public string? IndicatorsJson { get; init; }
+    public string? WeightsSnapshotJson { get; init; }
     public int? ActionabilityScore { get; init; }
     public ActionabilityTier? ActionabilityTier { get; init; }
     public List<string> DowngradeReasons { get; init; } = [];

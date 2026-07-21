@@ -40,7 +40,7 @@ public class DashboardController : ControllerBase
             var candidatesTask = _watchlistRepo.GetRecentCandidatesAsync(10);
             var changesTask = _watchlistRepo.GetRecentChangeLogsAsync(10);
             var recentRunsTask = _researchRepo.GetRecentResearchRunsAsync(10);
-            var predictionStatsTask = _researchRepo.GetPredictionStatsAsync();
+            var predictionStatsTask = _researchRepo.GetPredictionStatsAsync(profileId: championId);
             var directionalStatsTask = _researchRepo.GetDirectionalStockStatsAsync();
             var longTermStatsTask = _researchRepo.GetLongTermStockStatsAsync();
             var scanResultStatsTask = _researchRepo.GetScanResultStatsAsync();

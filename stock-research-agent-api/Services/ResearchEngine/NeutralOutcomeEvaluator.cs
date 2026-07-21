@@ -83,6 +83,7 @@ public class NeutralOutcomeEvaluator
         PredictionType.neutral_no_edge,
         PredictionType.neutral_range_bound,
         PredictionType.neutral,
+        PredictionType.watch_only,
     ];
 
     // -----------------------------------------------------------------------

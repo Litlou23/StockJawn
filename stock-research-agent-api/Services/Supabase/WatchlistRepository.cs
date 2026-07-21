@@ -52,6 +52,24 @@ public class WatchlistRepository
 
     public async Task<string?> UpsertWatchlistItemAsync(object item)
     {
+        // Prevent duplicate rows for the same ticker — update existing non-archived row
+        var ticker = item.GetType().GetProperty("ticker")?.GetValue(item)?.ToString();
+        if (ticker is not null)
+        {
+            var existing = await _db.SelectAsync("watchlist_items",
+                filter: $"ticker=eq.{ticker}&status=neq.archived",
+                limit: 1);
+            if (existing.Count > 0)
+            {
+                var existingId = existing[0]["id"]?.ToString();
+                if (existingId is not null)
+                {
+                    await _db.UpdateAsync("watchlist_items", $"id=eq.{existingId}", item);
+                    return existingId;
+                }
+            }
+        }
+
         var rows = await _db.InsertAsync("watchlist_items", new[] { item });
         return rows.Count > 0 ? rows[0]["id"]?.ToString() : null;
     }
