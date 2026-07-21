@@ -122,8 +122,36 @@ public class DailyReportService
 
         if (skipped.Count > 0)
         {
-            parts.Add("SKIPPED:");
-            foreach (var s in skipped.Take(10)) parts.Add($"  {s}");
+            // Categorize skip reasons for visibility (Take(10) was hiding critical info)
+            var tooEarly = skipped.Where(s => s.Contains("too early")).ToList();
+            var missingData = skipped.Where(s => s.Contains("could not evaluate")).ToList();
+            var neutral = skipped.Where(s => s.Contains("neutral") || s.Contains("deferred")).ToList();
+            var expired = skipped.Where(s => s.Contains("expired")).ToList();
+            var other = skipped.Except(tooEarly).Except(missingData).Except(neutral).Except(expired).ToList();
+
+            parts.Add("SKIPPED SUMMARY:");
+            if (neutral.Count > 0) parts.Add($"  Neutral (deferred): {neutral.Count}");
+            if (tooEarly.Count > 0) parts.Add($"  Too early: {tooEarly.Count}");
+            if (missingData.Count > 0) parts.Add($"  Missing market data: {missingData.Count}");
+            if (expired.Count > 0) parts.Add($"  Expired: {expired.Count}");
+            if (other.Count > 0) parts.Add($"  Other: {other.Count}");
+
+            // Show details for actionable categories (missing data = something is wrong)
+            if (missingData.Count > 0)
+            {
+                parts.Add("");
+                parts.Add("MISSING DATA DETAILS:");
+                foreach (var s in missingData.Take(20)) parts.Add($"  {s}");
+            }
+
+            // Show a sample of other skip reasons
+            var sample = tooEarly.Concat(expired).Concat(other).Take(10).ToList();
+            if (sample.Count > 0)
+            {
+                parts.Add("");
+                parts.Add("SKIP SAMPLES:");
+                foreach (var s in sample) parts.Add($"  {s}");
+            }
             parts.Add("");
         }
 

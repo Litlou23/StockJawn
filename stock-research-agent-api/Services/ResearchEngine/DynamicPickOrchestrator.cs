@@ -32,6 +32,7 @@ public class DynamicPickOrchestrator
     private readonly IEvidenceService _evidence;
     private readonly IOpportunityLearningService _opportunityLearning;
     private readonly NeutralOutcomeEvaluator _neutralEvaluator;
+    private readonly OutcomeEvaluator _outcomeEvaluator;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
 
     public DynamicPickOrchestrator(
@@ -46,6 +47,7 @@ public class DynamicPickOrchestrator
         IEvidenceService evidence,
         IOpportunityLearningService opportunityLearning,
         NeutralOutcomeEvaluator neutralEvaluator,
+        OutcomeEvaluator outcomeEvaluator,
         ILogger<DynamicPickOrchestrator> logger)
     {
         _dailyService = dailyService;
@@ -59,6 +61,7 @@ public class DynamicPickOrchestrator
         _evidence = evidence;
         _opportunityLearning = opportunityLearning;
         _neutralEvaluator = neutralEvaluator;
+        _outcomeEvaluator = outcomeEvaluator;
         _logger = logger;
     }
 
@@ -276,7 +279,19 @@ public class DynamicPickOrchestrator
         // 3. Evaluate open paper option candidates (existing service)
         var optionOutcomes = await _optionCandidates.EvaluateAllOpenOptionsAsync();
 
-        // 4. Run the original prediction outcome evaluator
+        // 3b. Prediction pool risk check — early-evaluate predictions that hit stop/target/invalidation
+        var predictionRiskResult = new OutcomeEvaluator.PredictionRiskCheckResult();
+        try
+        {
+            predictionRiskResult = await _outcomeEvaluator.EvaluatePredictionRiskLimitsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Prediction risk check failed");
+            errors.Add($"prediction-risk: {ex.Message}");
+        }
+
+        // 4. Run the original prediction outcome evaluator (remaining open predictions)
         var eod = await _dailyService.RunEndOfDayReviewAsync();
         errors.AddRange(eod.Errors);
 
@@ -301,6 +316,11 @@ public class DynamicPickOrchestrator
                      $"{optionOutcomes.Count} paper option candidates, " +
                      $"{setupsEvaluated} trade setups. " +
                      $"Existing predictions: {eod.PredictionsEvaluated}." +
+                     (predictionRiskResult.TotalEarlyEvaluated > 0
+                         ? $" Prediction risk: {predictionRiskResult.TotalEarlyEvaluated} early-evaluated " +
+                           $"(SL={predictionRiskResult.StopLossEvaluated}, TP={predictionRiskResult.TargetHitEvaluated}, " +
+                           $"INV={predictionRiskResult.InvalidationEvaluated})."
+                         : "") +
                      (neutralEvaluated > 0 ? $" Neutral outcomes: {neutralEvaluated}." : "") +
                      (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "") +
                      (portfolioPositionsSkipped > 0 ? $" Skipped {portfolioPositionsSkipped} positions (time window not elapsed)." : "");

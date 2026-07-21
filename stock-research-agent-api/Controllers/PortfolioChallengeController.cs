@@ -35,6 +35,7 @@ public class PortfolioChallengeController : ControllerBase
     private readonly PortfolioBalanceEngine _engine;
     private readonly PortfolioChallengeRepository _repo;
     private readonly PortfolioLifecycleService _lifecycle;
+    private readonly OutcomeEvaluator _outcomeEvaluator;
     private readonly MarketDataService _marketData;
     private readonly ILogger<PortfolioChallengeController> _logger;
 
@@ -42,12 +43,14 @@ public class PortfolioChallengeController : ControllerBase
         PortfolioBalanceEngine engine,
         PortfolioChallengeRepository repo,
         PortfolioLifecycleService lifecycle,
+        OutcomeEvaluator outcomeEvaluator,
         MarketDataService marketData,
         ILogger<PortfolioChallengeController> logger)
     {
         _engine = engine;
         _repo = repo;
         _lifecycle = lifecycle;
+        _outcomeEvaluator = outcomeEvaluator;
         _marketData = marketData;
         _logger = logger;
     }
@@ -225,7 +228,18 @@ public class PortfolioChallengeController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "[dashboard-refresh] Risk check failed");
+            _logger.LogError(ex, "[dashboard-refresh] Portfolio risk check failed");
+        }
+
+        // ── Run prediction pool risk checks (stop/target/invalidation on all open predictions) ──
+        OutcomeEvaluator.PredictionRiskCheckResult? predictionRiskResult = null;
+        try
+        {
+            predictionRiskResult = await _outcomeEvaluator.EvaluatePredictionRiskLimitsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[dashboard-refresh] Prediction risk check failed");
         }
 
         // ── Then refresh cached dashboard data ──
@@ -265,6 +279,15 @@ public class PortfolioChallengeController : ControllerBase
                 riskResult.TrailingStopClosed,
                 riskResult.HighWaterMarksUpdated,
                 riskResult.TotalClosed,
+            } : null,
+            predictionRiskCheck = predictionRiskResult is not null ? new
+            {
+                predictionRiskResult.PredictionsChecked,
+                predictionRiskResult.StopLossEvaluated,
+                predictionRiskResult.TargetHitEvaluated,
+                predictionRiskResult.InvalidationEvaluated,
+                predictionRiskResult.TotalEarlyEvaluated,
+                predictionRiskResult.QuotesFailed,
             } : null,
         });
     }

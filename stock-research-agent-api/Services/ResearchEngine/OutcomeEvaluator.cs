@@ -702,6 +702,191 @@ public class OutcomeEvaluator
     }
 
     // -----------------------------------------------------------------------
+    // Prediction pool risk management
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Result of a prediction pool risk check.
+    /// </summary>
+    public record PredictionRiskCheckResult
+    {
+        public int PredictionsChecked { get; set; }
+        public int StopLossEvaluated { get; set; }
+        public int TargetHitEvaluated { get; set; }
+        public int InvalidationEvaluated { get; set; }
+        public int QuotesFailed { get; set; }
+        public int TotalEarlyEvaluated => StopLossEvaluated + TargetHitEvaluated + InvalidationEvaluated;
+        public List<string> Details { get; set; } = [];
+    }
+
+    /// <summary>
+    /// Checks all open directional predictions against their stop_price,
+    /// target_price, and invalidation_price. When a limit is breached,
+    /// immediately evaluates the prediction via <see cref="EvaluatePredictionAsync"/>.
+    /// Called both intraday (portfolio-refresh 4×/day) and at EOD.
+    /// </summary>
+    public async Task<PredictionRiskCheckResult> EvaluatePredictionRiskLimitsAsync()
+    {
+        var result = new PredictionRiskCheckResult();
+
+        var openPredictions = await _repo.GetOpenPredictionsAsync();
+
+        // Only check directional predictions that have risk prices set
+        var directional = openPredictions
+            .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType))
+            .Where(p => p.EntryReferencePrice is not null and > 0)
+            .Where(p => p.StopPrice is not null || p.TargetPrice is not null || p.InvalidationPrice is not null)
+            .ToList();
+
+        if (directional.Count == 0)
+        {
+            _logger.LogInformation("[prediction-risk] No directional predictions with risk prices to check");
+            return result;
+        }
+
+        _logger.LogInformation("[prediction-risk] Checking {Count} predictions for risk limit breaches", directional.Count);
+
+        // Batch-fetch quotes (parallel, capped at 8 concurrent)
+        var uniqueTickers = directional.Select(p => p.Ticker).Distinct().ToList();
+        var quoteMap = new Dictionary<string, MarketSnapshotQuote>();
+        using var semaphore = new SemaphoreSlim(8);
+        var tasks = uniqueTickers.Select(async ticker =>
+        {
+            await semaphore.WaitAsync();
+            try
+            {
+                var quote = await _marketData.GetQuoteWithFallbackAsync(ticker);
+                if (quote is not null)
+                    lock (quoteMap) { quoteMap[ticker] = quote; }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[prediction-risk] Failed to fetch quote for {Ticker}", ticker);
+            }
+            finally { semaphore.Release(); }
+        });
+        await Task.WhenAll(tasks);
+
+        foreach (var prediction in directional)
+        {
+            result.PredictionsChecked++;
+
+            if (!quoteMap.TryGetValue(prediction.Ticker, out var quote))
+            {
+                result.QuotesFailed++;
+                continue;
+            }
+
+            var currentPrice = quote.Price;
+            var entryPrice = prediction.EntryReferencePrice!.Value;
+            var isBullish = prediction.PredictionType == PredictionType.bullish;
+
+            // ── Stop-loss check ──
+            if (prediction.StopPrice is double stopPrice and > 0)
+            {
+                var stopHit = isBullish
+                    ? currentPrice <= stopPrice
+                    : currentPrice >= stopPrice;
+
+                if (stopHit)
+                {
+                    var pctMove = ((currentPrice - entryPrice) / entryPrice) * 100;
+                    _logger.LogWarning(
+                        "[prediction-risk] STOP-LOSS: {Ticker} {Direction} entry ${Entry:F2} → ${Current:F2} ({Pct:+0.0;-0.0}%), stop ${Stop:F2}",
+                        prediction.Ticker, prediction.PredictionType, entryPrice, currentPrice, pctMove, stopPrice);
+
+                    try
+                    {
+                        var evalResult = await EvaluatePredictionAsync(prediction);
+                        if (evalResult is not null)
+                        {
+                            result.StopLossEvaluated++;
+                            result.Details.Add($"STOP-LOSS: {prediction.Ticker} ({prediction.PredictionType}) " +
+                                $"${entryPrice:F2}→${currentPrice:F2} ({pctMove:+0.0;-0.0}%), stop=${stopPrice:F2}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after stop-loss", prediction.Ticker);
+                    }
+                    continue;
+                }
+            }
+
+            // ── Target-hit check ──
+            if (prediction.TargetPrice is double targetPrice and > 0)
+            {
+                var targetHit = isBullish
+                    ? currentPrice >= targetPrice
+                    : currentPrice <= targetPrice;
+
+                if (targetHit)
+                {
+                    var pctMove = ((currentPrice - entryPrice) / entryPrice) * 100;
+                    _logger.LogInformation(
+                        "[prediction-risk] TARGET-HIT: {Ticker} {Direction} entry ${Entry:F2} → ${Current:F2} ({Pct:+0.0;-0.0}%), target ${Target:F2}",
+                        prediction.Ticker, prediction.PredictionType, entryPrice, currentPrice, pctMove, targetPrice);
+
+                    try
+                    {
+                        var evalResult = await EvaluatePredictionAsync(prediction);
+                        if (evalResult is not null)
+                        {
+                            result.TargetHitEvaluated++;
+                            result.Details.Add($"TARGET-HIT: {prediction.Ticker} ({prediction.PredictionType}) " +
+                                $"${entryPrice:F2}→${currentPrice:F2} ({pctMove:+0.0;-0.0}%), target=${targetPrice:F2}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after target-hit", prediction.Ticker);
+                    }
+                    continue;
+                }
+            }
+
+            // ── Invalidation check ──
+            if (prediction.InvalidationPrice is double invalidationPrice and > 0)
+            {
+                var invalidationHit = isBullish
+                    ? currentPrice <= invalidationPrice
+                    : currentPrice >= invalidationPrice;
+
+                if (invalidationHit)
+                {
+                    var pctMove = ((currentPrice - entryPrice) / entryPrice) * 100;
+                    _logger.LogWarning(
+                        "[prediction-risk] INVALIDATION: {Ticker} {Direction} entry ${Entry:F2} → ${Current:F2} ({Pct:+0.0;-0.0}%), invalidation ${Inv:F2}",
+                        prediction.Ticker, prediction.PredictionType, entryPrice, currentPrice, pctMove, invalidationPrice);
+
+                    try
+                    {
+                        var evalResult = await EvaluatePredictionAsync(prediction);
+                        if (evalResult is not null)
+                        {
+                            result.InvalidationEvaluated++;
+                            result.Details.Add($"INVALIDATION: {prediction.Ticker} ({prediction.PredictionType}) " +
+                                $"${entryPrice:F2}→${currentPrice:F2} ({pctMove:+0.0;-0.0}%), invalidation=${invalidationPrice:F2}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after invalidation", prediction.Ticker);
+                    }
+                    continue;
+                }
+            }
+        }
+
+        _logger.LogInformation(
+            "[prediction-risk] Checked {Checked}, early-evaluated {Total} (stop={SL}, target={TP}, invalidation={Inv}), quotes failed={QF}",
+            result.PredictionsChecked, result.TotalEarlyEvaluated,
+            result.StopLossEvaluated, result.TargetHitEvaluated, result.InvalidationEvaluated, result.QuotesFailed);
+
+        return result;
+    }
+
+    // -----------------------------------------------------------------------
     // Volatility learning record creation
     // -----------------------------------------------------------------------
 
