@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Discovery;
+using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.Supabase;
 
@@ -20,7 +21,10 @@ public class ChatToolsController : ControllerBase
     private readonly PaperStockCandidateRepository _stockRepo;
     private readonly OptionsDataRepository _optionsRepo;
     private readonly CandidateGenerationAuditRepository _auditRepo;
+    private readonly PortfolioChallengeRepository _portfolioRepo;
     private readonly DynamicPickOrchestrator _orchestrator;
+    private readonly OutcomeEvaluator _outcomeEvaluator;
+    private readonly MarketDataService _marketData;
     private readonly LearningEngine _learning;
     private readonly TradeSetupEngine _setupEngine;
     private readonly JobStatusTracker _jobStatus;
@@ -32,7 +36,10 @@ public class ChatToolsController : ControllerBase
         PaperStockCandidateRepository stockRepo,
         OptionsDataRepository optionsRepo,
         CandidateGenerationAuditRepository auditRepo,
+        PortfolioChallengeRepository portfolioRepo,
         DynamicPickOrchestrator orchestrator,
+        OutcomeEvaluator outcomeEvaluator,
+        MarketDataService marketData,
         LearningEngine learning,
         TradeSetupEngine setupEngine,
         JobStatusTracker jobStatus,
@@ -43,7 +50,10 @@ public class ChatToolsController : ControllerBase
         _stockRepo = stockRepo;
         _optionsRepo = optionsRepo;
         _auditRepo = auditRepo;
+        _portfolioRepo = portfolioRepo;
         _orchestrator = orchestrator;
+        _outcomeEvaluator = outcomeEvaluator;
+        _marketData = marketData;
         _learning = learning;
         _setupEngine = setupEngine;
         _jobStatus = jobStatus;
@@ -1330,6 +1340,243 @@ public class ChatToolsController : ControllerBase
                 previous_status = candidate.Status.ToString(),
                 new_status = status,
                 applied = updated,
+            },
+            warnings = new List<string>(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. get_portfolio_summary
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_portfolio_summary")]
+    public async Task<IActionResult> GetPortfolioSummary()
+    {
+        var challenge = await _portfolioRepo.GetActiveChallengeAsync();
+        if (challenge is null)
+        {
+            return Ok(new
+            {
+                tool_name = "get_portfolio_summary",
+                as_of = Now(),
+                summary = "No active portfolio challenge found.",
+                data = (object?)null,
+                warnings = new List<string> { "No active challenge" },
+            });
+        }
+
+        var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
+        var closedPositions = await _portfolioRepo.GetClosedPositionsAsync(challenge.Id, 20);
+        var riskClosures = await _portfolioRepo.GetRecentRiskManagedClosesAsync(20);
+
+        var summaryText = $"Portfolio: ${challenge.CurrentBalance:F2} balance " +
+                          $"({(challenge.PercentReturn >= 0 ? "+" : "")}{challenge.PercentReturn:F2}% return). " +
+                          $"{openPositions.Count} open, {challenge.NumberOfTrades} total trades. " +
+                          $"Win rate: {challenge.WinRate:F0}% ({challenge.WinningTrades}W/{challenge.LosingTrades}L). " +
+                          $"Realized P&L: ${challenge.RealizedProfit:F2}. " +
+                          $"Risk closures (recent): {riskClosures.Count}.";
+
+        return Ok(new
+        {
+            tool_name = "get_portfolio_summary",
+            as_of = Now(),
+            summary = summaryText,
+            data = new
+            {
+                challenge_id = challenge.Id,
+                starting_balance = challenge.StartingBalance,
+                current_balance = challenge.CurrentBalance,
+                realized_pnl = challenge.RealizedProfit,
+                unrealized_pnl = challenge.UnrealizedProfit,
+                percent_return = challenge.PercentReturn,
+                total_trades = challenge.NumberOfTrades,
+                winning = challenge.WinningTrades,
+                losing = challenge.LosingTrades,
+                win_rate = challenge.WinRate,
+                open_positions = openPositions.Take(15).Select(p => new
+                {
+                    ticker = p.Ticker,
+                    entry_price = p.EntryPrice,
+                    quantity = p.Quantity,
+                    entry_date = p.EntryDate.ToString("o"),
+                }),
+                recent_closed = closedPositions.Take(10).Select(p => new
+                {
+                    ticker = p.Ticker,
+                    entry_price = p.EntryPrice,
+                    exit_price = p.ExitPrice,
+                    pnl_pct = p.EntryPrice > 0 ? Math.Round(((p.ExitPrice ?? p.EntryPrice) - p.EntryPrice) / p.EntryPrice * 100, 2) : 0,
+                    reason_exited = Truncate(p.ReasonExited, 80),
+                }),
+                recent_risk_closures = riskClosures.Take(10).Select(p => new
+                {
+                    ticker = p.Ticker,
+                    entry_price = p.EntryPrice,
+                    exit_price = p.ExitPrice,
+                    reason_exited = Truncate(p.ReasonExited, 100),
+                    exit_date = p.ExitDate?.ToString("o"),
+                }),
+            },
+            warnings = new List<string>(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 21. get_open_predictions
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_open_predictions")]
+    public async Task<IActionResult> GetOpenPredictions(
+        [FromQuery] string? ticker = null,
+        [FromQuery] string? prediction_type = null,
+        [FromQuery] bool count_only = false,
+        [FromQuery] int limit = 20)
+    {
+        var openPredictions = await _researchRepo.GetOpenPredictionsAsync();
+
+        if (!string.IsNullOrWhiteSpace(ticker))
+            openPredictions = openPredictions.Where(p => p.Ticker.Equals(ticker, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (!string.IsNullOrWhiteSpace(prediction_type) && Enum.TryParse<PredictionType>(prediction_type, true, out var pt))
+            openPredictions = openPredictions.Where(p => p.PredictionType == pt).ToList();
+
+        var grouped = openPredictions.GroupBy(p => p.PredictionType).ToDictionary(g => g.Key.ToString(), g => g.Count());
+        var summaryText = $"{openPredictions.Count} open predictions: " +
+                          string.Join(", ", grouped.Select(kv => $"{kv.Value} {kv.Key}")) + ".";
+
+        if (count_only)
+        {
+            return Ok(new
+            {
+                tool_name = "get_open_predictions",
+                as_of = Now(),
+                summary = summaryText,
+                data = new { count = openPredictions.Count, by_type = grouped },
+                warnings = new List<string>(),
+            });
+        }
+
+        var items = openPredictions.Take(limit).Select(p => new
+        {
+            ticker = p.Ticker,
+            type = p.PredictionType.ToString(),
+            confidence = p.ConfidenceScore,
+            time_window = p.TimeWindow,
+            entry_price = p.EntryReferencePrice,
+            stop_price = p.StopPrice,
+            target_price = p.TargetPrice,
+            invalidation_price = p.InvalidationPrice,
+            age_hours = Math.Round((DateTimeOffset.UtcNow - p.CreatedAt).TotalHours, 1),
+            created_at = p.CreatedAt.ToString("o"),
+        });
+
+        return Ok(new
+        {
+            tool_name = "get_open_predictions",
+            as_of = Now(),
+            summary = summaryText,
+            data = new { count = openPredictions.Count, by_type = grouped, items },
+            warnings = new List<string>(),
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // 22. get_prediction_risk_summary
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_prediction_risk_summary")]
+    public async Task<IActionResult> GetPredictionRiskSummary([FromQuery] int limit = 20)
+    {
+        var openPredictions = await _researchRepo.GetOpenPredictionsAsync();
+
+        var directional = openPredictions
+            .Where(p => PredictionCategoryHelper.IsDirectional(p.PredictionType))
+            .Where(p => p.EntryReferencePrice is not null and > 0)
+            .Where(p => p.StopPrice is not null || p.TargetPrice is not null || p.InvalidationPrice is not null)
+            .ToList();
+
+        // Calculate distance to stop/target for each prediction without fetching live quotes
+        // (this is a read-only summary, not an evaluation)
+        var atRisk = new List<object>();
+        var nearTarget = new List<object>();
+
+        foreach (var p in directional)
+        {
+            var entry = p.EntryReferencePrice!.Value;
+            var isBullish = p.PredictionType == PredictionType.bullish;
+
+            if (p.StopPrice is double stop and > 0)
+            {
+                var distToStop = isBullish
+                    ? ((entry - stop) / entry) * 100
+                    : ((stop - entry) / entry) * 100;
+
+                if (distToStop < 3.0) // within 3% of stop
+                {
+                    atRisk.Add(new
+                    {
+                        ticker = p.Ticker,
+                        type = p.PredictionType.ToString(),
+                        entry_price = entry,
+                        stop_price = stop,
+                        distance_to_stop_pct = Math.Round(distToStop, 2),
+                        time_window = p.TimeWindow,
+                        age_hours = Math.Round((DateTimeOffset.UtcNow - p.CreatedAt).TotalHours, 1),
+                    });
+                }
+            }
+
+            if (p.TargetPrice is double target and > 0)
+            {
+                var distToTarget = isBullish
+                    ? ((target - entry) / entry) * 100
+                    : ((entry - target) / entry) * 100;
+
+                if (distToTarget < 3.0) // within 3% of target
+                {
+                    nearTarget.Add(new
+                    {
+                        ticker = p.Ticker,
+                        type = p.PredictionType.ToString(),
+                        entry_price = entry,
+                        target_price = target,
+                        distance_to_target_pct = Math.Round(distToTarget, 2),
+                        time_window = p.TimeWindow,
+                        age_hours = Math.Round((DateTimeOffset.UtcNow - p.CreatedAt).TotalHours, 1),
+                    });
+                }
+            }
+        }
+
+        // Get recently evaluated predictions (those closed by risk management)
+        var recentEvaluated = await _researchRepo.GetRecentPredictionsAsync(limit: 30, status: "evaluated");
+        var recentRiskClosed = recentEvaluated
+            .Where(p => p.StopPrice is not null || p.TargetPrice is not null)
+            .Take(limit)
+            .Select(p => new
+            {
+                ticker = p.Ticker,
+                type = p.PredictionType.ToString(),
+                entry_price = p.EntryReferencePrice,
+                stop_price = p.StopPrice,
+                target_price = p.TargetPrice,
+                time_window = p.TimeWindow,
+                evaluated_age_hours = Math.Round((DateTimeOffset.UtcNow - p.CreatedAt).TotalHours, 1),
+            });
+
+        var summaryText = $"{directional.Count} predictions with risk prices. " +
+                          $"{atRisk.Count} near stop-loss (<3%), {nearTarget.Count} near target (<3%).";
+
+        return Ok(new
+        {
+            tool_name = "get_prediction_risk_summary",
+            as_of = Now(),
+            summary = summaryText,
+            data = new
+            {
+                total_with_risk_prices = directional.Count,
+                near_stop_loss = atRisk.Take(limit),
+                near_target = nearTarget.Take(limit),
+                recently_evaluated = recentRiskClosed,
             },
             warnings = new List<string>(),
         });

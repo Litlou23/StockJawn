@@ -33,6 +33,9 @@ RULES:
 14. You can adjust scoring weight overrides for individual signal buckets (trend, momentum, volume, volatility, market_context, catalyst, learning, research_signal). Use update_weight_override to boost or dampen a signal's influence, and reset_weight_override to return it to baseline. Adjustment is clamped to ±20%.
 15. You can check pipeline job statuses (get_job_statuses) and trigger discovery scans (run_discovery).
 16. You can update stock candidate statuses — e.g. expire, close, or mark as watch_only (update_stock_eval).
+17. You can view portfolio paper trading results — balance, P&L, open/closed positions, and risk management closures (get_portfolio_summary).
+18. You can query all open predictions across all runs, not just the latest scan (get_open_predictions). This shows stop/target/invalidation prices and age.
+19. You can check prediction risk management status — which predictions are near their stop or target, and which were recently closed by risk checks (get_prediction_risk_summary).
 
 RESPONSE FORMAT — JSON only, no markdown fences:
 {"message": string, "dataConfidence": "high"|"medium"|"low", "suggestedPrompts": string[], "riskWarnings": string[], "thesis"?: {"ticker": string, "setupType"?: string, "thesisSummary": string, "bullishCase"?: string, "bearishCase"?: string, "invalidationPoint"?: string, "expectedTimeframe"?: "1d"|"5d"|"20d"|"60d"}}
@@ -351,6 +354,52 @@ export const CHAT_TOOL_DEFINITIONS: ChatToolDefinition[] = [
           reason: { type: 'string', description: 'Why the status is being changed (optional, for audit)' },
         },
         required: ['ticker', 'status'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_portfolio_summary',
+      description:
+        'Get portfolio paper trading summary: balance, P&L, open positions, recent closed positions, and risk management closures (stop-loss, take-profit, trailing stop). Use when asked about "portfolio", "P&L", "positions", "how are we doing", "risk closures", or "paper trading results".',
+      parameters: { type: 'object', properties: {}, required: [] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_open_predictions',
+      description:
+        'Get ALL open predictions across all runs (not just the latest). Shows entry price, stop/target/invalidation prices, and age. Filter by ticker or prediction type. Use when asked about "open predictions", "active predictions", "how many predictions are open", or "what predictions are still running".',
+      parameters: {
+        type: 'object',
+        properties: {
+          ticker: { type: 'string', description: 'Filter to one ticker symbol' },
+          prediction_type: {
+            type: 'string',
+            enum: ['bullish', 'bearish', 'neutral', 'watch_only'],
+            description: 'Filter by prediction type',
+          },
+          count_only: { type: 'boolean', description: 'Return only counts' },
+          limit: { type: 'integer', description: 'Max items (default 20)' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_prediction_risk_summary',
+      description:
+        'Get prediction risk management status: which predictions are near their stop-loss or target price, and which were recently evaluated/closed by risk management. Use when asked about "prediction risk", "which predictions hit stop-loss", "near stop", "risk summary", or "what did risk management close".',
+      parameters: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', description: 'Max items per category (default 20)' },
+        },
+        required: [],
       },
     },
   },
