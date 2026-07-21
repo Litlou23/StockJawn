@@ -14,7 +14,7 @@ public class TwelveDataProvider
 
     // Rate limits — configurable via env vars for paid plans.
     // Free tier: 8 requests/minute, 800/day.
-    // Grow tier: 30/min, 5000/day. Pro: 120/min, unlimited.
+    // Growing plan: 55/min, unlimited/day. Pro: 120/min, unlimited.
     private readonly int _maxRequestsPerMinute;
     private readonly int _maxRequestsPerDay;
     private readonly int _minGapMs; // minimum ms between requests to avoid bursts
@@ -39,10 +39,11 @@ public class TwelveDataProvider
         _configured = !string.IsNullOrWhiteSpace(_apiKey);
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
 
-        // Allow override for paid plans: TWELVE_DATA_RPM and TWELVE_DATA_DAILY
-        _maxRequestsPerMinute = int.TryParse(configuration["TWELVE_DATA_RPM"], out var rpm) ? rpm : 7;
-        _maxRequestsPerDay = int.TryParse(configuration["TWELVE_DATA_DAILY"], out var daily) ? daily : 750;
-        // Space requests evenly: 60s / rpm + 500ms buffer → e.g. 7 rpm = ~9s gap
+        // Allow override via env: TWELVE_DATA_RPM and TWELVE_DATA_DAILY
+        // Defaults match the Growing plan: 55 req/min, unlimited daily
+        _maxRequestsPerMinute = int.TryParse(configuration["TWELVE_DATA_RPM"], out var rpm) ? rpm : 55;
+        _maxRequestsPerDay = int.TryParse(configuration["TWELVE_DATA_DAILY"], out var daily) ? daily : 100_000;
+        // Space requests evenly: 60s / rpm + 500ms buffer
         _minGapMs = (60_000 / _maxRequestsPerMinute) + 500;
 
         if (!_configured)

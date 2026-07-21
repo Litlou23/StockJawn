@@ -129,7 +129,12 @@ public class PortfolioBalanceEngine
             return null;
         }
 
-        var dollarsInvested = request.EntryPrice * request.Quantity;
+        if (!Enum.TryParse<PositionAssetType>(request.AssetType, out var assetType))
+            assetType = PositionAssetType.stock;
+
+        // Options: 1 contract = 100 shares, so dollars invested = price × quantity × 100
+        var contractMultiplier = assetType == PositionAssetType.option ? 100.0 : 1.0;
+        var dollarsInvested = request.EntryPrice * request.Quantity * contractMultiplier;
 
         if (dollarsInvested > challenge.CurrentCash)
         {
@@ -137,9 +142,6 @@ public class PortfolioBalanceEngine
                 dollarsInvested, challenge.CurrentCash);
             return null;
         }
-
-        if (!Enum.TryParse<PositionAssetType>(request.AssetType, out var assetType))
-            assetType = PositionAssetType.stock;
 
         var position = new PortfolioPosition
         {
@@ -209,8 +211,9 @@ public class PortfolioBalanceEngine
             return null;
         }
 
-        // Calculate P&L
-        var dollarsReturned = Math.Round(request.ExitPrice * position.Quantity, 2);
+        // Calculate P&L — options use 100x contract multiplier
+        var closeMultiplier = position.AssetType == PositionAssetType.option ? 100.0 : 1.0;
+        var dollarsReturned = Math.Round(request.ExitPrice * position.Quantity * closeMultiplier, 2);
         var profitLoss = Math.Round(dollarsReturned - position.DollarsInvested, 2);
         var percentGain = position.DollarsInvested > 0
             ? Math.Round((profitLoss / position.DollarsInvested) * 100, 2)

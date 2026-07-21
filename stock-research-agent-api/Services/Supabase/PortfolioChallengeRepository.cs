@@ -162,6 +162,7 @@ public class PortfolioChallengeRepository
                 entry_price = p.EntryPrice,
                 quantity = p.Quantity,
                 dollars_invested = p.DollarsInvested,
+                high_water_mark = p.EntryPrice,
                 reason_entered = p.ReasonEntered,
                 status = "open",
             }
@@ -245,6 +246,29 @@ public class PortfolioChallengeRepository
         });
     }
 
+    /// <summary>
+    /// Returns recently closed positions that were closed by risk management
+    /// (stop-loss, take-profit, or trailing-stop). Used by the learning engine
+    /// to learn which signals/timeframes tend to trigger risk exits.
+    /// </summary>
+    public async Task<List<PortfolioPosition>> GetRecentRiskManagedClosesAsync(int limit = 200)
+    {
+        var rows = await _db.SelectAsync("portfolio_positions",
+            filter: "status=eq.closed&or=(reason_exited.like.STOP-LOSS*,reason_exited.like.TAKE-PROFIT*,reason_exited.like.TRAILING-STOP*)",
+            order: "exit_date.desc",
+            limit: limit);
+        return rows.Select(MapPosition).ToList();
+    }
+
+    public async Task<bool> UpdateHighWaterMarkAsync(string positionId, double highWaterMark)
+    {
+        return await _db.UpdateAsync("portfolio_positions", $"id=eq.{positionId}", new
+        {
+            high_water_mark = highWaterMark,
+            updated_at = DateTimeOffset.UtcNow.ToString("o"),
+        });
+    }
+
     public Task<int> CountPositionsAsync(string portfolioId, string? statusFilter = null)
     {
         var filter = $"portfolio_id=eq.{portfolioId}";
@@ -312,6 +336,7 @@ public class PortfolioChallengeRepository
         ReasonEntered = r["reason_entered"]?.ToString(),
         ReasonExited = r["reason_exited"]?.ToString(),
         Status = Enum.TryParse<PositionStatus>(r["status"]?.ToString(), out var ps) ? ps : PositionStatus.open,
+        HighWaterMark = GetNullableDouble(r, "high_water_mark"),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
         UpdatedAt = GetDateTimeOffset(r, "updated_at"),
     };

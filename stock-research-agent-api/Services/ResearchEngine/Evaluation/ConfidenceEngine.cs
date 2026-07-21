@@ -125,7 +125,8 @@ public class ConfidenceEngine : IConfidenceEngine
             capReason = "Strong market context conflict";
         }
 
-        int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, 85));
+        var maxCap = weights.GetValueOrDefault("max_confidence_cap", 85.0);
+        int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, maxCap));
 
         // Apply overconfidence penalty to high-confidence predictions only
         if (overconfidencePenalty < 1.0 && confidence >= 60)

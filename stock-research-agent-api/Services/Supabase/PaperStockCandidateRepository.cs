@@ -168,6 +168,26 @@ public class PaperStockCandidateRepository
     public Task<int> CountCandidatesAsync(string? filter = null)
         => _db.CountAsync("paper_stock_candidates", filter);
 
+    /// <summary>
+    /// Batch-fetch candidates by their prediction IDs. Used by risk management
+    /// to determine timeframe for each open portfolio position.
+    /// </summary>
+    public async Task<Dictionary<string, PaperStockCandidate>> GetCandidatesByPredictionIdsAsync(List<string> predictionIds)
+    {
+        if (predictionIds.Count == 0) return new();
+
+        // PostgREST in operator: prediction_id=in.(id1,id2,...)
+        var idList = string.Join(",", predictionIds.Select(id => $"\"{id}\""));
+        var rows = await _db.SelectAsync("paper_stock_candidates",
+            filter: $"prediction_id=in.({idList})");
+
+        // Use GroupBy to avoid crash if duplicate prediction_ids ever appear
+        return rows.Select(MapCandidate)
+            .Where(c => c.PredictionId is not null)
+            .GroupBy(c => c.PredictionId!)
+            .ToDictionary(g => g.Key, g => g.First());
+    }
+
     public async Task<bool> UpdateCandidateStatusAsync(string id, PaperStockStatus status)
     {
         return await _db.UpdateAsync("paper_stock_candidates", $"id=eq.{id}",

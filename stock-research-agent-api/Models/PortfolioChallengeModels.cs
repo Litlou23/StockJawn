@@ -67,6 +67,7 @@ public record PortfolioPosition
     public string? ReasonEntered { get; init; }
     public string? ReasonExited { get; init; }
     public PositionStatus Status { get; init; } = PositionStatus.open;
+    public double? HighWaterMark { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
@@ -117,4 +118,64 @@ public record ClosePositionRequest
     public string PositionId { get; init; } = "";
     public double ExitPrice { get; init; }
     public string? ReasonExited { get; init; }
+}
+
+// -----------------------------------------------------------------------
+// Enriched dashboard — live P&L, equity curve, AI quality stats
+// -----------------------------------------------------------------------
+
+public record EnrichedPosition
+{
+    public string Id { get; init; } = "";
+    public string Ticker { get; init; } = "";
+    public PositionAssetType AssetType { get; init; }
+    public double EntryPrice { get; init; }
+    public double CurrentPrice { get; init; }
+    public double Quantity { get; init; }
+    public double DollarsInvested { get; init; }
+    public double CurrentValue { get; init; }
+    public double UnrealizedPnL { get; init; }
+    public double UnrealizedPnLPercent { get; init; }
+    public string? PredictionId { get; init; }
+    public string? ReasonEntered { get; init; }
+    public double HoursHeld { get; init; }
+    public DateTimeOffset EntryDate { get; init; }
+}
+
+public record EquityPoint
+{
+    public DateTimeOffset Date { get; init; }
+    public double Balance { get; init; }
+    public string? TradeLabel { get; init; }
+}
+
+public record PortfolioQualityStats
+{
+    public int TotalTrades { get; init; }
+    public int Winners { get; init; }
+    public int Losers { get; init; }
+    public double WinRate { get; init; }
+    public double AvgWinPercent { get; init; }
+    public double AvgLossPercent { get; init; }
+    public double AvgWinDollars { get; init; }
+    public double AvgLossDollars { get; init; }
+    public double LargestWinDollars { get; init; }
+    public double LargestLossDollars { get; init; }
+    public string? LargestWinTicker { get; init; }
+    public string? LargestLossTicker { get; init; }
+    public double TotalRealizedPnL { get; init; }
+    public double ProfitFactor { get; init; }
+    public double AvgHoldHours { get; init; }
+}
+
+public record PortfolioDashboard
+{
+    public PortfolioChallengeSummary Summary { get; init; } = new();
+    public List<EnrichedPosition> LivePositions { get; init; } = [];
+    public List<PortfolioPosition> RecentClosedTrades { get; init; } = [];
+    public List<EquityPoint> EquityCurve { get; init; } = [];
+    public PortfolioQualityStats Stats { get; init; } = new();
+    public double TotalUnrealizedPnL { get; init; }
+    public double LiveEquity { get; init; }
+    public DateTimeOffset LastUpdated { get; init; } = DateTimeOffset.UtcNow;
 }

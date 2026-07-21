@@ -61,6 +61,8 @@ public class LearningEngine
     private readonly ResearchRepository _repo;
     private readonly PredictionProfileRepository _profileRepo;
     private readonly NeutralOutcomeRepository _neutralRepo;
+    private readonly PortfolioChallengeRepository _portfolioRepo;
+    private readonly PaperStockCandidateRepository _candidateRepo;
     private readonly PatternDetectionService _patternDetection;
     private readonly TradeSetupEngine _setupEngine;
     private readonly IOpenAiCompletionService _ai;
@@ -70,6 +72,8 @@ public class LearningEngine
     public LearningEngine(
         ResearchRepository repo, PredictionProfileRepository profileRepo,
         NeutralOutcomeRepository neutralRepo,
+        PortfolioChallengeRepository portfolioRepo,
+        PaperStockCandidateRepository candidateRepo,
         PatternDetectionService patternDetection,
         TradeSetupEngine setupEngine,
         IOpenAiCompletionService ai, WeightUpdateValidator guardrail,
@@ -78,6 +82,8 @@ public class LearningEngine
         _repo = repo;
         _profileRepo = profileRepo;
         _neutralRepo = neutralRepo;
+        _portfolioRepo = portfolioRepo;
+        _candidateRepo = candidateRepo;
         _patternDetection = patternDetection;
         _setupEngine = setupEngine;
         _ai = ai;
@@ -235,10 +241,13 @@ public class LearningEngine
         var voeSummary = await ComputeVolatilityOpportunityLearningAsync(profileId, isChampion);
         weightChanges.AddRange(voeSummary.WeightChanges);
 
+        // Stage 5d: Risk Management Learning — learn from stop-loss/take-profit/trailing-stop exits
+        var riskLearningSummary = await ComputeRiskManagementLearningAsync(isChampion);
+
         // Stage 6: Generate AI-summarized learning report (champion only — expensive)
         string? aiSummary = null;
         if (isChampion)
-            aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges, voeSummary, profileId);
+            aiSummary = await GenerateAiLearningReportAsync(signalStats, calibration, weightChanges, voeSummary, riskLearningSummary, profileId);
 
         // Stage 7: Generate structured insights (champion only — writes to shared tables)
         var insights = new List<object>();
@@ -250,6 +259,7 @@ public class LearningEngine
                      $"{influenceCount} influence stats, {interactionCount} interaction pairs, " +
                      $"{weightsAdjusted} weight adjustments, {setupStatsUpdated} setup stats, " +
                      $"{supersessionCount} supersession records, {voeSummary.TotalRecords} VOE records, " +
+                     $"{riskLearningSummary.TotalEvents} risk events learned, " +
                      $"{insights.Count} insights.";
 
         _logger.LogInformation("[learning-engine] {Report}", report);
@@ -2674,7 +2684,168 @@ public class LearningEngine
     }
 
     // -----------------------------------------------------------------------
-    // Stage 5: AI-Summarized Learning Report
+    // Stage 5d: Risk Management Learning
+    // Learn from stop-loss, take-profit, and trailing-stop exits to improve
+    // prediction quality and risk threshold calibration.
+    // -----------------------------------------------------------------------
+
+    public async Task<RiskLearningSummary> ComputeRiskManagementLearningAsync(bool isChampion = true)
+    {
+        var summary = new RiskLearningSummary();
+
+        try
+        {
+            var riskCloses = await _portfolioRepo.GetRecentRiskManagedClosesAsync(200);
+            if (riskCloses.Count == 0) return summary;
+
+            summary.TotalEvents = riskCloses.Count;
+
+            // Classify each close by risk event type
+            foreach (var pos in riskCloses)
+            {
+                var reason = pos.ReasonExited ?? "";
+                var eventType = reason.StartsWith("STOP-LOSS") ? "stop_loss"
+                    : reason.StartsWith("TAKE-PROFIT") ? "take_profit"
+                    : reason.StartsWith("TRAILING-STOP") ? "trailing_stop"
+                    : "unknown";
+
+                var pnlPct = pos.EntryPrice > 0
+                    ? ((pos.ExitPrice ?? pos.EntryPrice) - pos.EntryPrice) / pos.EntryPrice * 100
+                    : 0;
+                var isProfitable = pnlPct > 0;
+
+                summary.EventsByType[eventType] = summary.EventsByType.GetValueOrDefault(eventType) + 1;
+                summary.PnlByType[eventType] = summary.PnlByType.GetValueOrDefault(eventType) + pnlPct;
+                summary.TickerCounts[pos.Ticker] = summary.TickerCounts.GetValueOrDefault(pos.Ticker) + 1;
+            }
+
+            // Look up timeframes via prediction_id → paper_stock_candidate
+            var predictionIds = riskCloses
+                .Where(p => p.PredictionId is not null)
+                .Select(p => p.PredictionId!)
+                .Distinct().ToList();
+            var candidateMap = predictionIds.Count > 0
+                ? await _candidateRepo.GetCandidatesByPredictionIdsAsync(predictionIds)
+                : new Dictionary<string, PaperStockCandidate>();
+
+            // Group by timeframe tier
+            foreach (var pos in riskCloses)
+            {
+                var timeframe = StockTimeframe.one_day;
+                if (pos.PredictionId is not null && candidateMap.TryGetValue(pos.PredictionId, out var cand))
+                    timeframe = cand.Timeframe;
+
+                var tier = timeframe switch
+                {
+                    StockTimeframe.one_day => "day",
+                    StockTimeframe.two_day or StockTimeframe.one_week => "swing",
+                    _ => "longterm",
+                };
+
+                var reason = pos.ReasonExited ?? "";
+                var eventType = reason.StartsWith("STOP-LOSS") ? "stop_loss"
+                    : reason.StartsWith("TAKE-PROFIT") ? "take_profit"
+                    : reason.StartsWith("TRAILING-STOP") ? "trailing_stop"
+                    : "unknown";
+
+                var tierKey = $"{tier}_{eventType}";
+                summary.EventsByTierAndType[tierKey] = summary.EventsByTierAndType.GetValueOrDefault(tierKey) + 1;
+            }
+
+            // Upsert into stock_learning_stats (champion only)
+            if (isChampion)
+            {
+                // By event type
+                foreach (var (eventType, count) in summary.EventsByType)
+                {
+                    var avgPnl = count > 0 ? summary.PnlByType.GetValueOrDefault(eventType) / count : 0;
+                    var profitable = eventType != "stop_loss"; // take_profit and trailing_stop are "correct"
+                    var correctCount = profitable ? count : 0;
+
+                    await _candidateRepo.UpsertLearningStatAsync(
+                        "risk_event_type", eventType,
+                        profitable, avgPnl, count > 0 ? 50.0 : 0);
+                }
+
+                // By ticker (top stopped-out tickers)
+                foreach (var (ticker, count) in summary.TickerCounts.Where(t => t.Value >= 2))
+                {
+                    var tickerCloses = riskCloses.Where(p => p.Ticker == ticker).ToList();
+                    var stopLosses = tickerCloses.Count(p => (p.ReasonExited ?? "").StartsWith("STOP-LOSS"));
+                    var profitable = tickerCloses.Count(p =>
+                        p.ExitPrice.HasValue && p.ExitPrice.Value > p.EntryPrice);
+                    var avgPnl = tickerCloses
+                        .Where(p => p.ExitPrice.HasValue && p.EntryPrice > 0)
+                        .Select(p => (p.ExitPrice!.Value - p.EntryPrice) / p.EntryPrice * 100)
+                        .DefaultIfEmpty(0).Average();
+
+                    await _candidateRepo.UpsertLearningStatAsync(
+                        "risk_event_ticker", ticker,
+                        profitable > stopLosses, avgPnl, count);
+                }
+
+                // By timeframe tier
+                foreach (var (tierKey, count) in summary.EventsByTierAndType)
+                {
+                    var isProfitable = !tierKey.Contains("stop_loss");
+                    await _candidateRepo.UpsertLearningStatAsync(
+                        "risk_event_timeframe", tierKey,
+                        isProfitable, 0, count);
+                }
+            }
+
+            _logger.LogInformation(
+                "[learning-engine] Risk management learning: {Total} events — " +
+                "{SL} stop-losses, {TP} take-profits, {TS} trailing-stops",
+                summary.TotalEvents,
+                summary.EventsByType.GetValueOrDefault("stop_loss"),
+                summary.EventsByType.GetValueOrDefault("take_profit"),
+                summary.EventsByType.GetValueOrDefault("trailing_stop"));
+
+            return summary;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Risk management learning failed");
+            return summary;
+        }
+    }
+
+    /// <summary>Builds a text section for the AI learning report from risk management data.</summary>
+    private string BuildRiskManagementReportSection(RiskLearningSummary summary)
+    {
+        if (summary.TotalEvents == 0)
+            return "  No risk management events recorded yet.";
+
+        var lines = new List<string>();
+
+        foreach (var (eventType, count) in summary.EventsByType.OrderByDescending(x => x.Value))
+        {
+            var avgPnl = count > 0 ? summary.PnlByType.GetValueOrDefault(eventType) / count : 0;
+            var label = eventType.Replace("_", "-").ToUpperInvariant();
+            lines.Add($"  {label}: {count} events, avg P&L: {avgPnl:+0.00;-0.00}%");
+        }
+
+        // Timeframe tier breakdown
+        if (summary.EventsByTierAndType.Count > 0)
+        {
+            lines.Add("  By timeframe tier:");
+            foreach (var (tierKey, count) in summary.EventsByTierAndType.OrderByDescending(x => x.Value))
+                lines.Add($"    {tierKey}: {count}");
+        }
+
+        // Most stopped-out tickers
+        var topStopped = summary.TickerCounts
+            .OrderByDescending(t => t.Value).Take(5)
+            .Select(t => $"{t.Key} ({t.Value})");
+        if (topStopped.Any())
+            lines.Add($"  Most risk-closed tickers: {string.Join(", ", topStopped)}");
+
+        return string.Join("\n", lines);
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 6: AI-Summarized Learning Report
     // -----------------------------------------------------------------------
 
     public async Task<string?> GenerateAiLearningReportAsync(
@@ -2682,6 +2853,7 @@ public class LearningEngine
         ConfidenceAnalysis calibration,
         List<WeightChangeSummary> weightChanges,
         VolatilityOpportunityLearningSummary? voeSummary = null,
+        RiskLearningSummary? riskLearningSummary = null,
         string? profileId = null)
     {
         if (!_ai.IsConfigured)
@@ -2922,14 +3094,18 @@ PREDICTION REVISIONS (supersession learning):
 VOLATILITY OPPORTUNITY LEARNING (VOE Stage 5c):
 {BuildVolatilityOpportunitySummarySection(voeSummary ?? new VolatilityOpportunityLearningSummary())}
 
+RISK MANAGEMENT OUTCOMES (portfolio stop-loss/take-profit/trailing-stop closures):
+{BuildRiskManagementReportSection(riskLearningSummary ?? new RiskLearningSummary())}
+
 INSTRUCTIONS:
 - Write 4-6 paragraphs, conversational but data-driven. No bullet points, no headers — flowing prose only.
 - PARAGRAPH 1: Open with the single most important change or finding. Name specific numbers. Compare to prior period if trend data exists. Example: ""Accuracy dropped from 52% to 41% this week, driven entirely by bearish calls going 1-for-7.""
 - PARAGRAPH 2: Analyze which predictions actually worked and which didn't. Reference specific tickers and recent examples. Don't just say ""bullish outperformed bearish"" — say ""AAPL and MSFT bullish calls both hit targets while TSLA bearish was stopped out twice.""
 - PARAGRAPH 3: Evaluate price prediction quality. Are targets being set too aggressively (low hit rate, high stop rate)? Is the MFE/MAE ratio healthy? Are we leaving money on the table (high MFE but low target hits)?
 - PARAGRAPH 4: Assess signal effectiveness. Which signals actually drive correct predictions vs. which are along for the ride? If influence data shows redundant signals, name them and recommend downweighting. If correlations show a signal with strong predictive power, highlight it.
-- PARAGRAPH 5: Provide 2-3 specific, actionable recommendations. Not generic advice — concrete changes. Examples: ""Consider dropping the sentiment signal weight below 0.5 — it's been redundant in 80% of predictions."" Or ""1_day timeframe is at 55% accuracy vs 30% for 3_day — the system should favor shorter holds until 3_day improves."" Or ""Stop prices are too tight — MAE of 3.2% exceeds average stop distance.""
-- PARAGRAPH 6 (optional): Note what data is still missing or pending, and what you'd want to see before making stronger recommendations.
+- PARAGRAPH 5: Analyze risk management performance. Are stop-losses firing too often on a particular timeframe or ticker? Are take-profits and trailing stops locking in gains effectively? If certain tickers keep hitting stop-losses, recommend avoiding them or adjusting thresholds. If a timeframe tier has excessive stop-loss events, recommend widening stops for that tier.
+- PARAGRAPH 6: Provide 2-3 specific, actionable recommendations. Not generic advice — concrete changes. Examples: ""Consider dropping the sentiment signal weight below 0.5 — it's been redundant in 80% of predictions."" Or ""Day-trade stop-losses at 5% are too tight — 3 of 5 stop-outs recovered within the day."" Or ""TSLA has triggered 4 stop-losses in 2 weeks — consider excluding it from day trades.""
+- PARAGRAPH 7 (optional): Note what data is still missing or pending, and what you'd want to see before making stronger recommendations.
 - CRITICAL: Every report must contain specific numbers, ticker names, and concrete recommendations. A report that could apply to any day is a BAD report.
 - Keep under 700 words";
 
@@ -3342,4 +3518,17 @@ INSTRUCTIONS:
         if (Math.Abs(marketNet) <= 3) return "sideways";
         return null;
     }
+}
+
+// -----------------------------------------------------------------------
+// Risk Management Learning Models
+// -----------------------------------------------------------------------
+
+public class RiskLearningSummary
+{
+    public int TotalEvents { get; set; }
+    public Dictionary<string, int> EventsByType { get; set; } = new();
+    public Dictionary<string, double> PnlByType { get; set; } = new();
+    public Dictionary<string, int> TickerCounts { get; set; } = new();
+    public Dictionary<string, int> EventsByTierAndType { get; set; } = new();
 }
