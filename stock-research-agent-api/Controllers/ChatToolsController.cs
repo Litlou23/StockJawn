@@ -1582,6 +1582,136 @@ public class ChatToolsController : ControllerBase
         });
     }
 
+    // -----------------------------------------------------------------------
+    // 23. get_prediction_outcomes
+    // -----------------------------------------------------------------------
+
+    [HttpGet("get_prediction_outcomes")]
+    public async Task<IActionResult> GetPredictionOutcomes(
+        [FromQuery] string? period = "today",
+        [FromQuery] int limit = 20)
+    {
+        var since = period?.ToLowerInvariant() switch
+        {
+            "today" => DateTimeOffset.UtcNow.Date,
+            "yesterday" => DateTimeOffset.UtcNow.Date.AddDays(-1),
+            "week" => DateTimeOffset.UtcNow.Date.AddDays(-7),
+            "month" => DateTimeOffset.UtcNow.Date.AddDays(-30),
+            _ => DateTimeOffset.UtcNow.Date,
+        };
+
+        var outcomes = await _researchRepo.GetOutcomesSinceAsync(since, 500);
+
+        if (outcomes.Count == 0)
+        {
+            return Ok(new
+            {
+                tool_name = "get_prediction_outcomes",
+                as_of = Now(),
+                summary = $"No predictions evaluated since {since:yyyy-MM-dd}.",
+                data = new { count = 0 },
+                warnings = new List<string>(),
+            });
+        }
+
+        var correct = outcomes.Count(o => o.DirectionCorrect == true);
+        var incorrect = outcomes.Count(o => o.DirectionCorrect == false);
+        var total = correct + incorrect;
+        var accuracy = total > 0 ? Math.Round(100.0 * correct / total, 1) : 0;
+        var avgScore = Math.Round(outcomes.Average(o => o.OutcomeScore ?? 50), 1);
+        var avgMove = Math.Round(outcomes.Average(o => o.PercentMove ?? 0), 2);
+        var stopHits = outcomes.Count(o => o.StopHit == true);
+        var targetHits = outcomes.Count(o => o.TargetHit == true);
+
+        // Join with predictions to get tickers + profile info
+        var predictions = await _researchRepo.GetRecentPredictionsAsync(limit: 500, status: "evaluated");
+        var predMap = predictions.ToDictionary(p => p.Id, p => p);
+        var profiles = await _researchRepo.GetAllProfilesAsync();
+
+        // Build per-profile breakdown
+        var profileGroups = outcomes
+            .GroupBy(o =>
+            {
+                predMap.TryGetValue(o.PredictionId, out var pred);
+                return pred?.ProfileId ?? "unknown";
+            })
+            .Select(g =>
+            {
+                var pCorrect = g.Count(o => o.DirectionCorrect == true);
+                var pIncorrect = g.Count(o => o.DirectionCorrect == false);
+                var pTotal = pCorrect + pIncorrect;
+                profiles.TryGetValue(g.Key, out var profile);
+                return new
+                {
+                    profile_name = profile.Name ?? "unknown",
+                    role = profile.Role ?? "unknown",
+                    total = g.Count(),
+                    correct = pCorrect,
+                    incorrect = pIncorrect,
+                    accuracy_pct = pTotal > 0 ? Math.Round(100.0 * pCorrect / pTotal, 1) : 0,
+                    avg_score = Math.Round(g.Average(o => o.OutcomeScore ?? 50), 1),
+                    avg_move_pct = Math.Round(g.Average(o => o.PercentMove ?? 0), 2),
+                    stop_hits = g.Count(o => o.StopHit == true),
+                    target_hits = g.Count(o => o.TargetHit == true),
+                };
+            })
+            .OrderByDescending(p => p.total)
+            .ToList();
+
+        var profileSummary = string.Join(" | ", profileGroups.Select(p =>
+            $"{p.profile_name} ({p.role}): {p.accuracy_pct}% accuracy ({p.correct}/{p.total})"));
+
+        var summaryText = $"{outcomes.Count} predictions evaluated since {since:yyyy-MM-dd}. " +
+                          $"Overall accuracy: {accuracy}% ({correct} correct, {incorrect} incorrect). " +
+                          $"Avg score: {avgScore}, avg move: {(avgMove >= 0 ? "+" : "")}{avgMove}%. " +
+                          $"Stop-loss hits: {stopHits}, target hits: {targetHits}. " +
+                          $"By profile: {profileSummary}";
+
+        var items = outcomes.Take(limit).Select(o =>
+        {
+            predMap.TryGetValue(o.PredictionId, out var pred);
+            profiles.TryGetValue(pred?.ProfileId ?? "", out var profile);
+            return new
+            {
+                ticker = pred?.Ticker ?? "unknown",
+                direction = pred?.PredictionType.ToString() ?? "unknown",
+                profile = profile.Name ?? "unknown",
+                direction_correct = o.DirectionCorrect,
+                percent_move = o.PercentMove,
+                outcome_score = o.OutcomeScore,
+                stop_hit = o.StopHit,
+                target_hit = o.TargetHit,
+                invalidation_hit = o.InvalidationHit,
+                entry_price = o.StartPrice,
+                close_price = o.ClosePrice,
+                evaluation_time = o.EvaluationTime.ToString("o"),
+            };
+        });
+
+        return Ok(new
+        {
+            tool_name = "get_prediction_outcomes",
+            as_of = Now(),
+            summary = summaryText,
+            data = new
+            {
+                period = period ?? "today",
+                since = since.ToString("o"),
+                total_evaluated = outcomes.Count,
+                correct,
+                incorrect,
+                accuracy_pct = accuracy,
+                avg_outcome_score = avgScore,
+                avg_percent_move = avgMove,
+                stop_loss_hits = stopHits,
+                target_hits = targetHits,
+                by_profile = profileGroups,
+                items,
+            },
+            warnings = new List<string>(),
+        });
+    }
+
     private static string Truncate(string? s, int max) =>
         s is null ? "" : s.Length <= max ? s : s[..max] + "...";
 }

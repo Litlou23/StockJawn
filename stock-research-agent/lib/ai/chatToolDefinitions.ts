@@ -36,6 +36,7 @@ RULES:
 17. You can view portfolio paper trading results — balance, P&L, open/closed positions, and risk management closures (get_portfolio_summary).
 18. You can query all open predictions across all runs, not just the latest scan (get_open_predictions). This shows stop/target/invalidation prices and age.
 19. You can check prediction risk management status — which predictions are near their stop or target, and which were recently closed by risk checks (get_prediction_risk_summary).
+20. You can view prediction evaluation results and accuracy stats broken down by prediction profile — overall and per-profile accuracy, correct vs incorrect, avg score, avg move, stop/target hits (get_prediction_outcomes). Supports period filters: today, yesterday, week, month. Always show the by_profile breakdown when discussing accuracy.
 
 RESPONSE FORMAT — JSON only, no markdown fences:
 {"message": string, "dataConfidence": "high"|"medium"|"low", "suggestedPrompts": string[], "riskWarnings": string[], "thesis"?: {"ticker": string, "setupType"?: string, "thesisSummary": string, "bullishCase"?: string, "bearishCase"?: string, "invalidationPoint"?: string, "expectedTimeframe"?: "1d"|"5d"|"20d"|"60d"}}
@@ -398,6 +399,26 @@ export const CHAT_TOOL_DEFINITIONS: ChatToolDefinition[] = [
         type: 'object',
         properties: {
           limit: { type: 'integer', description: 'Max items per category (default 20)' },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_prediction_outcomes',
+      description:
+        'Get prediction evaluation results with accuracy stats broken down by prediction profile. Shows overall and per-profile accuracy (correct vs incorrect, avg score, avg move, stop/target hits). Use when asked about "accuracy", "how did predictions do", "what percentage were correct", "outcomes today", "prediction results", "evaluation results", "which profile is best", "break down by profile", or "profile accuracy".',
+      parameters: {
+        type: 'object',
+        properties: {
+          period: {
+            type: 'string',
+            enum: ['today', 'yesterday', 'week', 'month'],
+            description: 'Time period to query (default: today)',
+          },
+          limit: { type: 'integer', description: 'Max individual results to show (default 20)' },
         },
         required: [],
       },

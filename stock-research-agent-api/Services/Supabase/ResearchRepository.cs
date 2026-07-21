@@ -30,6 +30,14 @@ public class ResearchRepository
         return _cachedChampionProfileId;
     }
 
+    public async Task<Dictionary<string, (string Name, string Role)>> GetAllProfilesAsync()
+    {
+        var rows = await _db.SelectAsync("prediction_profiles");
+        return rows.ToDictionary(
+            r => r["id"]?.ToString() ?? "",
+            r => (r["profile_name"]?.ToString() ?? "unknown", r["role"]?.ToString() ?? "unknown"));
+    }
+
     // -----------------------------------------------------------------------
     // Research Runs
     // -----------------------------------------------------------------------
@@ -380,13 +388,22 @@ public class ResearchRepository
 
     /// <summary>
     /// Get outcomes only for predictions belonging to a specific profile.
-    /// Fetches the profile's prediction IDs first, then filters outcomes.
+    /// Fetches evaluated predictions first (not just recent by creation date),
+    /// then looks up their outcomes.
     /// </summary>
     public async Task<List<PredictionOutcome>> GetOutcomesForProfileAsync(string profileId, int limit = 500)
     {
-        var predictions = await GetRecentPredictionsAsync(limit, profileId: profileId);
+        var predictions = await GetRecentPredictionsAsync(limit, status: "evaluated", profileId: profileId);
         if (predictions.Count == 0) return [];
         return await GetOutcomesForPredictionsAsync(predictions.Select(p => p.Id).ToList());
+    }
+
+    public async Task<List<PredictionOutcome>> GetOutcomesSinceAsync(DateTimeOffset since, int limit = 500)
+    {
+        var rows = await _db.SelectAsync("prediction_outcomes",
+            filter: $"evaluation_time=gte.{since:o}",
+            order: "evaluation_time.desc", limit: limit);
+        return rows.Select(MapOutcome).ToList();
     }
 
     public async Task<List<PredictionOutcome>> GetOutcomesForPredictionsAsync(List<string> predictionIds)

@@ -283,7 +283,10 @@ public class LearningEngine
 
     public async Task<int> ExtractSignalObservationsAsync(List<string>? errors = null, string? profileId = null)
     {
-        var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+        // Fetch evaluated predictions — these are the ones with outcomes to learn from.
+        // Previously fetched by created_at.desc without status filter, which returned mostly
+        // open predictions and missed the bulk of evaluated data.
+        var predictions = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
         var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
         var observations = new List<object>();
@@ -848,7 +851,7 @@ public class LearningEngine
 
     public async Task<ConfidenceAnalysis> ComputeConfidenceCalibrationAsync(string? profileId = null)
     {
-        var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+        var predictions = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
         var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
         var buckets = new (string Range, int Min, int Max)[]
@@ -1344,7 +1347,7 @@ public class LearningEngine
 
         try
         {
-            var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+            var predictions = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
             var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
             // Split into directional vs neutral predictions that have outcomes
@@ -1515,7 +1518,7 @@ public class LearningEngine
     {
         try
         {
-            var predictions = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+            var predictions = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
             var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
 
             // Group evaluated predictions by their setup fingerprint
@@ -1675,8 +1678,8 @@ public class LearningEngine
             var superseded = await _repo.GetSupersededPredictionsAsync(200, profileId);
             if (superseded.Count == 0) return 0;
 
-            // Get all predictions (superseded + their replacements) for unified outcome lookup
-            var allPreds = await _repo.GetRecentPredictionsAsync(500, profileId: profileId);
+            // Get evaluated predictions (superseded + their replacements) for unified outcome lookup
+            var allPreds = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
             var outcomeMap = await BuildUnifiedOutcomeMapAsync(allPreds, profileId);
 
             var records = new List<object>();
@@ -2956,11 +2959,14 @@ public class LearningEngine
             return null;
         }
 
-        var predictions = await _repo.GetRecentPredictionsAsync(200, profileId: profileId);
-        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
+        // Fetch evaluated predictions (the bulk of learning data) and open predictions (for pending count)
+        var evaluatedPredictions = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
+        var openPredictions = await _repo.GetRecentPredictionsAsync(200, status: "open", profileId: profileId);
+        var predictions = evaluatedPredictions.Concat(openPredictions).ToList();
+        var outcomeMap = await BuildUnifiedOutcomeMapAsync(evaluatedPredictions, profileId);
 
         // Include all evaluated predictions: directional and neutral
-        var evaluated = predictions
+        var evaluated = evaluatedPredictions
             .Where(p => outcomeMap.ContainsKey(p.Id) && ResolveCorrectness(p, outcomeMap[p.Id]) is not null)
             .ToList();
 
@@ -2971,7 +2977,7 @@ public class LearningEngine
         var newPredictions = predictions.Where(p => p.CreatedAt >= lastReportDate).ToList();
         var newByType = newPredictions.GroupBy(p => p.PredictionType)
             .Select(g => $"{g.Key}: {g.Count()}").ToList();
-        var pendingEval = predictions.Count(p => !outcomeMap.ContainsKey(p.Id) && p.Status == "open");
+        var pendingEval = openPredictions.Count;
         var bullPreds = evaluated.Where(p => p.PredictionType == PredictionType.bullish).ToList();
         var bearPreds = evaluated.Where(p => p.PredictionType == PredictionType.bearish).ToList();
         var neutralPreds = evaluated.Where(p => !PredictionCategoryHelper.IsDirectional(p.PredictionType)).ToList();
@@ -3269,7 +3275,7 @@ INSTRUCTIONS:
     public async Task<List<object>> GenerateLearningInsightsAsync(string? profileId = null)
     {
         var perfStats = await _repo.GetAllSignalPerformanceAsync();
-        var predictions = await _repo.GetRecentPredictionsAsync(100, profileId: profileId);
+        var predictions = await _repo.GetRecentPredictionsAsync(300, status: "evaluated", profileId: profileId);
         // Unified outcome map not needed here — outcomeMap built after perfStats section
         var insights = new List<object>();
 
