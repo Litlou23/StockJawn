@@ -235,6 +235,10 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<PortfolioChallengeRepository>();
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 
+    // Pre-warm the portfolio dashboard cache on startup so the first
+    // page load doesn't timeout waiting for live quote fetches.
+    builder.Services.AddHostedService<DashboardWarmupService>();
+
     // In-memory request counter — recorded on every request, displayed
     // on the dashboard with a "per-instance, resets on restart" caveat.
     builder.Services.AddSingleton<RequestMetrics>();

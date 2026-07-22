@@ -22,14 +22,14 @@ public class LearningGuardrailOptions
     public int MinPatternEvidence { get; set; } = 10;
 
     // ── Maximum adjustment per cycle ─────────────────────────────────
-    /// <summary>Max daily weight movement (fraction). Default 1%.</summary>
-    public double MaxDailyMovement { get; set; } = 0.01;
+    /// <summary>Max daily weight movement (fraction). Default 5%.</summary>
+    public double MaxDailyMovement { get; set; } = 0.05;
 
-    /// <summary>Max cumulative adjustment from base (fraction). Default ±20%.</summary>
-    public double MaxCumulativeAdjustment { get; set; } = 0.20;
+    /// <summary>Max cumulative adjustment from base (fraction). Default ±50%.</summary>
+    public double MaxCumulativeAdjustment { get; set; } = 0.50;
 
-    /// <summary>Max daily calibration factor movement. Default 0.01.</summary>
-    public double MaxCalibrationMovement { get; set; } = 0.01;
+    /// <summary>Max daily calibration factor movement. Default 0.02.</summary>
+    public double MaxCalibrationMovement { get; set; } = 0.02;
 
     /// <summary>Max daily risk-cap-boost movement (points). Default 2.</summary>
     public double MaxCapBoostMovement { get; set; } = 2.0;

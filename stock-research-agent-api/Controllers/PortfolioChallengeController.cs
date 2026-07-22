@@ -29,7 +29,8 @@ namespace StockResearchAgent.Api.Controllers;
 public class PortfolioChallengeController : ControllerBase
 {
     // ── Dashboard cache: serves cached data, refreshes ~4× during trading day ──
-    private static readonly ConcurrentDictionary<string, (PortfolioDashboard Data, DateTimeOffset FetchedAt)> DashboardCache = new();
+    // Internal so DashboardWarmupService can pre-warm on startup.
+    internal static readonly ConcurrentDictionary<string, (PortfolioDashboard Data, DateTimeOffset FetchedAt)> DashboardCache = new();
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(90);
 
     private readonly PortfolioBalanceEngine _engine;
