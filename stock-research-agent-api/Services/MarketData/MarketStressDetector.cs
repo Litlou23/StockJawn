@@ -141,26 +141,9 @@ public class MarketStressDetector
         }
 
         // ── Score each indicator (0 = normal, 1 = elevated, 2 = extreme) ──
-        var vixScore = vix switch
-        {
-            >= var v when v >= vixExtreme => 2,
-            >= var v when v >= vixElevated => 1,
-            _ => 0
-        };
-
-        var spyScore = spyChange switch
-        {
-            <= var s when s <= spyDropExtreme => 2,
-            <= var s when s <= spyDropElevated => 1,
-            _ => 0
-        };
-
-        var oilScore = oilChange switch
-        {
-            >= var o when o >= oilSpikeExtreme => 2,
-            >= var o when o >= oilSpikeElevated => 1,
-            _ => 0
-        };
+        var vixScore = vix >= vixExtreme ? 2 : vix >= vixElevated ? 1 : 0;
+        var spyScore = spyChange <= spyDropExtreme ? 2 : spyChange <= spyDropElevated ? 1 : 0;
+        var oilScore = oilChange >= oilSpikeExtreme ? 2 : oilChange >= oilSpikeElevated ? 1 : 0;
 
         // Combined stress score: max of individual scores, but bump to extreme if 2+ are elevated
         var scores = new[] { vixScore, spyScore, oilScore };
