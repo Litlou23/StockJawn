@@ -92,12 +92,12 @@
 | **ID** | EXP-005 |
 | **Hypothesis** | The system currently generates predictions across the full confidence range. Setting a minimum confidence threshold for trade entry will improve win rate and expected value, even though it reduces trade volume. The optimal threshold is likely between 65% and 75%. |
 | **Motivation** | Low-confidence predictions dilute portfolio returns. If the system is poorly calibrated (e.g., 60%-confidence predictions only win 45% of the time), then filtering them out directly improves performance. This experiment finds the right cutoff. |
-| **Status** | `proposed` |
-| **Start Date** | — |
+| **Status** | `completed` |
+| **Start Date** | 2026-07 |
 | **Success Metrics** | Using historical prediction_outcomes data, simulate portfolio performance at thresholds of 50%, 55%, 60%, 65%, 70%, 75%, 80%. Measure: trade count, win rate, average return, max drawdown, and terminal portfolio value for each threshold. |
-| **Results** | — |
-| **Lessons Learned** | — |
-| **Next Steps** | Can be run as a backtest against existing data — no code changes required to begin. |
+| **Results** | Analyzed 564 directional predictions. **Confidence is inversely correlated with returns.** ≥55 threshold produces negative cumulative returns. ≥35 is the optimal threshold (+219% cumulative return, 367 trades). ≥45 still positive (+95%, 267 trades). ≥65 deeply negative. The hypothesis was wrong — higher confidence does NOT mean better outcomes. The scoring engine's confidence metric is miscalibrated. |
+| **Lessons Learned** | The confidence score reflects scoring engine conviction, not prediction quality. High-confidence predictions tend to be momentum-chasing (strong trend + strong volume) which are already priced in. Lower-confidence predictions with mixed signals capture reversals and contrarian setups that produce better returns. This is a fundamental calibration problem — confidence should track actual win rate. |
+| **Next Steps** | Set `min_confidence_threshold` to 35 (implemented). Future work: recalibrate confidence scoring so the metric correlates positively with actual accuracy. Consider separate confidence calibration for bullish vs bearish predictions. |
 
 ---
 

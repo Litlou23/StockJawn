@@ -21,6 +21,7 @@ public class PortfolioLifecycleService
     private readonly PaperStockCandidateRepository _candidateRepo;
     private readonly ResearchRepository _researchRepo;
     private readonly MarketDataService _marketData;
+    private readonly MarketStressDetector _stressDetector;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -29,6 +30,7 @@ public class PortfolioLifecycleService
         PaperStockCandidateRepository candidateRepo,
         ResearchRepository researchRepo,
         MarketDataService marketData,
+        MarketStressDetector stressDetector,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -36,6 +38,7 @@ public class PortfolioLifecycleService
         _candidateRepo = candidateRepo;
         _researchRepo = researchRepo;
         _marketData = marketData;
+        _stressDetector = stressDetector;
         _logger = logger;
     }
 
@@ -53,23 +56,85 @@ public class PortfolioLifecycleService
         if (activeChallenges.Count == 0)
             return 0;
 
+        // ── Load configurable guardrails from scoring_weight_overrides ──
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var minConfidence = (int)weights.GetValueOrDefault("min_confidence_threshold", 35);
+        var maxPositions = (int)weights.GetValueOrDefault("max_open_positions", 8);
+        var maxDrawdownPct = weights.GetValueOrDefault("max_drawdown_percent", 25);
+
         var eligible = actionableCandidates
             .Where(c => c.IsActionable
                 && c.Status == PaperStockStatus.open
                 && c.EntryPrice is > 0
-                && PredictionCategoryHelper.IsDirectional(c.PredictionType))
+                && PredictionCategoryHelper.IsDirectional(c.PredictionType)
+                && c.ConfidenceScore >= minConfidence) // EXP-005: filter low-confidence noise
             .ToList();
+
+        var filteredByConfidence = actionableCandidates.Count(c => c.IsActionable
+            && c.Status == PaperStockStatus.open
+            && c.EntryPrice is > 0
+            && PredictionCategoryHelper.IsDirectional(c.PredictionType)
+            && c.ConfidenceScore < minConfidence);
+
+        if (filteredByConfidence > 0)
+            _logger.LogInformation(
+                "[portfolio] Filtered out {Count} candidates below confidence threshold {Min}",
+                filteredByConfidence, minConfidence);
 
         foreach (var challenge in activeChallenges)
         {
+            // ── Drawdown circuit breaker ──
+            // If portfolio has dropped more than maxDrawdownPct from its peak,
+            // pause all new trades until recovery
+            var peakBalance = Math.Max(challenge.StartingBalance, challenge.CurrentBalance);
+            // Use highest historical balance if tracked, otherwise max of starting and current
+            if (challenge.CurrentBalance > 0 && peakBalance > 0)
+            {
+                var drawdownPct = (peakBalance - challenge.CurrentBalance) / peakBalance * 100;
+                if (drawdownPct >= maxDrawdownPct)
+                {
+                    _logger.LogWarning(
+                        "[portfolio] CIRCUIT BREAKER: challenge {Name} drawdown {Dd:F1}% >= {Max}% limit. " +
+                        "Peak ${Peak:F2}, current ${Current:F2}. Pausing new trades.",
+                        challenge.Name, drawdownPct, maxDrawdownPct, peakBalance, challenge.CurrentBalance);
+                    continue;
+                }
+            }
+
+            // ── Max open positions check ──
+            var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
+            var currentOpenCount = openPositions.Count;
+
+            if (currentOpenCount >= maxPositions)
+            {
+                _logger.LogInformation(
+                    "[portfolio] Challenge {Name} at position limit ({Count}/{Max}). Skipping new entries.",
+                    challenge.Name, currentOpenCount, maxPositions);
+                continue;
+            }
+
+            var slotsAvailable = maxPositions - currentOpenCount;
+            var opened = 0;
+
             foreach (var c in eligible)
             {
+                if (opened >= slotsAvailable) break;
+
                 // ── Filter candidates by challenge PortfolioMode ──
                 var (allowed, assetType) = FilterByPortfolioMode(challenge, c);
                 if (!allowed)
                 {
                     _logger.LogDebug("[portfolio] Skipping {Ticker} for challenge {Challenge} — mode {Mode} rejects this candidate (options={QualifiesForOptions}, tf={Timeframe})",
                         c.Ticker, challenge.Name, challenge.PortfolioMode, c.QualifiesForOptions, c.Timeframe);
+                    continue;
+                }
+
+                // Skip tickers we already hold
+                if (openPositions.Any(p => p.Ticker == c.Ticker))
+                {
+                    _logger.LogDebug("[portfolio] Skipping {Ticker} — already held in challenge {Challenge}",
+                        c.Ticker, challenge.Name);
                     continue;
                 }
 
@@ -83,7 +148,11 @@ public class PortfolioLifecycleService
                         assetType,
                         $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}");
 
-                    if (pos is not null) portfolioPositionsOpened++;
+                    if (pos is not null)
+                    {
+                        portfolioPositionsOpened++;
+                        opened++;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -199,25 +268,44 @@ public class PortfolioLifecycleService
         var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
         var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
 
+        // Market stress: widen stop-losses during volatile conditions
+        // so temporary drops don't trigger premature exits
+        var stopMultiplier = 1.0;
+        try
+        {
+            var stress = await _stressDetector.EvaluateAsync();
+            if (stress.IsStressed)
+            {
+                stopMultiplier = stress.StopLossMultiplier;
+                _logger.LogInformation(
+                    "[risk-mgmt] Market stress {Level} — widening stop-losses by {Mult:F2}x",
+                    stress.Level, stopMultiplier);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[risk-mgmt] Market stress check failed, using normal stops");
+        }
+
         var thresholds = new Dictionary<RiskTier, RiskThresholds>
         {
             [RiskTier.Day] = new()
             {
-                StopLoss = weights.GetValueOrDefault("risk_sl_day", 0.05),
+                StopLoss = weights.GetValueOrDefault("risk_sl_day", 0.05) * stopMultiplier,
                 TakeProfit = weights.GetValueOrDefault("risk_tp_day", 0.08),
-                TrailActivate = 0, // no trailing stop for day trades
-                TrailPercent = 0,
+                TrailActivate = weights.GetValueOrDefault("risk_trail_activate_day", 0.04),
+                TrailPercent = weights.GetValueOrDefault("risk_trail_pct_day", 0.025),
             },
             [RiskTier.Swing] = new()
             {
-                StopLoss = weights.GetValueOrDefault("risk_sl_swing", 0.08),
+                StopLoss = weights.GetValueOrDefault("risk_sl_swing", 0.08) * stopMultiplier,
                 TakeProfit = weights.GetValueOrDefault("risk_tp_swing", 0.15),
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_swing", 0.10),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_swing", 0.05),
             },
             [RiskTier.LongTerm] = new()
             {
-                StopLoss = weights.GetValueOrDefault("risk_sl_longterm", 0.15),
+                StopLoss = weights.GetValueOrDefault("risk_sl_longterm", 0.15) * stopMultiplier,
                 TakeProfit = 0, // no fixed take-profit for long-term — trailing stop handles it
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_longterm", 0.20),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_longterm", 0.10),

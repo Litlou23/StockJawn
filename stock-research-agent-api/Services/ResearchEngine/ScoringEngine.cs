@@ -523,7 +523,7 @@ public class ScoringEngine : IScoringEngine
         return (confidence, tier, reasons);
     }
 
-    private static (string WinningDirection, string PredictionType) DeterminePredictionType(
+    internal static (string WinningDirection, string PredictionType) DeterminePredictionType(
         double bullishScore, double bearishScore, MarketSnapshot snapshot, TechnicalIndicators ind,
         Dictionary<string, double>? weights = null)
     {

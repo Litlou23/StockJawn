@@ -232,6 +232,8 @@ builder.Services.AddSingleton<OptionsDataService>();
     // Portfolio Challenge — simulated portfolio growth tracking.
     // Portfolio AI is separate from the Prediction Engine: predictions
     // find opportunities, Portfolio AI decides whether/how much to invest.
+    builder.Services.AddSingleton<MarketStressDetector>();
+
     builder.Services.AddSingleton<PortfolioChallengeRepository>();
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 

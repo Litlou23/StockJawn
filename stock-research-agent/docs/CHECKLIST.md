@@ -16,17 +16,17 @@ These items block the portfolio growth objective. Without them, the system canno
 - [ ] **Portfolio equity curve** — Visualize portfolio value over time. Infrastructure complete (tables, balance engine, orchestrator integration). Remaining: periodic `portfolio_snapshots` table for historical equity curve data, frontend chart. *(Performance Analytics / Portfolio AI)*
 - [ ] **Budget-aware option selection** — Filter options contracts the portfolio can actually afford. A $100 account cannot buy a $500 premium contract. *(Options Intelligence)*
 - [x] **Expected value calculations** — Every prediction computes `(probability × potential gain) - ((1 - probability) × potential loss)`. Directional rankings sort by EV instead of confidence alone. *(Prediction Engine)*
-- [ ] **Concurrent position limits** — Prevent the portfolio from going all-in on correlated trades. *(Portfolio AI)*
+- [x] **Concurrent position limits** — Max 8 open positions with duplicate ticker prevention. Implemented in `PortfolioLifecycleService.OpenPositionsForCandidatesAsync`. Config via `scoring_weight_overrides`. *(Portfolio AI)*
 
 ## High Priority
 
 These items significantly improve prediction quality, learning speed, or decision-making.
 
-- [ ] **Confidence calibration analysis** — Compare predicted confidence to actual accuracy across buckets. If 80%-confidence predictions only win 55% of the time, the system is overconfident. *(Prediction Engine)*
+- [x] **Confidence calibration analysis** — EXP-005 backtest showed confidence is inversely correlated with returns. ≥35 threshold is optimal (+219% cumulative, 367 trades). Min confidence floor set to 35. *(Prediction Engine)*
 - [ ] **Improve bearish prediction quality** — Bearish predictions have historically been less reliable. Investigate indicator weights, sample balance, and scoring bias. *(Prediction Engine)*
 - [ ] **Create research_signals migration** — Write Supabase migration to create `research_signals` and `research_scoring_weights` tables. Backend code is ready but needs the table. *(Research Engine)*
-- [ ] **Stop-loss / take-profit automation** — Paper trades should have predefined exit criteria rather than relying on manual evaluation. *(Paper Trading)*
-- [ ] **Drawdown analysis** — Track maximum drawdown, consecutive losses, and recovery time. Critical for risk management. *(Performance Analytics)*
+- [x] **Stop-loss / take-profit automation** — Trailing stops added for day trades (activate at +4%, trail 2.5%). Fixed take-profits reset from learning-inflated values. Config-driven via `scoring_weight_overrides`. *(Paper Trading)*
+- [x] **Drawdown analysis** — 25% drawdown circuit breaker implemented in `OpenPositionsForCandidatesAsync`. Compares current balance to peak (StartingBalance vs CurrentBalance). *(Performance Analytics)*
 - [ ] **Market regime detection** — Bull, bear, and sideways markets demand different strategies. The scoring engine should adjust weights based on current regime. *(Learning Engine)*
 - [ ] **Feature importance scoring** — Identify which scoring buckets and indicators actually predict outcomes. Drop features that add noise. *(Learning Engine)*
 - [ ] **P&L by signal type** — Break down portfolio performance by which signals drove each trade. *(Performance Analytics)*
@@ -43,7 +43,7 @@ These items improve the system's capabilities and prepare it for future growth.
 - [ ] **Liquidity scoring** — Filter out illiquid tickers and options that would be difficult to trade at reasonable spreads. *(Market Intelligence)*
 - [ ] **Congressional trades direct parsing** — Migrate House/Senate disclosure PDF parsing from frontend to `CongressSignalProvider` so backend doesn't depend on frontend API. *(Research Engine)*
 - [ ] **Spread strategy support** — Support vertical spreads, iron condors, and other multi-leg strategies in the options simulator. *(Options Intelligence)*
-- [ ] **Confidence threshold optimization** — Experiment with minimum confidence thresholds for trade entry. See [EXPERIMENTS.md](EXPERIMENTS.md) EXP-005. *(Prediction Engine)*
+- [x] **Confidence threshold optimization** — EXP-005 completed. Optimal threshold is ≥35 (not 65-75 as hypothesized). Implemented as `min_confidence_threshold` guardrail. *(Prediction Engine)*
 
 ## Low Priority
 
@@ -67,6 +67,11 @@ Move items here as they ship, with the date and any relevant notes.
 - [x] **2026-07 — Congress Intelligence observability page** — `/congress-trades` page rewritten as pipeline observability dashboard. See [congress-observability-page-design.md](congress-observability-page-design.md).
 - [x] **2026-07 — Research Signal Architecture backend** — `IResearchSignalProvider`, `ResearchSignalService`, `ResearchSignalRepository`, `CongressSignalProvider` implemented. Research signal bucket added to `ScoringEngine` and `DynamicWatchlistService`. Learning engine updated with `research_` prefix. Wired into weekly research job pipeline.
 - [x] **2026-07 — Frontend research signal display** — `ResearchSignals.tsx` component with badges + detail panel. Integrated into predictions page (inline badges + expanded panel) and watchlist page (card badges + score breakdown + detail modal). Backend `/api/research/signals` endpoint + frontend proxy route.
+- [x] **2026-07 — Market stress integration** — `MarketStressDetector` checks VIX, SPY, oil to detect market stress. Applies bearish bias, widens stop-losses, and floors bullish confidence during stress. Thread-safe with semaphore locking.
+- [x] **2026-07 — Portfolio guardrails (4 quick wins)** — Min confidence threshold (35), max open positions (8), 25% drawdown circuit breaker, duplicate ticker prevention. All config-driven via `scoring_weight_overrides`.
+- [x] **2026-07 — Trailing stops for day trades** — Config-driven trailing stop activation (+4%) and trail percentage (2.5%) for day-trade risk tier. Take-profits reset from learning-inflated values.
+- [x] **2026-07 — EXP-005 confidence threshold backtest** — Analyzed 564 predictions. Confidence inversely correlated with returns. ≥35 optimal (+219% cumulative). ≥55 produces negative returns.
+- [x] **2026-07 — Learning engine weight tuning** — Reduced learning (0.30) and volume (0.40) weights, increased market_context (1.45), widened day stop-loss (0.09) based on correlation analysis.
 - [x] **2026-07 — Portfolio Challenge infrastructure (Phase 1)** — `portfolio_challenges` and `portfolio_positions` Supabase tables, `PortfolioChallengeRepository`, `PortfolioBalanceEngine` service, `PortfolioChallengeController` with dashboard summary API. Default "Small Account Challenge" ($100→$1,000). Supports multiple challenges with different risk profiles and portfolio modes. Balance engine updates cash, P&L, and statistics on every position open/close.
 - [x] **2026-07 — Portfolio orchestrator integration (Phase 2)** — `DynamicPickOrchestrator` auto-opens portfolio positions for actionable candidates during morning picks and auto-closes during EOD review. Basic fixed-fraction position sizing (5%/10%/20% by risk profile). Portfolio summary embedded in dynamic dashboard. Next.js frontend proxy routes for `/api/portfolio/*`.
 

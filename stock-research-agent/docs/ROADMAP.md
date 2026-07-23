@@ -115,11 +115,11 @@ Intelligent capital allocation and risk management.
 | **Orchestrator integration** | Active — `DynamicPickOrchestrator` auto-opens portfolio positions for actionable candidates during morning picks, auto-closes during EOD review |
 | **Frontend proxy routes** | Active — Next.js proxy routes for `/api/portfolio/summary`, `/api/portfolio/challenges`, `/api/portfolio/positions` |
 | **Risk budgeting** | Not started |
-| **Drawdown management** | Not started |
+| **Drawdown management** | Active — 25% drawdown circuit breaker in `OpenPositionsForCandidatesAsync`. Pauses new trades when portfolio drops 25% from peak. |
 | **Correlation-aware allocation** | Not started |
 | **Portfolio rebalancing** | Not started |
 
-**Remaining work:** Kelly criterion or volatility-based position sizing, risk budgeting, drawdown management, correlation-aware allocation, portfolio equity curve snapshots, concurrent position limits.
+**Remaining work:** Kelly criterion or volatility-based position sizing, risk budgeting, correlation-aware allocation, portfolio equity curve snapshots.
 
 **Future vision:** The system knows its current balance, maximum acceptable drawdown, position correlations, and sizes every trade to maximize expected portfolio growth (Kelly criterion or similar).
 

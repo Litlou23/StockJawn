@@ -43,6 +43,7 @@ public class PredictionGenerator
     private readonly IHistoricalProfileBuilder _profileBuilder;
     private readonly VolatilityOpportunityEngine _voe;
     private readonly PredictionProfileRepository _profileRepo;
+    private readonly MarketStressDetector _stressDetector;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
@@ -60,6 +61,7 @@ public class PredictionGenerator
         IHistoricalProfileBuilder profileBuilder,
         VolatilityOpportunityEngine voe,
         PredictionProfileRepository profileRepo,
+        MarketStressDetector stressDetector,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
@@ -75,6 +77,7 @@ public class PredictionGenerator
         _profileBuilder = profileBuilder;
         _voe = voe;
         _profileRepo = profileRepo;
+        _stressDetector = stressDetector;
         _logger = logger;
         _ensembleEnabled = string.Equals(
             configuration["ENSEMBLE_SCORING_ENABLED"], "true",
@@ -310,6 +313,59 @@ public class PredictionGenerator
         var winningDirection = scoring.WinningDirection;
         var directionMargin = scoring.DirectionMargin;
         var allSignals = scoring.Signals;
+
+        // ── Market stress adjustments ──────────────────────────────────
+        // When the market is stressed (high VIX, SPY dropping, oil spiking):
+        //   1. Apply bearish bias and re-evaluate direction (offensive — capitalize on downturn)
+        //   2. Enforce confidence floor on BULLISH predictions only (defensive — skip weak longs)
+        MarketStressResult? stressResult = null;
+        try
+        {
+            stressResult = await _stressDetector.EvaluateAsync();
+            if (stressResult.IsStressed)
+            {
+                // Apply bearish bias and re-determine direction so it actually shifts predictions
+                if (stressResult.BearishBias > 0)
+                {
+                    bearishScore += stressResult.BearishBias;
+                    var (newDirection, newType) = ScoringEngine.DeterminePredictionType(
+                        bullishScore, bearishScore, snapshot, indicators, weights);
+
+                    if (newDirection != winningDirection || newType != predType)
+                    {
+                        _logger.LogInformation(
+                            "[prediction] {Ticker}: stress bias shifted {OldType}→{NewType} (bearish +{Bias:F1})",
+                            ticker, predType, newType, stressResult.BearishBias);
+                        winningDirection = newDirection;
+                        predType = newType;
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "[prediction] {Ticker}: stress bias +{Bias:F1} applied, direction unchanged ({Type})",
+                            ticker, stressResult.BearishBias, predType);
+                    }
+
+                    directionMargin = bullishScore - bearishScore;
+                    totalScore = Math.Max(bullishScore, bearishScore);
+                }
+
+                // Confidence floor — only block BULLISH predictions during stress.
+                // Bearish predictions flow through (that's the offensive strategy).
+                if (stressResult.ConfidenceFloor > 0 && confidence < stressResult.ConfidenceFloor
+                    && predType == "bullish")
+                {
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: bullish confidence {Conf} below stress floor {Floor} — downgrading to watch_only",
+                        ticker, confidence, stressResult.ConfidenceFloor);
+                    predType = "watch_only";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Market stress check failed for {Ticker}", ticker);
+        }
 
         if (confidence < 5 && predType == "watch_only") return (null, []);
 
