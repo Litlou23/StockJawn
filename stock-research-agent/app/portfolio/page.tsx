@@ -203,9 +203,9 @@ function plBg(n: number): string {
 const RISK_PROFILES = ['conservative', 'moderate', 'aggressive'] as const;
 const PORTFOLIO_MODES = ['swing_trading', 'day_trading', 'options_only', 'stock_only', 'mixed'] as const;
 const SIZING_MAP: Record<string, string> = {
-  conservative: '5%',
-  moderate: '10%',
-  aggressive: '20%',
+  conservative: '2–8%',
+  moderate: '2–15%',
+  aggressive: '2–20%',
 };
 
 // ---------------------------------------------------------------------------
@@ -286,9 +286,11 @@ async function closePosition(positionId: string, exitPrice: number, reason: stri
 // ---------------------------------------------------------------------------
 
 function EquityChart({ points, startingBalance }: { points: EquityPoint[]; startingBalance: number }) {
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
   if (points.length < 2) return <p className="text-xs text-zinc-500">Not enough data for equity curve.</p>;
 
-  const W = 700, H = 160, PAD_L = 50, PAD_R = 10, PAD_T = 10, PAD_B = 25;
+  const W = 700, H = 180, PAD_L = 50, PAD_R = 10, PAD_T = 20, PAD_B = 25;
   const chartW = W - PAD_L - PAD_R;
   const chartH = H - PAD_T - PAD_B;
 
@@ -314,8 +316,21 @@ function EquityChart({ points, startingBalance }: { points: EquityPoint[]; start
   // Starting balance reference line
   const startY = yScale(startingBalance);
 
+  // X-axis: show up to 5 evenly spaced date labels
+  const dateIndices: number[] = [];
+  const numLabels = Math.min(5, points.length);
+  for (let i = 0; i < numLabels; i++) {
+    dateIndices.push(Math.round((i / (numLabels - 1)) * (points.length - 1)));
+  }
+
+  // Hover tooltip
+  const hp = hoverIdx !== null ? points[hoverIdx] : null;
+  const hpChange = hp ? hp.balance - startingBalance : 0;
+  const hpPct = hp ? ((hpChange / startingBalance) * 100) : 0;
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet"
+      onMouseLeave={() => setHoverIdx(null)}>
       {/* Grid */}
       {yTicks.map((v, i) => (
         <g key={i}>
@@ -330,19 +345,55 @@ function EquityChart({ points, startingBalance }: { points: EquityPoint[]; start
       <path d={areaD} fill={fillColor} />
       {/* Line */}
       <path d={pathD} fill="none" stroke={lineColor} strokeWidth={1.5} strokeLinejoin="round" />
-      {/* Trade dots */}
+      {/* Data point dots — show for snapshot data */}
       {points.map((p, i) => {
-        if (i === 0 || i === points.length - 1) return null;
-        const isPl = p.tradeLabel?.includes('+');
+        if (i === 0 || i === points.length - 1) return null; // start + current dot handled separately
+        const isNow = p.tradeLabel === 'Now';
+        const hasPositions = p.tradeLabel?.includes('positions');
+        const isTradeEvent = p.tradeLabel && !hasPositions && !isNow;
+        const dotColor = isTradeEvent
+          ? (p.tradeLabel?.includes('+') ? '#22c55e' : '#ef4444')
+          : (p.balance >= startingBalance ? '#22c55e40' : '#ef444440');
+        const dotR = isTradeEvent ? 2.5 : (hoverIdx === i ? 3 : 1.5);
         return (
-          <circle key={i} cx={xScale(i)} cy={yScale(p.balance)} r={2.5}
-            fill={isPl ? '#22c55e' : '#ef4444'} stroke="#09090b" strokeWidth={0.5} />
+          <circle key={i} cx={xScale(i)} cy={yScale(p.balance)} r={dotR}
+            fill={isTradeEvent ? dotColor : 'transparent'} stroke={dotColor} strokeWidth={isTradeEvent ? 0.5 : 1}
+            style={{ cursor: 'pointer' }} />
         );
       })}
       {/* Current value dot */}
       <circle cx={xScale(points.length - 1)} cy={yScale(lastBal)} r={3.5} fill={lineColor} stroke="#09090b" strokeWidth={1} />
+      {/* Invisible hover hit areas */}
+      {points.map((_p, i) => (
+        <rect key={`hit-${i}`} x={xScale(i) - (chartW / points.length / 2)} y={PAD_T} width={chartW / points.length} height={chartH}
+          fill="transparent" style={{ cursor: 'crosshair' }}
+          onMouseEnter={() => setHoverIdx(i)} />
+      ))}
+      {/* Hover crosshair + tooltip */}
+      {hoverIdx !== null && hp && (
+        <g>
+          <line x1={xScale(hoverIdx)} x2={xScale(hoverIdx)} y1={PAD_T} y2={PAD_T + chartH}
+            stroke="#52525b" strokeWidth={0.5} strokeDasharray="2,2" />
+          <circle cx={xScale(hoverIdx)} cy={yScale(hp.balance)} r={3.5}
+            fill={hp.balance >= startingBalance ? '#22c55e' : '#ef4444'} stroke="#fafafa" strokeWidth={1} />
+          {/* Tooltip background */}
+          {(() => {
+            const tx = Math.min(Math.max(xScale(hoverIdx), PAD_L + 70), W - PAD_R - 70);
+            return (
+              <g>
+                <rect x={tx - 65} y={2} width={130} height={16} rx={3} fill="#18181b" stroke="#3f3f46" strokeWidth={0.5} />
+                <text x={tx} y={13} fill="#fafafa" fontSize="7.5" textAnchor="middle" fontFamily="monospace">
+                  {new Date(hp.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  {' · $'}{hp.balance.toFixed(2)}
+                  {' · '}{hpChange >= 0 ? '+' : ''}{hpPct.toFixed(1)}%
+                </text>
+              </g>
+            );
+          })()}
+        </g>
+      )}
       {/* X-axis dates */}
-      {[0, Math.floor(points.length / 2), points.length - 1].map(i => (
+      {dateIndices.map(i => (
         <text key={i} x={xScale(i)} y={H - 3} fill="#52525b" fontSize="7" textAnchor="middle">
           {new Date(points[i].date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
         </text>
@@ -732,7 +783,7 @@ export default function PortfolioPage() {
         <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-zinc-100">Equity Curve</h2>
-            <span className="text-[10px] text-zinc-500">{dashboard.equityCurve.length - 1} trades</span>
+            <span className="text-[10px] text-zinc-500">{dashboard.equityCurve.length} data points</span>
           </div>
           <div className="mt-2">
             <EquityChart points={dashboard.equityCurve} startingBalance={summary.currentBalance - summary.currentReturn} />

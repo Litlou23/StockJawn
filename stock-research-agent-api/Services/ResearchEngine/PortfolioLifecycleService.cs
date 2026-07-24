@@ -63,6 +63,16 @@ public class PortfolioLifecycleService
         var maxPositions = (int)weights.GetValueOrDefault("max_open_positions", 8);
         var maxDrawdownPct = weights.GetValueOrDefault("max_drawdown_percent", 25);
 
+        // ── Position sizing config ──
+        var sizingConfig = new PortfolioBalanceEngine.PositionSizingConfig(
+            MinFraction: weights.GetValueOrDefault("sizing_min_fraction", 0.02),
+            MaxFraction: weights.GetValueOrDefault("sizing_max_fraction", 0.20),
+            ConfidenceFloor: weights.GetValueOrDefault("sizing_confidence_floor", 35),
+            ConfidenceCeiling: weights.GetValueOrDefault("sizing_confidence_ceiling", 85),
+            EvBonus: weights.GetValueOrDefault("sizing_ev_bonus", 0.03),
+            EvPenalty: weights.GetValueOrDefault("sizing_ev_penalty", 0.50)
+        );
+
         var eligible = actionableCandidates
             .Where(c => c.IsActionable
                 && c.Status == PaperStockStatus.open
@@ -140,13 +150,27 @@ public class PortfolioLifecycleService
 
                 try
                 {
+                    // Compute EV% from target/stop/entry if available
+                    // Uses Math.Abs so the formula works for both bullish (target>entry) and bearish (target<entry)
+                    double? evPercent = null;
+                    if (c.TargetPrice is > 0 && c.StopPrice is > 0 && c.EntryPrice is > 0)
+                    {
+                        var winProb = c.ConfidenceScore / 100.0;
+                        var gainPct = Math.Abs(c.TargetPrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
+                        var lossPct = Math.Abs(c.EntryPrice.Value - c.StopPrice.Value) / c.EntryPrice.Value * 100;
+                        evPercent = (winProb * gainPct) - ((1 - winProb) * lossPct);
+                    }
+
                     var pos = await _portfolio.AutoOpenPositionAsync(
                         challenge.Id,
                         c.PredictionId,
                         c.Ticker,
                         c.EntryPrice!.Value,
                         assetType,
-                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}");
+                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}, ev={evPercent:F1}%",
+                        confidence: c.ConfidenceScore,
+                        expectedValuePercent: evPercent,
+                        sizingConfig: sizingConfig);
 
                     if (pos is not null)
                     {

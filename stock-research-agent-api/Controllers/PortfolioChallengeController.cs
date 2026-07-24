@@ -379,12 +379,93 @@ public class PortfolioChallengeController : ControllerBase
         }
 
         var liveEquity = Math.Round(challenge.CurrentCash + enrichedPositions.Sum(p => p.CurrentValue), 2);
-        equityCurve.Add(new EquityPoint
+
+        // ── Persist daily snapshot (upsert — one per day per challenge) ──
+        try
         {
-            Date = DateTimeOffset.UtcNow,
-            Balance = liveEquity,
-            TradeLabel = "Now",
-        });
+            var investedValue = Math.Round(enrichedPositions.Sum(p => p.CurrentValue), 2);
+            var snapshot = new PortfolioSnapshot
+            {
+                ChallengeId = challenge.Id,
+                SnapshotDate = DateOnly.FromDateTime(DateTime.UtcNow),
+                Cash = Math.Round(challenge.CurrentCash, 2),
+                InvestedValue = investedValue,
+                UnrealizedPnl = Math.Round(totalUnrealizedPnL, 2),
+                TotalEquity = liveEquity,
+                OpenPositionCount = enrichedPositions.Count,
+                RealizedPnlCumulative = Math.Round(challenge.RealizedProfit, 2),
+            };
+            await _repo.UpsertSnapshotAsync(snapshot);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dashboard] Failed to save portfolio snapshot for {Id}", challenge.Id);
+        }
+
+        // ── Build equity curve from snapshots + trade events ──
+        var snapshots = await _repo.GetSnapshotsAsync(challenge.Id);
+        if (snapshots.Count > 0)
+        {
+            // Use daily snapshots as the primary curve (smooth, daily resolution)
+            equityCurve.Clear();
+
+            // Prepend a "Start" point at challenge creation if first snapshot is later
+            var firstSnapDate = snapshots[0].SnapshotDate;
+            var challengeStartDate = DateOnly.FromDateTime(challenge.CreatedAt.UtcDateTime);
+            if (firstSnapDate >= challengeStartDate)
+            {
+                equityCurve.Add(new EquityPoint
+                {
+                    Date = challenge.CreatedAt,
+                    Balance = challenge.StartingBalance,
+                    TradeLabel = "Start",
+                });
+            }
+
+            foreach (var snap in snapshots)
+            {
+                equityCurve.Add(new EquityPoint
+                {
+                    Date = new DateTimeOffset(snap.SnapshotDate.ToDateTime(TimeOnly.FromTimeSpan(TimeSpan.FromHours(21))), TimeSpan.Zero),
+                    Balance = snap.TotalEquity,
+                    TradeLabel = snap.OpenPositionCount > 0
+                        ? $"{snap.OpenPositionCount} positions, unrealized {(snap.UnrealizedPnl >= 0 ? "+" : "")}{snap.UnrealizedPnl:F2}"
+                        : null,
+                });
+            }
+
+            // Add "Now" point if latest snapshot is today (update with live data)
+            var lastSnap = snapshots[^1];
+            if (lastSnap.SnapshotDate == DateOnly.FromDateTime(DateTime.UtcNow))
+            {
+                // Replace today's snapshot point with live equity
+                equityCurve[^1] = new EquityPoint
+                {
+                    Date = DateTimeOffset.UtcNow,
+                    Balance = liveEquity,
+                    TradeLabel = "Now",
+                };
+            }
+            else
+            {
+                equityCurve.Add(new EquityPoint
+                {
+                    Date = DateTimeOffset.UtcNow,
+                    Balance = liveEquity,
+                    TradeLabel = "Now",
+                });
+            }
+        }
+        else
+        {
+            // No snapshots yet — fall back to trade-based curve
+            equityCurve.Add(new EquityPoint
+            {
+                Date = DateTimeOffset.UtcNow,
+                Balance = liveEquity,
+                TradeLabel = "Now",
+            });
+        }
 
         // ── Compute AI quality stats from closed trades ──
         var winners = sortedClosed.Where(t => t.ProfitLoss > 0).ToList();

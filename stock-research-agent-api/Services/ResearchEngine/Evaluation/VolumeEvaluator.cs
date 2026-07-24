@@ -12,8 +12,38 @@ public class VolumeEvaluator : IVolumeEvaluator
 
         if (ind.VolumeRatio is double vr)
         {
-            if (vr > 2.0) { bull += 3; bear += 3; signals.Add($"Volume: very elevated ({vr:F1}x avg)"); }
-            else if (vr > 1.3) { bull += 2; bear += 2; signals.Add($"Volume: above average ({vr:F1}x avg)"); }
+            if (vr > 1.3)
+            {
+                // ── Directional volume scoring ──
+                // High volume is NOT neutral — its direction depends on whether it's
+                // accumulation (buying) or distribution (selling into strength).
+                // Data: bearish context + bullish volume = 47.9% accuracy (best),
+                //       bearish context + bearish volume = 33.6% accuracy (worst).
+                // Use OBV slope and price-volume confirmation to determine direction.
+                var obvUp = ind.ObvSlope is double obvCheck && obvCheck > 0;
+                var pvcConfirmed = ind.PriceVolumeConfirmation is true;
+
+                if (obvUp && pvcConfirmed)
+                {
+                    // Accumulation: smart money buying — bullish
+                    var boost = vr > 2.0 ? 4 : 3;
+                    bull += boost;
+                    signals.Add($"Volume: accumulation on elevated volume ({vr:F1}x avg)");
+                }
+                else if (!obvUp && !pvcConfirmed)
+                {
+                    // Distribution: selling into strength — bearish
+                    var boost = vr > 2.0 ? 4 : 3;
+                    bear += boost;
+                    signals.Add($"Volume: distribution on elevated volume ({vr:F1}x avg)");
+                }
+                else
+                {
+                    // Mixed signals — add small amount to both (reduced from original)
+                    bull += 1; bear += 1;
+                    signals.Add($"Volume: elevated but mixed signals ({vr:F1}x avg)");
+                }
+            }
             else if (vr < 0.5) { signals.Add($"Volume: very low ({vr:F1}x avg)"); }
             else if (vr < 0.7) { signals.Add($"Volume: below average ({vr:F1}x avg)"); }
         }

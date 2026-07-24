@@ -30,8 +30,29 @@ public class MomentumEvaluator : IMomentumEvaluator
         {
             if (rsi > 70) { bear += 3; signals.Add($"Momentum: RSI overbought ({rsi:F0})"); }
             else if (rsi > 55) { bull += 4; signals.Add($"Momentum: RSI bullish ({rsi:F0})"); }
-            else if (rsi < 30) { bull += 3; signals.Add($"Momentum: RSI oversold ({rsi:F0})"); }
+            else if (rsi < 30)
+            {
+                // Oversold — contrarian bullish signal, but also a mean-reversion trap
+                // for bearish predictions. Data shows bearish calls on oversold stocks
+                // are the worst performers (stocks bounce back).
+                bull += 5; // stronger contrarian signal (was 3)
+                bear -= 3; // penalize bearish on oversold — chasing the bottom
+                signals.Add($"Momentum: RSI oversold ({rsi:F0}) — mean-reversion risk for bearish");
+            }
             else if (rsi < 45) { bear += 4; signals.Add($"Momentum: RSI bearish ({rsi:F0})"); }
+        }
+
+        // ── Mean-reversion guard ──
+        // When RSI is near oversold AND rate-of-change is deeply negative,
+        // the drop has already happened. Bearish predictions here are chasing
+        // the end of a move, not the beginning. Data: strong_trend + strong_momentum
+        // bearish = only 38% accuracy with +4.29% avg move against.
+        if (ind.Rsi14 is double rsiMR && rsiMR < 35
+            && ((ind.Roc5 is double roc5MR && roc5MR < -2) || (ind.Roc10 is double roc10MR && roc10MR < -3)))
+        {
+            bear -= 4;
+            bull += 2;
+            signals.Add($"Momentum: mean-reversion guard — RSI {rsiMR:F0} + deep negative ROC suggests drop already priced in");
         }
 
         if (ind.StochasticCloseLocation is double stoch)

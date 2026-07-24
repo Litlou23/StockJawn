@@ -1261,6 +1261,28 @@ public class LearningEngine
         var currentOverrides = await GetEffectiveOverridesAsync(profileId, isChampion);
         var overrideMap = currentOverrides.ToDictionary(o => o.SignalName);
 
+        // ── Fetch correlation & influence data for multi-signal optimization ──
+        var correlations = await _repo.GetSignalCorrelationsAsync();
+        var influenceRows = await _repo.GetSignalInfluenceAsync();
+
+        var corrMap = new Dictionary<string, double>();
+        foreach (var row in correlations)
+        {
+            var name = row["signal_name"]?.GetValue<string>() ?? "";
+            corrMap[name] = row["correlation_r"]?.GetValue<double>() ?? 0;
+        }
+
+        var redundancyMap = new Dictionary<string, double>(); // 0 = all decisive, 1 = all redundant
+        foreach (var row in influenceRows)
+        {
+            var name = row["signal_name"]?.GetValue<string>() ?? "";
+            var decisive = row["decisive_count"]?.GetValue<int>() ?? 0;
+            var reinforcing = row["reinforcing_count"]?.GetValue<int>() ?? 0;
+            var redundant = row["redundant_count"]?.GetValue<int>() ?? 0;
+            var total = decisive + reinforcing + redundant;
+            redundancyMap[name] = total > 0 ? (double)redundant / total : 0.5;
+        }
+
         var allDirectionStats = signalStats
             .Where(s => s.Direction == "all" && s.TotalPredictions >= MinObservationsForAdjustment)
             .ToList();
@@ -1271,9 +1293,22 @@ public class LearningEngine
             var currentAdj = overrideMap.TryGetValue(stat.SignalName, out var existing)
                 ? existing.AdjustmentPercent : 0.0;
 
+            // ── Multi-factor target: accuracy + correlation + influence ──
             // Bayesian smoothing: blend with prior (50% accuracy)
             var bayesianAccuracy = (stat.CorrectPredictions + 25.0) / (stat.TotalPredictions + 50.0);
-            var targetAdj = (bayesianAccuracy - 0.5) * 2.0;
+            var accuracySignal = (bayesianAccuracy - 0.5) * 2.0; // [-1, 1]
+
+            // Correlation signal: positive r → upweight, negative r → downweight
+            var correlation = corrMap.GetValueOrDefault(stat.SignalName, 0);
+            var correlationSignal = Math.Clamp(correlation * 3.0, -1.0, 1.0); // amplify: ±0.33 → ±1.0
+
+            // Redundancy penalty: mostly-redundant signals should be downweighted
+            var redundancy = redundancyMap.GetValueOrDefault(stat.SignalName, 0.5);
+            var redundancyPenalty = redundancy > 0.7 ? -0.15 : 0.0; // penalize if >70% redundant
+
+            // Composite target: 50% accuracy + 35% correlation + redundancy guard
+            // When corr/influence data is missing, falls back to accuracy-only at 50% strength
+            var targetAdj = accuracySignal * 0.50 + correlationSignal * 0.35 + redundancyPenalty;
             targetAdj = Math.Clamp(targetAdj, -MaxAdjustmentPercent, MaxAdjustmentPercent);
 
             // Gradual movement — use guardrail-aware daily limit
@@ -1297,8 +1332,10 @@ public class LearningEngine
             var effectiveWeight = baseWeight * (1.0 + newAdj);
             var confidence = Math.Min((double)stat.TotalPredictions / 200.0, 1.0);
 
-            var reason = $"Accuracy: {stat.Accuracy * 100:F1}% over {stat.TotalPredictions} obs. " +
-                         $"Bayesian: {bayesianAccuracy * 100:F1}%. Target adj: {targetAdj * 100:F1}%.";
+            var reason = $"Accuracy: {stat.Accuracy * 100:F1}% ({bayesianAccuracy * 100:F1}% Bayesian), " +
+                         $"Corr: {correlation:+0.000;-0.000}, " +
+                         $"Redundancy: {redundancy * 100:F0}%. " +
+                         $"Target adj: {targetAdj * 100:F1}%.";
 
             var weightOverride = new ScoringWeightOverride
             {

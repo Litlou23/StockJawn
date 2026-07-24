@@ -415,6 +415,20 @@ public class PredictionGenerator
 
         // ── Step 4: Dynamic time window + ATR-based price prediction engine ──
         var timeWindow = DetermineTimeWindow(scoring.Breakdown);
+
+        // ── 1-day bearish block ──
+        // Data shows 1-day bearish predictions have only 14.3% accuracy (14 predictions).
+        // Stocks bounce back too quickly for short-term bearish calls to work.
+        // Downgrade to watch_only and cap confidence.
+        if (timeWindow == PredictionTimeWindows.OneDay && predType == "bearish")
+        {
+            predType = "watch_only";
+            confidence = Math.Min(confidence, 25);
+            _logger.LogInformation(
+                "[prediction] {Ticker}: 1-day bearish downgraded to watch_only — historical accuracy 14.3%",
+                ticker);
+        }
+
         var entryPrice = snapshot.Quote?.Price;
         var priceCalc = ComputeAtrPriceForecast(
             entryPrice, predType, timeWindow, snapshot, confidence, risk, scoring.Breakdown, researchUniverse);

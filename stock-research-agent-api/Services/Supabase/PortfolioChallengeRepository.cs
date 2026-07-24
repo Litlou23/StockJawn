@@ -277,6 +277,42 @@ public class PortfolioChallengeRepository
     }
 
     // -----------------------------------------------------------------------
+    // Portfolio snapshots (daily equity curve data)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Upsert a daily snapshot. Only one per challenge per calendar date.
+    /// </summary>
+    public async Task<bool> UpsertSnapshotAsync(PortfolioSnapshot snapshot)
+    {
+        return await _db.UpsertAsync("portfolio_snapshots", new
+        {
+            challenge_id = snapshot.ChallengeId,
+            snapshot_date = snapshot.SnapshotDate.ToString("yyyy-MM-dd"),
+            cash = snapshot.Cash,
+            invested_value = snapshot.InvestedValue,
+            unrealized_pnl = snapshot.UnrealizedPnl,
+            total_equity = snapshot.TotalEquity,
+            open_position_count = snapshot.OpenPositionCount,
+            realized_pnl_cumulative = snapshot.RealizedPnlCumulative,
+            notes = snapshot.Notes,
+            updated_at = DateTimeOffset.UtcNow.ToString("o"),
+        }, "challenge_id,snapshot_date");
+    }
+
+    /// <summary>
+    /// Get all snapshots for a challenge, ordered by date ascending.
+    /// </summary>
+    public async Task<List<PortfolioSnapshot>> GetSnapshotsAsync(string challengeId, int limit = 365)
+    {
+        var rows = await _db.SelectAsync("portfolio_snapshots",
+            filter: $"challenge_id=eq.{challengeId}",
+            order: "snapshot_date.asc",
+            limit: limit);
+        return rows.Select(MapSnapshot).ToList();
+    }
+
+    // -----------------------------------------------------------------------
     // Decision log (view: portfolio_decision_log)
     // -----------------------------------------------------------------------
 
@@ -382,4 +418,19 @@ public class PortfolioChallengeRepository
         if (node is null || node.GetValueKind() == JsonValueKind.Null) return null;
         return DateTimeOffset.TryParse(node.ToString(), out var dt) ? dt : null;
     }
+
+    private static PortfolioSnapshot MapSnapshot(JsonObject r) => new()
+    {
+        Id = r["id"]?.ToString() ?? "",
+        ChallengeId = r["challenge_id"]?.ToString() ?? "",
+        SnapshotDate = DateOnly.TryParse(r["snapshot_date"]?.ToString(), out var d) ? d : DateOnly.FromDateTime(DateTime.UtcNow),
+        Cash = GetDouble(r, "cash"),
+        InvestedValue = GetDouble(r, "invested_value"),
+        UnrealizedPnl = GetDouble(r, "unrealized_pnl"),
+        TotalEquity = GetDouble(r, "total_equity"),
+        OpenPositionCount = GetInt(r, "open_position_count"),
+        RealizedPnlCumulative = GetDouble(r, "realized_pnl_cumulative"),
+        Notes = r["notes"]?.ToString(),
+        CreatedAt = GetDateTimeOffset(r, "created_at"),
+    };
 }

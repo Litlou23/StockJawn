@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.Supabase;
@@ -90,6 +91,156 @@ public class LearningController : ControllerBase
     {
         var analysis = await _patternDetection.RunFullPatternAnalysisAsync();
         return Ok(analysis);
+    }
+
+    /// <summary>
+    /// Feature importance analysis — synthesizes correlation, influence, calibration,
+    /// and performance data into a ranked report showing which scoring buckets
+    /// are actually predictive vs adding noise.
+    /// </summary>
+    [HttpGet("feature-importance")]
+    public async Task<IActionResult> GetFeatureImportance()
+    {
+        var bucketNames = new[] { "trend", "momentum", "volume", "volatility",
+            "market_context", "catalyst", "learning", "research_signal" };
+
+        // Fetch all analysis data in parallel
+        var signalsTask = _repo.GetAllSignalPerformanceAsync();
+        var correlationsTask = _repo.GetSignalCorrelationsAsync();
+        var influenceTask = _repo.GetSignalInfluenceAsync();
+        var calibrationTask = _repo.GetCalibrationBucketsAsync();
+        var weightsTask = _repo.GetActiveWeightOverridesAsync();
+
+        await Task.WhenAll(signalsTask, correlationsTask, influenceTask, calibrationTask, weightsTask);
+
+        var signals = signalsTask.Result;
+        var correlations = correlationsTask.Result;
+        var influence = influenceTask.Result;
+        var calibration = calibrationTask.Result;
+        var weights = weightsTask.Result;
+        var weightMap = weights.ToDictionary(w => w.SignalName);
+
+        // Build correlation lookup: signal_name → correlation_r
+        var corrMap = new Dictionary<string, double>();
+        foreach (var row in correlations)
+        {
+            var name = row["signal_name"]?.GetValue<string>() ?? "";
+            var r = row["correlation_r"]?.GetValue<double>() ?? 0;
+            corrMap[name] = r;
+        }
+
+        // Build influence lookup: signal_name → { decisive, reinforcing, redundant, decisiveAccuracy, avgMarginImpact }
+        var inflMap = new Dictionary<string, (int Decisive, int Reinforcing, int Redundant, double? DecisiveAccuracy, double AvgMarginImpact)>();
+        foreach (var row in influence)
+        {
+            var name = row["signal_name"]?.GetValue<string>() ?? "";
+            inflMap[name] = (
+                row["decisive_count"]?.GetValue<int>() ?? 0,
+                row["reinforcing_count"]?.GetValue<int>() ?? 0,
+                row["redundant_count"]?.GetValue<int>() ?? 0,
+                row["decisive_accuracy"]?.GetValue<double>(),
+                row["avg_margin_impact"]?.GetValue<double>() ?? 0
+            );
+        }
+
+        // Build calibration lookup: signal_name → list of { bucket, accuracy, avgReturn, sample }
+        var calMap = new Dictionary<string, List<object>>();
+        foreach (var row in calibration)
+        {
+            var name = row["signal_name"]?.GetValue<string>() ?? "";
+            if (!calMap.ContainsKey(name)) calMap[name] = [];
+            calMap[name].Add(new
+            {
+                scoreBucket = row["score_bucket"]?.GetValue<string>() ?? "",
+                accuracy = row["accuracy"]?.GetValue<double>() ?? 0,
+                avgReturnPercent = row["avg_return_percent"]?.GetValue<double>() ?? 0,
+                sampleCount = row["sample_count"]?.GetValue<int>() ?? 0,
+            });
+        }
+
+        // Synthesize per-bucket feature importance
+        var features = bucketNames.Select(name =>
+        {
+            var perf = signals.FirstOrDefault(s => s.SignalName == name && s.Direction == "all");
+            var accuracy = perf?.Accuracy ?? 0;
+            var sample = perf?.TotalPredictions ?? 0;
+            var correlation = corrMap.GetValueOrDefault(name, 0);
+            var infl = inflMap.GetValueOrDefault(name);
+            var weight = weightMap.TryGetValue(name, out var w) ? w : null;
+
+            // Composite importance score (0-100):
+            // 40% correlation strength, 30% accuracy, 20% influence, 10% sample size
+            var corrScore = Math.Clamp((correlation + 0.3) / 0.6, 0, 1); // map [-0.3, 0.3] → [0, 1]
+            var accScore = Math.Clamp((accuracy - 0.3) / 0.4, 0, 1);    // map [30%, 70%] → [0, 1]
+            var decisiveRate = infl.Decisive + infl.Reinforcing + infl.Redundant > 0
+                ? (double)(infl.Decisive + infl.Reinforcing) / (infl.Decisive + infl.Reinforcing + infl.Redundant)
+                : 0.5;
+            var sampleScore = Math.Clamp(sample / 200.0, 0, 1);
+
+            var importanceScore = Math.Round(
+                (corrScore * 40 + accScore * 30 + decisiveRate * 20 + sampleScore * 10), 1);
+
+            // Generate verdict
+            string verdict;
+            if (importanceScore >= 65) verdict = "strong_predictor";
+            else if (importanceScore >= 45) verdict = "moderate_predictor";
+            else if (importanceScore >= 25) verdict = "weak_predictor";
+            else verdict = "noise";
+
+            // Generate recommendation
+            string recommendation;
+            var effectiveWt = weight?.EffectiveWeight ?? 1.0;
+            if (verdict == "noise" && effectiveWt > 0.5)
+                recommendation = $"Downweight — low correlation ({correlation:+0.00;-0.00}) and mostly redundant. Consider reducing to {Math.Max(0.3, effectiveWt * 0.7):F2}.";
+            else if (verdict == "strong_predictor" && effectiveWt < 1.2)
+                recommendation = $"Upweight — strong correlation ({correlation:+0.00;-0.00}) and high influence. Consider increasing to {Math.Min(2.0, effectiveWt * 1.2):F2}.";
+            else if (correlation < -0.1 && sample >= 30)
+                recommendation = $"Warning — negative correlation ({correlation:+0.00;-0.00}) means higher scores predict WORSE outcomes. This signal may be inverted or miscalibrated.";
+            else
+                recommendation = "No change needed — performing as expected.";
+
+            return new
+            {
+                name,
+                importanceScore,
+                verdict,
+                accuracy = Math.Round(accuracy * 100, 1),
+                sampleSize = sample,
+                correlation = Math.Round(correlation, 4),
+                decisiveCount = infl.Decisive,
+                reinforcingCount = infl.Reinforcing,
+                redundantCount = infl.Redundant,
+                decisiveAccuracy = infl.DecisiveAccuracy is not null
+                    ? Math.Round(infl.DecisiveAccuracy.Value * 100, 1) : (double?)null,
+                avgMarginImpact = Math.Round(infl.AvgMarginImpact, 2),
+                currentWeight = weight?.EffectiveWeight,
+                baseWeight = weight?.BaseWeight ?? 1.0,
+                calibration = calMap.GetValueOrDefault(name),
+                recommendation,
+            };
+        })
+        .OrderByDescending(f => f.importanceScore)
+        .ToList();
+
+        // Summary insights
+        var strongPredictors = features.Where(f => f.verdict == "strong_predictor").Select(f => f.name).ToList();
+        var noiseSignals = features.Where(f => f.verdict == "noise").Select(f => f.name).ToList();
+        var negativeCorrelations = features.Where(f => f.correlation < -0.05 && f.sampleSize >= 20)
+            .Select(f => new { f.name, f.correlation }).ToList();
+
+        return Ok(new
+        {
+            features,
+            summary = new
+            {
+                strongPredictors,
+                noiseSignals,
+                negativeCorrelations = negativeCorrelations.Select(n => new { n.name, correlation = n.correlation }),
+                totalSample = features.Sum(f => f.sampleSize) / bucketNames.Length, // predictions analyzed
+                actionItems = features.Where(f => !f.recommendation.StartsWith("No change"))
+                    .Select(f => new { signal = f.name, f.recommendation }).ToList(),
+            },
+        });
     }
 
     [HttpGet("model-performance")]

@@ -74,7 +74,8 @@ The closed-loop feedback system that makes every other capability improve over t
 | **Signal extraction** | Active — `ExtractSignalsFromPrediction` identifies which signals contributed |
 | **Options learning** | Dead code — `OptionLearningService.cs` is scheduled for deletion (tech debt #4). Options learning will be rebuilt after LearningEngine decomposition. |
 | **Learning insights** | Active — automated insight generation stored in `learning_insights` table |
-| **Observability UI** | Active — `/learning` page with signal performance panel and report card |
+| **Observability UI** | Active — `/learning` page with signal performance panel, report card, and feature importance ranking |
+| **Feature importance** | Active — `/api/learning/feature-importance` synthesizes correlation, influence, calibration into ranked signal report. Weight optimizer uses multi-factor target (accuracy + correlation + redundancy). |
 
 **Remaining work:** Self-adjusting indicator weights (currently manual seed), market regime detection (bull vs bear vs sideways affects which signals matter), learning rate optimization.
 
@@ -94,7 +95,7 @@ Simulated trading that tests predictions with real market data.
 | **Individual trade P&L** | Active — per-trade outcome recorded |
 | **Portfolio balance tracking** | Active — `portfolio_challenges` + `portfolio_positions` tables, `PortfolioBalanceEngine` updates balance on every trade close |
 
-**Remaining work:** Position sizing logic, concurrent position limits, stop-loss / take-profit automation, link existing paper trade outcomes to portfolio positions.
+**Remaining work:** Link existing paper trade outcomes to portfolio positions.
 
 **Future vision:** A full portfolio simulator that manages a $100 balance, sizes positions, enforces risk limits, and tracks equity curve over weeks/months.
 
@@ -111,7 +112,7 @@ Intelligent capital allocation and risk management.
 | **Balance engine** | Active — `PortfolioBalanceEngine` updates cash, balance, realized P&L, and statistics when positions open/close |
 | **Dashboard API** | Active — `GET /api/portfolio/summary` exposes balance, progress %, cash, positions, return, win rate, current goal. Also embedded in `/api/dashboard/dynamic-summary`. |
 | **Multiple challenge support** | Active — schema supports multiple challenges with different balances, targets, risk profiles, and modes |
-| **Basic position sizing** | Active — `CalculatePositionSize` uses fixed-fraction sizing (5%/10%/20% per risk profile). `AutoOpenPositionAsync` auto-sizes from available cash. |
+| **Confidence/EV-scaled position sizing** | Active — `CalculatePositionSize` scales position size by prediction confidence and expected value. Linear interpolation from 2% floor to risk profile cap (8%/15%/20%). Positive EV >5% gets bonus allocation, negative EV halves position. Six config knobs via `scoring_weight_overrides`. `AutoOpenPositionAsync` auto-sizes from available cash. |
 | **Orchestrator integration** | Active — `DynamicPickOrchestrator` auto-opens portfolio positions for actionable candidates during morning picks, auto-closes during EOD review |
 | **Frontend proxy routes** | Active — Next.js proxy routes for `/api/portfolio/summary`, `/api/portfolio/challenges`, `/api/portfolio/positions` |
 | **Risk budgeting** | Not started |
@@ -119,7 +120,7 @@ Intelligent capital allocation and risk management.
 | **Correlation-aware allocation** | Not started |
 | **Portfolio rebalancing** | Not started |
 
-**Remaining work:** Kelly criterion or volatility-based position sizing, risk budgeting, correlation-aware allocation, portfolio equity curve snapshots.
+**Remaining work:** Risk budgeting, correlation-aware allocation.
 
 **Future vision:** The system knows its current balance, maximum acceptable drawdown, position correlations, and sizes every trade to maximize expected portfolio growth (Kelly criterion or similar).
 
@@ -173,7 +174,7 @@ Measuring how well the system is performing at its primary objective.
 | **History page** | Active — `/history` shows trade history |
 | **Pick stats API** | Active — `DynamicPicksController` exposes `/stats` |
 
-**Remaining work:** Portfolio equity curve, drawdown analysis, Sharpe ratio, win/loss streaks, confidence calibration chart, P&L by signal type, comparison dashboards.
+**Remaining work:** Drawdown analysis, Sharpe ratio, win/loss streaks, confidence calibration chart, P&L by signal type, comparison dashboards.
 
 **Future vision:** A single performance dashboard that answers: "Is the system getting better at growing capital?"
 

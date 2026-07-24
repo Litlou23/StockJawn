@@ -106,6 +106,22 @@
 Copy this template for new experiments:
 
 ```markdown
+## EXP-006 — Bearish Prediction Quality Improvements
+
+| Field | Value |
+|---|---|
+| **ID** | EXP-006 |
+| **Hypothesis** | Bearish prediction accuracy (39.0%) can be improved by: (1) blocking 1-day bearish (14.3% accuracy), (2) penalizing mean-reversion traps where both trend + momentum are strongly bearish, (3) making volume scoring directional instead of neutral, (4) strengthening RSI oversold contrarian signals. |
+| **Motivation** | Bearish predictions have 39% accuracy with +1.86% avg move (stocks go UP). 1-day bearish is catastrophic at 14.3%. Strong trend + strong momentum bearish = 38% accuracy (mean-reversion trap). Volume scoring treats high volume as non-directional when data shows bearish ctx + bullish volume = 47.9% accuracy (best) vs bearish ctx + bearish volume = 33.6% (worst). |
+| **Status** | `in-progress` |
+| **Start Date** | 2026-07-24 |
+| **Success Metrics** | Bearish accuracy improves above 45%. 1-day bearish predictions eliminated. Mean-reversion trap false positives reduced. |
+| **Results** | — |
+| **Lessons Learned** | — |
+| **Next Steps** | Monitor bearish prediction outcomes over next 2 weeks. |
+
+---
+
 ## EXP-XXX — Title
 
 | Field | Value |

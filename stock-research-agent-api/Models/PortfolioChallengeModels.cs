@@ -149,6 +149,25 @@ public record EquityPoint
     public string? TradeLabel { get; init; }
 }
 
+/// <summary>
+/// Daily snapshot of portfolio value, persisted to portfolio_snapshots table.
+/// Used to build a continuous equity curve with daily resolution.
+/// </summary>
+public record PortfolioSnapshot
+{
+    public string Id { get; init; } = "";
+    public string ChallengeId { get; init; } = "";
+    public DateOnly SnapshotDate { get; init; }
+    public double Cash { get; init; }
+    public double InvestedValue { get; init; }
+    public double UnrealizedPnl { get; init; }
+    public double TotalEquity { get; init; }
+    public int OpenPositionCount { get; init; }
+    public double RealizedPnlCumulative { get; init; }
+    public string? Notes { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
+
 public record PortfolioQualityStats
 {
     public int TotalTrades { get; init; }

@@ -116,6 +116,33 @@ interface ModelPerformance {
   } | null;
 }
 
+interface FeatureImportance {
+  features: {
+    name: string;
+    importanceScore: number;
+    verdict: string;
+    accuracy: number;
+    sampleSize: number;
+    correlation: number;
+    decisiveCount: number;
+    reinforcingCount: number;
+    redundantCount: number;
+    decisiveAccuracy: number | null;
+    avgMarginImpact: number;
+    currentWeight: number | null;
+    baseWeight: number;
+    calibration: { scoreBucket: string; accuracy: number; avgReturnPercent: number; sampleCount: number }[] | null;
+    recommendation: string;
+  }[];
+  summary: {
+    strongPredictors: string[];
+    noiseSignals: string[];
+    negativeCorrelations: { name: string; correlation: number }[];
+    totalSample: number;
+    actionItems: { signal: string; recommendation: string }[];
+  };
+}
+
 interface IntakeAnalysis {
   intake: {
     feedStatus: string;
@@ -147,13 +174,14 @@ async function fetchFromApi<T>(path: string): Promise<T | null> {
 }
 
 export default async function LearningPage() {
-  const [report, signalsData, weightsData, patterns, intake, modelPerf] = await Promise.all([
+  const [report, signalsData, weightsData, patterns, intake, modelPerf, featureImportance] = await Promise.all([
     fetchFromApi<LearningReport>('/api/learning/report/latest'),
     fetchFromApi<{ signals: SignalPerf[] }>('/api/learning/signals'),
     fetchFromApi<{ weights: WeightOverride[] }>('/api/learning/weights'),
     fetchFromApi<PatternAnalysis>('/api/learning/patterns/full-analysis'),
     fetchFromApi<IntakeAnalysis>('/api/intake/latest'),
     fetchFromApi<ModelPerformance>('/api/learning/model-performance'),
+    fetchFromApi<FeatureImportance>('/api/learning/feature-importance'),
   ]);
 
   const signals = signalsData?.signals ?? [];
@@ -232,6 +260,69 @@ export default async function LearningPage() {
                   </div>
                 ))}
             </div>
+          </div>
+        )}
+
+        {/* Feature Importance */}
+        {featureImportance && featureImportance.features.length > 0 && (
+          <div className="rounded-xl border border-blue-900/40 bg-zinc-900 p-4">
+            <h2 className="text-sm font-semibold text-zinc-100">Feature Importance</h2>
+            <p className="mt-1 text-xs text-zinc-500">
+              Which scoring signals actually predict returns — ranked by correlation, accuracy, and influence.
+              {featureImportance.summary.totalSample > 0 && ` Based on ${featureImportance.summary.totalSample} evaluated predictions.`}
+            </p>
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-zinc-500">
+                    <th className="pb-2 text-left font-medium">Signal</th>
+                    <th className="pb-2 text-right font-medium">Score</th>
+                    <th className="pb-2 text-right font-medium">Corr</th>
+                    <th className="pb-2 text-right font-medium">Decisive</th>
+                    <th className="pb-2 text-right font-medium">Redundant</th>
+                    <th className="pb-2 text-right font-medium">Weight</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800/50">
+                  {featureImportance.features.map((f, idx) => (
+                    <tr key={`${f.name}-fi-${idx}`}>
+                      <td className="py-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="text-zinc-300">{f.name.replace(/_/g, ' ')}</span>
+                          <span className={`rounded px-1 py-0.5 text-[9px] font-medium uppercase ${
+                            f.verdict === 'strong_predictor' ? 'bg-green-900/50 text-green-400' :
+                            f.verdict === 'moderate_predictor' ? 'bg-blue-900/50 text-blue-400' :
+                            f.verdict === 'weak_predictor' ? 'bg-yellow-900/50 text-yellow-400' :
+                            'bg-red-900/50 text-red-400'
+                          }`}>
+                            {f.verdict.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-1.5 text-right font-medium text-zinc-200">{f.importanceScore}</td>
+                      <td className={`py-1.5 text-right ${f.correlation > 0.05 ? 'text-green-400' : f.correlation < -0.05 ? 'text-red-400' : 'text-zinc-500'}`}>
+                        {f.correlation > 0 ? '+' : ''}{f.correlation.toFixed(3)}
+                      </td>
+                      <td className="py-1.5 text-right text-zinc-400">{f.decisiveCount}</td>
+                      <td className="py-1.5 text-right text-zinc-500">{f.redundantCount}</td>
+                      <td className="py-1.5 text-right text-zinc-400">{(f.currentWeight ?? f.baseWeight).toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {/* Action Items */}
+            {featureImportance.summary.actionItems.length > 0 && (
+              <div className="mt-3 space-y-1.5 border-t border-zinc-800 pt-3">
+                <p className="text-[10px] font-medium uppercase tracking-wide text-zinc-500">Recommendations</p>
+                {featureImportance.summary.actionItems.map((item, idx) => (
+                  <div key={idx} className="rounded-lg bg-zinc-800/50 px-3 py-2">
+                    <span className="text-xs font-medium text-zinc-300">{item.signal.replace(/_/g, ' ')}: </span>
+                    <span className="text-xs text-zinc-400">{item.recommendation}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

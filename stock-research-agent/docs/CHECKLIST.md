@@ -12,8 +12,8 @@
 
 These items block the portfolio growth objective. Without them, the system cannot meaningfully track whether it's winning or losing.
 
-- [ ] **Position sizing engine** — Calculate how much of the portfolio to allocate per trade based on confidence, expected value, and current balance. Without this, every trade is an arbitrary bet. *(Portfolio AI)*
-- [ ] **Portfolio equity curve** — Visualize portfolio value over time. Infrastructure complete (tables, balance engine, orchestrator integration). Remaining: periodic `portfolio_snapshots` table for historical equity curve data, frontend chart. *(Performance Analytics / Portfolio AI)*
+- [x] **Position sizing engine** — Confidence & EV-scaled sizing replaces fixed-fraction. Linear interpolation from MinFraction (2%) to risk profile cap based on confidence (35-85 range). Positive EV >5% gets bonus allocation, negative EV halves position. Six config knobs via `scoring_weight_overrides`. *(Portfolio AI)*
+- [x] **Portfolio equity curve** — Daily portfolio snapshots via `portfolio_snapshots` table, captured during dashboard refresh. Equity curve uses daily snapshot data with hover tooltips. Falls back to trade-event curve when no snapshots exist. *(Performance Analytics / Portfolio AI)*
 - [ ] **Budget-aware option selection** — Filter options contracts the portfolio can actually afford. A $100 account cannot buy a $500 premium contract. *(Options Intelligence)*
 - [x] **Expected value calculations** — Every prediction computes `(probability × potential gain) - ((1 - probability) × potential loss)`. Directional rankings sort by EV instead of confidence alone. *(Prediction Engine)*
 - [x] **Concurrent position limits** — Max 8 open positions with duplicate ticker prevention. Implemented in `PortfolioLifecycleService.OpenPositionsForCandidatesAsync`. Config via `scoring_weight_overrides`. *(Portfolio AI)*
@@ -23,12 +23,12 @@ These items block the portfolio growth objective. Without them, the system canno
 These items significantly improve prediction quality, learning speed, or decision-making.
 
 - [x] **Confidence calibration analysis** — EXP-005 backtest showed confidence is inversely correlated with returns. ≥35 threshold is optimal (+219% cumulative, 367 trades). Min confidence floor set to 35. *(Prediction Engine)*
-- [ ] **Improve bearish prediction quality** — Bearish predictions have historically been less reliable. Investigate indicator weights, sample balance, and scoring bias. *(Prediction Engine)*
+- [x] **Improve bearish prediction quality** — EXP-006: Blocked 1-day bearish (14.3% accuracy), added mean-reversion guard in MomentumEvaluator (penalizes bearish on oversold stocks), made VolumeEvaluator directional (accumulation vs distribution), added bearish mean-reversion trap penalty in ConfidenceEngine (20% penalty when trend+momentum both strongly bearish). *(Prediction Engine)*
 - [ ] **Create research_signals migration** — Write Supabase migration to create `research_signals` and `research_scoring_weights` tables. Backend code is ready but needs the table. *(Research Engine)*
 - [x] **Stop-loss / take-profit automation** — Trailing stops added for day trades (activate at +4%, trail 2.5%). Fixed take-profits reset from learning-inflated values. Config-driven via `scoring_weight_overrides`. *(Paper Trading)*
 - [x] **Drawdown analysis** — 25% drawdown circuit breaker implemented in `OpenPositionsForCandidatesAsync`. Compares current balance to peak (StartingBalance vs CurrentBalance). *(Performance Analytics)*
 - [ ] **Market regime detection** — Bull, bear, and sideways markets demand different strategies. The scoring engine should adjust weights based on current regime. *(Learning Engine)*
-- [ ] **Feature importance scoring** — Identify which scoring buckets and indicators actually predict outcomes. Drop features that add noise. *(Learning Engine)*
+- [x] **Feature importance scoring** — `/api/learning/feature-importance` synthesizes correlation, influence, calibration data into ranked report. Composite score (40% corr + 30% accuracy + 20% influence + 10% sample). Weight optimizer upgraded to multi-factor (accuracy + correlation + redundancy penalty). Frontend learning page shows ranked table + recommendations. *(Learning Engine)*
 - [ ] **P&L by signal type** — Break down portfolio performance by which signals drove each trade. *(Performance Analytics)*
 
 ## Medium Priority

@@ -27,52 +27,98 @@ public class PortfolioBalanceEngine
     }
 
     // -----------------------------------------------------------------------
-    // Position sizing — simple fixed-fraction approach for Phase 1.
-    // Future: Kelly criterion, volatility-based sizing, risk budgeting.
+    // Position sizing — confidence & EV-scaled approach.
+    // Higher confidence and positive EV → larger position (up to risk cap).
+    // Negative EV → reduced position. Risk profile sets the ceiling.
     // -----------------------------------------------------------------------
 
     /// <summary>
-    /// Calculate how many shares/contracts to buy given available cash,
-    /// price per unit, and the challenge's risk profile.
+    /// Position sizing config loaded from scoring_weight_overrides.
+    /// Passed in by callers so PortfolioBalanceEngine doesn't need repo access.
+    /// </summary>
+    public record PositionSizingConfig(
+        double MinFraction = 0.02,     // 2% floor — minimum meaningful position
+        double MaxFraction = 0.20,     // 20% ceiling — never exceed even at max confidence
+        double ConfidenceFloor = 35,   // confidence below this gets minFraction
+        double ConfidenceCeiling = 85, // confidence at/above this gets maxFraction (for the risk profile)
+        double EvBonus = 0.03,         // extra 3% allocation when EV is strongly positive (>5%)
+        double EvPenalty = 0.50        // multiply fraction by 0.5 when EV is negative
+    );
+
+    /// <summary>
+    /// Calculate how many shares/contracts to buy, scaling position size by
+    /// prediction confidence and expected value. Risk profile caps the maximum.
     /// Returns 0 if the position cannot be afforded.
     /// </summary>
     public double CalculatePositionSize(
         double cashAvailable,
         double pricePerUnit,
         RiskProfile riskProfile,
-        PositionAssetType assetType)
+        PositionAssetType assetType,
+        int confidence = 50,
+        double? expectedValuePercent = null,
+        PositionSizingConfig? config = null)
     {
         if (pricePerUnit <= 0 || cashAvailable <= 0) return 0;
 
-        // Max fraction of cash to deploy per position, by risk profile.
-        var maxFraction = riskProfile switch
+        config ??= new PositionSizingConfig();
+
+        // Risk profile sets the absolute ceiling for this challenge.
+        var profileCap = riskProfile switch
         {
-            RiskProfile.conservative => 0.05,  // 5% per position
-            RiskProfile.moderate => 0.10,       // 10% per position
-            RiskProfile.aggressive => 0.20,     // 20% per position
-            _ => 0.10,
+            RiskProfile.conservative => Math.Min(0.08, config.MaxFraction),
+            RiskProfile.moderate => Math.Min(0.15, config.MaxFraction),
+            RiskProfile.aggressive => config.MaxFraction,
+            _ => Math.Min(0.10, config.MaxFraction),
         };
 
-        var maxDollars = cashAvailable * maxFraction;
+        // Ensure minFraction doesn't exceed profileCap (could happen via config override)
+        var effectiveMin = Math.Min(config.MinFraction, profileCap);
+
+        // ── Scale fraction linearly from effectiveMin to profileCap based on confidence ──
+        var clampedConf = Math.Clamp(confidence, config.ConfidenceFloor, config.ConfidenceCeiling);
+        var confRange = config.ConfidenceCeiling - config.ConfidenceFloor;
+        var confT = confRange > 0 ? (clampedConf - config.ConfidenceFloor) / confRange : 0.5;
+        var fraction = effectiveMin + confT * (profileCap - effectiveMin);
+
+        // ── Adjust for expected value ──
+        var ev = expectedValuePercent ?? 0;
+        if (ev > 5.0)
+        {
+            // Strong positive EV — bonus allocation (capped at profileCap)
+            fraction = Math.Min(fraction + config.EvBonus, profileCap);
+        }
+        else if (ev < 0)
+        {
+            // Negative EV — shrink position
+            fraction *= config.EvPenalty;
+        }
+
+        // Final clamp
+        fraction = Math.Clamp(fraction, effectiveMin, profileCap);
+
+        var maxDollars = cashAvailable * fraction;
+
+        _logger.LogInformation(
+            "[sizing] conf={Confidence}, EV={EV:F1}%, profile={Profile}, fraction={Fraction:P1} → ${MaxDollars:F2} of ${Cash:F2}",
+            confidence, ev, riskProfile, fraction, maxDollars, cashAvailable);
 
         // Options: buy whole contracts (quantity in contracts, each = 100 shares).
         // Stocks: buy fractional shares if needed (round to 2 decimals).
         if (assetType == PositionAssetType.option)
         {
-            // Option premium is per-share, but 1 contract = 100 shares.
             var costPerContract = pricePerUnit * 100;
             if (costPerContract > maxDollars) return 0;
-            return Math.Floor(maxDollars / costPerContract); // whole contracts only
+            return Math.Floor(maxDollars / costPerContract);
         }
 
-        // Stocks: allow fractional shares
         var shares = maxDollars / pricePerUnit;
         if (shares < 0.01) return 0;
         return Math.Round(shares, 2);
     }
 
     /// <summary>
-    /// Open a position with auto-calculated quantity based on risk profile.
+    /// Open a position with auto-calculated quantity based on confidence, EV, and risk profile.
     /// Used by the orchestrator for automated portfolio tracking.
     /// </summary>
     public async Task<PortfolioPosition?> AutoOpenPositionAsync(
@@ -81,13 +127,17 @@ public class PortfolioBalanceEngine
         string ticker,
         double entryPrice,
         PositionAssetType assetType,
-        string? reason)
+        string? reason,
+        int confidence = 50,
+        double? expectedValuePercent = null,
+        PositionSizingConfig? sizingConfig = null)
     {
         var challenge = await _repo.GetChallengeAsync(portfolioId);
         if (challenge is null || challenge.Status != ChallengeStatus.active) return null;
 
         var quantity = CalculatePositionSize(
-            challenge.CurrentCash, entryPrice, challenge.RiskProfile, assetType);
+            challenge.CurrentCash, entryPrice, challenge.RiskProfile, assetType,
+            confidence, expectedValuePercent, sizingConfig);
 
         if (quantity <= 0)
         {

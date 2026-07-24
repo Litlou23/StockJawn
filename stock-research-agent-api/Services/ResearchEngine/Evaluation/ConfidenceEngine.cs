@@ -149,6 +149,19 @@ public class ConfidenceEngine : IConfidenceEngine
 
         var rawConfidence = winningScore * dataQualityFactor * confirmMult * riskAdj * calFactor * oppositionPenalty * regimePenalty;
 
+        // ── Bearish mean-reversion trap penalty ──
+        // Data: strong trend + strong momentum bearish = only 38% accuracy, +4.29% avg move
+        // against. When both evaluators strongly agree on bearish, the drop has likely
+        // already happened — we're chasing the end of the move, not the beginning.
+        if (winningDirection == "bearish"
+            && trend.BearishContribution >= 15
+            && momentum.BearishContribution >= 12)
+        {
+            var trapPenalty = 0.80; // 20% confidence reduction
+            rawConfidence *= trapPenalty;
+            debugSignals.Add($"Confidence: bearish mean-reversion trap penalty {trapPenalty:F2} — trend bear={trend.BearishContribution:F0}, momentum bear={momentum.BearishContribution:F0}");
+        }
+
         string? capReason = null;
         if (regimePenalty < 0.99)
         {
