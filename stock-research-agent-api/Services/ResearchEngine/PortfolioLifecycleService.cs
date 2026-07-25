@@ -472,7 +472,7 @@ public class PortfolioLifecycleService
                 .Select(p => p.PredictionId!)
                 .Distinct()
                 .ToList();
-            var candidateMap = await _candidateRepo.GetCandidatesByPredictionIdsAsync(predictionIds);
+            var candidateMap = await _candidateRepo.GetCandidateMapByPredictionIdsAsync(predictionIds);
 
             foreach (var pos in openPositions)
             {

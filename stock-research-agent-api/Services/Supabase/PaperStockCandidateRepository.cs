@@ -190,20 +190,26 @@ public class PaperStockCandidateRepository
         => _db.CountAsync("paper_stock_candidates", filter);
 
     /// <summary>
-    /// Batch-fetch candidates by their prediction IDs. Used by risk management
+    /// Batch-fetch candidates keyed by prediction ID. Used by risk management
     /// to determine timeframe for each open portfolio position.
+    /// Chunked to keep PostgREST URL bounded.
     /// </summary>
-    public async Task<Dictionary<string, PaperStockCandidate>> GetCandidatesByPredictionIdsAsync(List<string> predictionIds)
+    public async Task<Dictionary<string, PaperStockCandidate>> GetCandidateMapByPredictionIdsAsync(List<string> predictionIds)
     {
         if (predictionIds.Count == 0) return new();
 
-        // PostgREST in operator: prediction_id=in.(id1,id2,...)
-        var idList = string.Join(",", predictionIds.Select(id => $"\"{id}\""));
-        var rows = await _db.SelectAsync("paper_stock_candidates",
-            filter: $"prediction_id=in.({idList})");
+        var allRows = new List<PaperStockCandidate>();
+        const int chunkSize = 50;
+        for (int i = 0; i < predictionIds.Count; i += chunkSize)
+        {
+            var chunk = predictionIds.Skip(i).Take(chunkSize);
+            var rows = await _db.SelectAsync("paper_stock_candidates",
+                filter: SupabaseClient.InFilter("prediction_id", chunk));
+            allRows.AddRange(rows.Select(MapCandidate));
+        }
 
         // Use GroupBy to avoid crash if duplicate prediction_ids ever appear
-        return rows.Select(MapCandidate)
+        return allRows
             .Where(c => c.PredictionId is not null)
             .GroupBy(c => c.PredictionId!)
             .ToDictionary(g => g.Key, g => g.First());

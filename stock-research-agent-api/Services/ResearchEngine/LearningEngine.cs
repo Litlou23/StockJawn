@@ -2765,7 +2765,7 @@ public class LearningEngine
                 .Select(p => p.PredictionId!)
                 .Distinct().ToList();
             var candidateMap = predictionIds.Count > 0
-                ? await _candidateRepo.GetCandidatesByPredictionIdsAsync(predictionIds)
+                ? await _candidateRepo.GetCandidateMapByPredictionIdsAsync(predictionIds)
                 : new Dictionary<string, PaperStockCandidate>();
 
             // Group by timeframe tier

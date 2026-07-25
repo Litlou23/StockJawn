@@ -99,15 +99,39 @@ public class ConfidenceEngine : IConfidenceEngine
                 debugSignals.Add($"Confidence: fundamentals drag {fundamentalsMod:F2} (valuation/short interest/beta risk)");
         }
 
-        double confirmMult = aggregate.AlignedBuckets switch
+        // Weighted confirmation: predictive signals (trend, momentum, market_context)
+        // count fully toward alignment; noise signals count minimally.
+        // This prevents noise-signal agreement from inflating confidence.
+        var predictiveKinds = new HashSet<EvaluatorKind>
         {
-            >= 5 => 1.30,
-            4 => 1.20,
-            3 => 1.10,
-            _ => 1.00,
+            EvaluatorKind.trend,
+            EvaluatorKind.momentum,
+            EvaluatorKind.market_context,
         };
-        confirmMult -= aggregate.ConflictingBuckets * 0.10;
-        confirmMult = Math.Clamp(confirmMult, 0.75, 1.30);
+        double weightedAligned = 0, weightedConflicting = 0;
+        bool winIsBullish = winningDirection == "bullish";
+        foreach (var (kind, output) in aggregate.Outputs)
+        {
+            if (!output.ParticipatesInConfirmation) continue;
+            var net = output.BullishContribution - output.BearishContribution;
+            if (Math.Abs(net) < 1) continue;
+            double signalWeight = predictiveKinds.Contains(kind) ? 1.0 : 0.15;
+            bool bucketVotesBullish = net > 0;
+            if (bucketVotesBullish == winIsBullish)
+                weightedAligned += signalWeight;
+            else
+                weightedConflicting += signalWeight;
+        }
+
+        double confirmMult = weightedAligned switch
+        {
+            >= 2.5 => 1.25,  // 2-3 predictive signals aligned
+            >= 1.8 => 1.15,  // 2 predictive signals aligned
+            >= 1.0 => 1.05,  // 1 predictive signal aligned
+            _ => 1.00,       // only noise signals aligned
+        };
+        confirmMult -= weightedConflicting * 0.15;
+        confirmMult = Math.Clamp(confirmMult, 0.75, 1.25);
 
         var riskAdj = 1.0 - Math.Min(Math.Abs(riskAssessment.RiskPenalty), 30) / 100.0;
         var calFactor = context.LearningData.CalibrationFactor;
