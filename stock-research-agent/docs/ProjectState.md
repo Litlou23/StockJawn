@@ -114,6 +114,7 @@ Phase 1, Task 1.1: Delete dead code files (OptionLearningService.cs, OptionLearn
 | [ADR-017](adr/017-srp-service-extraction.md) | Extract focused services from orchestrator god objects | Active |
 | [ADR-018](adr/018-documentation-as-product.md) | Living documentation maintained alongside code | Active |
 | [ADR-019](adr/019-portfolio-budget-constrains-option-selection.md) | Portfolio budget constrains option candidate selection | Active |
+| [ADR-020](adr/020-position-close-independent-of-candidate-status.md) | Position closing must not depend on candidate status | Active |
 
 ## Hard Constraints
 

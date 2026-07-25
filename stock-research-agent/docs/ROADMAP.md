@@ -118,6 +118,7 @@ Intelligent capital allocation and risk management.
 | **Frontend proxy routes** | Active — Next.js proxy routes for `/api/portfolio/summary`, `/api/portfolio/challenges`, `/api/portfolio/positions` |
 | **Risk budgeting** | Not started |
 | **Drawdown management** | Active — 25% drawdown circuit breaker in `OpenPositionsForCandidatesAsync`. Pauses new trades when portfolio drops 25% from peak. |
+| **Position lifecycle safety net** | Active — `CloseExpiredPositionsAsync` sweeps open positions independently of candidate status so capital cannot be stranded by a failed evaluation (ADR-020) |
 | **Correlation-aware allocation** | Not started |
 | **Portfolio rebalancing** | Not started |
 

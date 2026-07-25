@@ -302,6 +302,10 @@ public class DynamicPickOrchestrator
             await _portfolioLifecycle.ClosePositionsForCandidatesAsync(
                 openStock, StockCandidateService.MinEvalHours, errors);
 
+        // 5b. Release positions the candidate-driven pass can no longer reach
+        var strandedClosed = await _portfolioLifecycle.CloseExpiredPositionsAsync(errors);
+        portfolioPositionsClosed += strandedClosed;
+
         // 6. Evaluate neutral predictions (parallel pipeline — does not touch directional evaluator)
         var neutralEvaluated = 0;
         try
@@ -325,7 +329,8 @@ public class DynamicPickOrchestrator
                          : "") +
                      (neutralEvaluated > 0 ? $" Neutral outcomes: {neutralEvaluated}." : "") +
                      (portfolioPositionsClosed > 0 ? $" Closed {portfolioPositionsClosed} portfolio positions." : "") +
-                     (portfolioPositionsSkipped > 0 ? $" Skipped {portfolioPositionsSkipped} positions (time window not elapsed)." : "");
+                     (strandedClosed > 0 ? $" ({strandedClosed} were stranded past their holding window.)" : "") +
+                     (portfolioPositionsSkipped > 0 ? $" Skipped {portfolioPositionsSkipped} candidates (time window not elapsed)." : "");
 
         return new DynamicEodResult
         {

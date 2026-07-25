@@ -278,6 +278,100 @@ public class PortfolioLifecycleService
         return (portfolioPositionsClosed, portfolioPositionsSkipped);
     }
 
+    /// <summary>
+    /// Safety net that closes positions whose holding window has fully elapsed,
+    /// keyed off the position itself rather than its paper candidate.
+    ///
+    /// ClosePositionsForCandidatesAsync can only reach positions whose candidate is
+    /// still `open`. A candidate that expires past MaxEvalHours, or whose close fails
+    /// after it was already marked evaluated, drops out of that list permanently and
+    /// strands its position — holding cash that never returns to the challenge.
+    /// This sweep runs after the candidate-driven pass and uses the later
+    /// MaxEvalHours boundary, so it only ever picks up genuine strays.
+    /// </summary>
+    public async Task<int> CloseExpiredPositionsAsync(List<string> errors)
+    {
+        var activeChallenges = await _portfolioRepo.GetActiveChallengesAsync();
+        if (activeChallenges.Count == 0) return 0;
+
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        // Backstop for positions whose originating candidate can no longer be found.
+        var fallbackMaxHours = weights.GetValueOrDefault("max_position_hold_hours", 720);
+
+        var closed = 0;
+
+        foreach (var challenge in activeChallenges)
+        {
+            var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
+            if (openPositions.Count == 0) continue;
+
+            var predictionIds = openPositions
+                .Where(p => !string.IsNullOrEmpty(p.PredictionId))
+                .Select(p => p.PredictionId!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var candidates = await _candidateRepo.GetCandidatesByPredictionIdsAsync(predictionIds);
+            var timeframeByPrediction = new Dictionary<string, StockTimeframe>(StringComparer.OrdinalIgnoreCase);
+            foreach (var c in candidates)
+            {
+                if (!string.IsNullOrEmpty(c.PredictionId))
+                    timeframeByPrediction.TryAdd(c.PredictionId!, c.Timeframe);
+            }
+
+            foreach (var pos in openPositions)
+            {
+                var ageHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+
+                var maxHours = pos.PredictionId is not null
+                    && timeframeByPrediction.TryGetValue(pos.PredictionId, out var tf)
+                        ? StockCandidateService.MaxEvalHours.GetValueOrDefault(tf, (int)fallbackMaxHours)
+                        : (int)fallbackMaxHours;
+
+                if (ageHours <= maxHours) continue;
+
+                try
+                {
+                    var quote = await _marketData.GetQuoteWithFallbackAsync(pos.Ticker);
+                    if (quote is null || quote.Price <= 0)
+                    {
+                        _logger.LogWarning(
+                            "[portfolio] Cannot close stranded position {Ticker} ({Age:F0}h old) — no quote available.",
+                            pos.Ticker, ageHours);
+                        continue;
+                    }
+
+                    var result = await _portfolio.ClosePositionAsync(new ClosePositionRequest
+                    {
+                        PositionId = pos.Id,
+                        ExitPrice = quote.Price,
+                        ReasonExited =
+                            $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Auto-closed at ${quote.Price:F2}.",
+                    });
+
+                    if (result is not null)
+                    {
+                        closed++;
+                        _logger.LogInformation(
+                            "[portfolio] Closed stranded position {Ticker} after {Age:F0}h (limit {Max}h), ${Invested:F2} returned to cash.",
+                            pos.Ticker, ageHours, maxHours, pos.DollarsInvested);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[portfolio] Stranded-position close failed for {Ticker}", pos.Ticker);
+                    errors.Add($"portfolio-expire {pos.Ticker}: {ex.Message}");
+                }
+            }
+        }
+
+        if (closed > 0)
+            _logger.LogInformation("[portfolio] Released {Count} stranded positions back to cash.", closed);
+
+        return closed;
+    }
+
     public async Task<PortfolioChallengeSummary?> GetSummaryAsync()
     {
         return await _portfolio.GetSummaryAsync();

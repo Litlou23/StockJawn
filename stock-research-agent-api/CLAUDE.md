@@ -42,6 +42,7 @@
 
 **Special weight overrides:**
 - `risk_cap_boost` — auto-managed by Stage 3c self-tuning. Integer 0-15, added to risk-confidence caps when direction is clear. Max movement ±2 pts/day. Loosens caps when calibration error shows underconfidence, tightens when overconfident.
+- `max_position_hold_hours` — backstop (default 720 = 30 days) used by `PortfolioLifecycleService.CloseExpiredPositionsAsync` for open positions whose originating paper stock candidate can no longer be found, so no timeframe window can be resolved. Positions *with* a resolvable candidate use `StockCandidateService.MaxEvalHours` for their timeframe instead. Lower this to release legacy orphaned positions sooner.
 
 ### learning_insights
 `id`, `run_id`, `insight_type`, `insight_text`, `action_suggested`, `created_at`

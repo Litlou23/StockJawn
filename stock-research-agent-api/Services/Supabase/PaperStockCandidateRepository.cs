@@ -158,6 +158,27 @@ public class PaperStockCandidateRepository
         return rows.Select(MapCandidate).ToList();
     }
 
+    /// <summary>
+    /// Look up candidates by originating prediction, regardless of status.
+    /// Used to resolve holding windows for positions whose candidate has already
+    /// been evaluated or expired. Chunked to keep the PostgREST URL bounded.
+    /// </summary>
+    public async Task<List<PaperStockCandidate>> GetCandidatesByPredictionIdsAsync(List<string> predictionIds)
+    {
+        if (predictionIds.Count == 0) return [];
+
+        var results = new List<PaperStockCandidate>();
+        const int chunkSize = 50;
+        for (int i = 0; i < predictionIds.Count; i += chunkSize)
+        {
+            var chunk = predictionIds.Skip(i).Take(chunkSize);
+            var rows = await _db.SelectAsync("paper_stock_candidates",
+                filter: SupabaseClient.InFilter("prediction_id", chunk));
+            results.AddRange(rows.Select(MapCandidate));
+        }
+        return results;
+    }
+
     public async Task<List<PaperStockCandidate>> GetCandidatesByRunAsync(string runId)
     {
         var rows = await _db.SelectAsync("paper_stock_candidates",
