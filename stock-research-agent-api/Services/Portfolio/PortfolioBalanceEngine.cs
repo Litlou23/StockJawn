@@ -45,6 +45,31 @@ public class PortfolioBalanceEngine
         double EvPenalty = 0.50        // multiply fraction by 0.5 when EV is negative
     );
 
+    // Risk profile sets the absolute ceiling on any single position.
+    private static double ProfileCap(RiskProfile riskProfile, PositionSizingConfig config) => riskProfile switch
+    {
+        RiskProfile.conservative => Math.Min(0.08, config.MaxFraction),
+        RiskProfile.moderate => Math.Min(0.15, config.MaxFraction),
+        RiskProfile.aggressive => config.MaxFraction,
+        _ => Math.Min(0.10, config.MaxFraction),
+    };
+
+    /// <summary>
+    /// Maximum total premium this challenge can commit to a single option
+    /// contract. Uses the same risk-profile ceiling as CalculatePositionSize,
+    /// so a contract that passes this budget is one the portfolio can actually
+    /// open. Returns 0 when there is no cash to deploy.
+    /// </summary>
+    public static double CalculateMaxContractBudget(
+        double cashAvailable,
+        RiskProfile riskProfile,
+        PositionSizingConfig? config = null)
+    {
+        if (cashAvailable <= 0) return 0;
+        config ??= new PositionSizingConfig();
+        return cashAvailable * ProfileCap(riskProfile, config);
+    }
+
     /// <summary>
     /// Calculate how many shares/contracts to buy, scaling position size by
     /// prediction confidence and expected value. Risk profile caps the maximum.
@@ -63,14 +88,7 @@ public class PortfolioBalanceEngine
 
         config ??= new PositionSizingConfig();
 
-        // Risk profile sets the absolute ceiling for this challenge.
-        var profileCap = riskProfile switch
-        {
-            RiskProfile.conservative => Math.Min(0.08, config.MaxFraction),
-            RiskProfile.moderate => Math.Min(0.15, config.MaxFraction),
-            RiskProfile.aggressive => config.MaxFraction,
-            _ => Math.Min(0.10, config.MaxFraction),
-        };
+        var profileCap = ProfileCap(riskProfile, config);
 
         // Ensure minFraction doesn't exceed profileCap (could happen via config override)
         var effectiveMin = Math.Min(config.MinFraction, profileCap);

@@ -21,6 +21,7 @@ public class PaperOptionsService
 {
     private const int DefaultTopN = 5;
     private const double EstContractMultiplier = 100.0; // 1 option contract = 100 shares
+    private const double DefaultMaxContractCost = 200.0; // used when no portfolio budget is supplied
 
     private readonly MarketDataOptionsProvider _provider;
     private readonly OptionContractFilterService _filterService;
@@ -151,22 +152,28 @@ public class PaperOptionsService
             };
         }
 
-        // ---- Pass 1: strict default filter (spec values) ----
-        var strict = _filterService.Filter(chain.Contracts, filter);
-        strict = strict.Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol)).ToList();
-        var withinCost = strict.Where(c => c.Mid * EstContractMultiplier <= 200).ToList();
+        // Budget ceiling for a single contract. The automated pipeline supplies the
+        // portfolio's real number; the manual /paper-options page falls back to the default.
+        var costCap = req.MaxContractCost ?? DefaultMaxContractCost;
+        var budgetLabel = req.MaxContractCost is not null ? "portfolio budget" : "default cap";
 
-        var filtered = withinCost;
+        // ---- Pass 1: strict default filter (spec values) ----
+        var strict = _filterService.Filter(chain.Contracts, filter)
+            .Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol))
+            .ToList();
+        var filtered = strict.Where(c => c.Mid * EstContractMultiplier <= costCap).ToList();
+
         bool relaxed = false;
+        double? cheapestOverBudget = null;
 
         // ---- Pass 2: relax-and-retry when strict pass returns nothing ----
         // Stocks like MSFT/NVDA at $300+ won't have any ATM contracts under
-        // the $2/share cost cap, so the strict pass returns empty and the
-        // user sees nothing. Fall back to a wider scan and tag the survivors
-        // so the UI can warn the user they're outside default filters.
+        // the cost cap, so the strict pass returns empty and the user sees
+        // nothing. Fall back to a wider scan and tag the survivors so the UI
+        // can warn the user they're outside default filters.
         if (filtered.Count == 0)
         {
-            warnings.Add("No contracts passed strict filters (cost ≤ $200, vol ≥ 10, OI ≥ 100, spread ≤ 20%). " +
+            warnings.Add($"No contracts passed strict filters (cost ≤ ${costCap:F0} — {budgetLabel}, vol ≥ 10, OI ≥ 100, spread ≤ 20%). " +
                          "Showing wider results — review warnings carefully.");
             relaxed = true;
 
@@ -184,13 +191,23 @@ public class PaperOptionsService
                 MaxDelta = 0.70,              // was 0.60
             };
 
-            var relaxedPass = _filterService.Filter(chain.Contracts, relaxedFilter);
-            filtered = relaxedPass
+            var relaxedPass = _filterService.Filter(chain.Contracts, relaxedFilter)
                 .Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol))
                 .ToList();
 
-            if (filtered.Count == 0)
+            // Liquidity thresholds relax; the budget does not. A contract the
+            // portfolio cannot pay for is never a usable candidate.
+            filtered = relaxedPass.Where(c => c.Mid * EstContractMultiplier <= costCap).ToList();
+
+            if (filtered.Count == 0 && relaxedPass.Count > 0)
+            {
+                cheapestOverBudget = relaxedPass.Min(c => c.Mid * EstContractMultiplier);
+                warnings.Add($"All {relaxedPass.Count} contracts exceed the ${costCap:F0} {budgetLabel} — cheapest is ${cheapestOverBudget:F0}.");
+            }
+            else if (filtered.Count == 0)
+            {
                 warnings.Add("Even the relaxed scan returned no contracts. Try a different duration or check chain availability.");
+            }
         }
 
         if (filtered.Count == 0)
@@ -206,7 +223,7 @@ public class PaperOptionsService
                 Warnings = warnings,
                 MarketDataAvailable = underlyingPrice > 0,
                 OptionChainAvailable = chain.Contracts.Count > 0,
-                BlockReason = "liquidity_filter_failed",
+                BlockReason = cheapestOverBudget is not null ? "over_budget" : "liquidity_filter_failed",
             };
         }
 
@@ -221,8 +238,6 @@ public class PaperOptionsService
             var c = s.Contract;
             var contractWarnings = new List<string>();
             if (relaxed) contractWarnings.Add("Outside default filters — surfaced via relaxed scan.");
-            if (c.Mid * EstContractMultiplier > 200)
-                contractWarnings.Add($"Est. cost ${c.Mid * EstContractMultiplier:F0} exceeds default $200 cap.");
             if (c.Volume < 10) contractWarnings.Add("Low volume (<10).");
             if (c.OpenInterest < 100) contractWarnings.Add("Low open interest (<100).");
             if (c.BidAskSpreadPercent > 20) contractWarnings.Add($"Wide spread ({c.BidAskSpreadPercent:F1}%).");

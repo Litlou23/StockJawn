@@ -38,8 +38,12 @@ public class OptionCandidateService
     public async Task<OptionGenerationResult> GenerateOptionCandidatesAsync(
         List<StockCandidateService.StockCandidateBuild> stockBuilds,
         string runId,
-        List<string> errors)
+        List<string> errors,
+        double? maxContractCost = null)
     {
+        if (maxContractCost is not null)
+            _logger.LogInformation("[option-candidate] Portfolio budget caps contracts at ${Budget:F2}", maxContractCost);
+
         // Select top candidates for option generation, applying per-run and per-ticker caps.
         var optionAttempts = stockBuilds
             .Where(b => b.SavedCandidate is not null && b.SavedCandidate.QualifiesForOptions)
@@ -102,6 +106,7 @@ public class OptionCandidateService
                             InclusionReason = savedStock.InclusionReason,
                             ExclusionReason = savedStock.ExclusionReason,
                             ScorePercentileInRun = savedStock.ScorePercentileInRun,
+                            MaxContractCost = maxContractCost,
                         });
 
                         optionChainAvailable = resp?.OptionChainAvailable == true;

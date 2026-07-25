@@ -43,6 +43,37 @@ public class PortfolioLifecycleService
     }
 
     /// <summary>
+    /// Largest single-contract option premium any active challenge can afford.
+    /// Returned to the option-generation pipeline as a plain dollar constraint so
+    /// candidate selection never proposes contracts the portfolio cannot open
+    /// (ADR-008: the budget decision stays in the Portfolio AI layer).
+    /// Null means there is no active challenge, so no budget constraint applies.
+    /// </summary>
+    public async Task<double?> GetMaxOptionContractBudgetAsync()
+    {
+        var activeChallenges = await _portfolioRepo.GetActiveChallengesAsync();
+        if (activeChallenges.Count == 0) return null;
+
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var sizingConfig = BuildSizingConfig(weights);
+
+        // A contract is affordable if *any* active challenge could open it.
+        return activeChallenges.Max(c => PortfolioBalanceEngine.CalculateMaxContractBudget(
+            c.CurrentCash, c.RiskProfile, sizingConfig));
+    }
+
+    private static PortfolioBalanceEngine.PositionSizingConfig BuildSizingConfig(
+        Dictionary<string, double> weights) => new(
+            MinFraction: weights.GetValueOrDefault("sizing_min_fraction", 0.02),
+            MaxFraction: weights.GetValueOrDefault("sizing_max_fraction", 0.20),
+            ConfidenceFloor: weights.GetValueOrDefault("sizing_confidence_floor", 35),
+            ConfidenceCeiling: weights.GetValueOrDefault("sizing_confidence_ceiling", 85),
+            EvBonus: weights.GetValueOrDefault("sizing_ev_bonus", 0.03),
+            EvPenalty: weights.GetValueOrDefault("sizing_ev_penalty", 0.50)
+        );
+
+    /// <summary>
     /// Auto-open portfolio positions for actionable candidates that are
     /// directional, open, and have a valid entry price. Returns the number
     /// of positions successfully opened.
@@ -64,14 +95,7 @@ public class PortfolioLifecycleService
         var maxDrawdownPct = weights.GetValueOrDefault("max_drawdown_percent", 25);
 
         // ── Position sizing config ──
-        var sizingConfig = new PortfolioBalanceEngine.PositionSizingConfig(
-            MinFraction: weights.GetValueOrDefault("sizing_min_fraction", 0.02),
-            MaxFraction: weights.GetValueOrDefault("sizing_max_fraction", 0.20),
-            ConfidenceFloor: weights.GetValueOrDefault("sizing_confidence_floor", 35),
-            ConfidenceCeiling: weights.GetValueOrDefault("sizing_confidence_ceiling", 85),
-            EvBonus: weights.GetValueOrDefault("sizing_ev_bonus", 0.03),
-            EvPenalty: weights.GetValueOrDefault("sizing_ev_penalty", 0.50)
-        );
+        var sizingConfig = BuildSizingConfig(weights);
 
         var eligible = actionableCandidates
             .Where(c => c.IsActionable

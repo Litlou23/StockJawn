@@ -45,7 +45,7 @@ The core forecasting capability that turns research into actionable predictions.
 
 ---
 
-## 3. Options Intelligence — 65%
+## 3. Options Intelligence — 70%
 
 Options chain analysis, strategy simulation, and options-specific research.
 
@@ -56,8 +56,9 @@ Options chain analysis, strategy simulation, and options-specific research.
 | **Strategy simulation** | Active — `TheoreticalOptionsSimulator.cs` + `StrategyPayoffCalculator.cs` |
 | **Scenario generation** | Active — `AutomaticScenarioGenerator.cs` + `ScenarioRankingService.cs` |
 | **Prediction-to-strategy mapping** | Active — `PredictionStrategyMapper.cs` suggests strategies from predictions |
+| **Budget-aware selection** | Active — per-contract premium ceiling from the Portfolio AI layer caps candidate generation; chains priced above budget block with `over_budget` (ADR-019) |
 
-**Remaining work:** Greeks analysis and display, implied volatility surface visualization, budget-aware option selection ($100 account can't buy $500 contracts), spread strategy support.
+**Remaining work:** Greeks analysis and display, implied volatility surface visualization, spread strategy support.
 
 **Future vision:** Given a prediction, the system automatically selects the optimal options strategy considering budget, risk tolerance, and Greeks.
 
@@ -204,7 +205,7 @@ Connecting to a real brokerage for live execution.
 | Prediction Engine | 80% | Core |
 | Learning Engine | 75% | Core |
 | Market Intelligence | 70% | Core |
-| Options Intelligence | 65% | High |
+| Options Intelligence | 70% | High |
 | Paper Trading | 65% | Critical |
 | Research Engine | 75% | High |
 | Performance Analytics | 35% | High |

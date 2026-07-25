@@ -427,6 +427,13 @@ public class GenerateCandidatesRequest
     public string InclusionReason { get; set; } = "";
     public string? ExclusionReason { get; set; }
     public double ScorePercentileInRun { get; set; }
+
+    /// <summary>
+    /// Maximum total premium (mid × 100) the portfolio can commit to one
+    /// contract. Supplied by the Portfolio AI layer during automated runs.
+    /// Null falls back to the service default cap.
+    /// </summary>
+    public double? MaxContractCost { get; set; }
 }
 
 public record PaperCandidateEnhanced

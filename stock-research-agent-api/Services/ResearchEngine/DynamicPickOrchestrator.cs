@@ -212,8 +212,10 @@ public class DynamicPickOrchestrator
             errors.Add(msg);
         }
 
-        // 4. Option generation via extracted service
-        var optionResult = await _optionCandidates.GenerateOptionCandidatesAsync(stockBuilds, scan.RunId, errors);
+        // 4. Option generation via extracted service, capped by what the portfolio can afford
+        var optionBudget = await _portfolioLifecycle.GetMaxOptionContractBudgetAsync();
+        var optionResult = await _optionCandidates.GenerateOptionCandidatesAsync(
+            stockBuilds, scan.RunId, errors, optionBudget);
 
         var savedStockCandidates = stockBuilds
             .Where(b => b.SavedCandidate is not null)
