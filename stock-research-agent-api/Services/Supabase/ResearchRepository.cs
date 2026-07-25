@@ -409,9 +409,17 @@ public class ResearchRepository
     public async Task<List<PredictionOutcome>> GetOutcomesForPredictionsAsync(List<string> predictionIds)
     {
         if (predictionIds.Count == 0) return [];
-        var filter = $"prediction_id=in.({string.Join(",", predictionIds)})";
-        var rows = await _db.SelectAsync("prediction_outcomes", filter: filter);
-        return rows.Select(MapOutcome).ToList();
+
+        // Chunk to avoid exceeding PostgREST URL length limits with large in() filters
+        const int chunkSize = 100;
+        var results = new List<PredictionOutcome>();
+        foreach (var chunk in predictionIds.Chunk(chunkSize))
+        {
+            var filter = $"prediction_id=in.({string.Join(",", chunk)})";
+            var rows = await _db.SelectAsync("prediction_outcomes", filter: filter);
+            results.AddRange(rows.Select(MapOutcome));
+        }
+        return results;
     }
 
     /// <summary>

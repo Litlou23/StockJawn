@@ -73,11 +73,18 @@ public class NeutralOutcomeRepository
     public async Task<List<NeutralPredictionOutcome>> GetForPredictionsAsync(List<string> predictionIds)
     {
         if (predictionIds.Count == 0) return new();
-        // PostgREST in() filter
-        var ids = string.Join(",", predictionIds.Select(id => $"\"{id}\""));
-        var rows = await _db.SelectAsync("neutral_prediction_outcomes",
-            filter: $"prediction_id=in.({ids})", limit: predictionIds.Count);
-        return rows.Select(MapOutcome).ToList();
+
+        // Chunk to avoid exceeding PostgREST URL length limits with large in() filters
+        const int chunkSize = 100;
+        var results = new List<NeutralPredictionOutcome>();
+        foreach (var chunk in predictionIds.Chunk(chunkSize))
+        {
+            var ids = string.Join(",", chunk.Select(id => $"\"{id}\""));
+            var rows = await _db.SelectAsync("neutral_prediction_outcomes",
+                filter: $"prediction_id=in.({ids})", limit: chunk.Length);
+            results.AddRange(rows.Select(MapOutcome));
+        }
+        return results;
     }
 
     public async Task<List<NeutralPredictionOutcome>> GetByTypeAsync(string predictionType, int limit = 100)
