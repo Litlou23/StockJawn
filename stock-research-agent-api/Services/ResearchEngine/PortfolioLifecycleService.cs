@@ -20,6 +20,7 @@ public class PortfolioLifecycleService
     private readonly PortfolioChallengeRepository _portfolioRepo;
     private readonly PaperStockCandidateRepository _candidateRepo;
     private readonly ResearchRepository _researchRepo;
+    private readonly OptionsDataRepository _optionsRepo;
     private readonly MarketDataService _marketData;
     private readonly MarketStressDetector _stressDetector;
     private readonly ILogger<PortfolioLifecycleService> _logger;
@@ -29,6 +30,7 @@ public class PortfolioLifecycleService
         PortfolioChallengeRepository portfolioRepo,
         PaperStockCandidateRepository candidateRepo,
         ResearchRepository researchRepo,
+        OptionsDataRepository optionsRepo,
         MarketDataService marketData,
         MarketStressDetector stressDetector,
         ILogger<PortfolioLifecycleService> logger)
@@ -37,6 +39,7 @@ public class PortfolioLifecycleService
         _portfolioRepo = portfolioRepo;
         _candidateRepo = candidateRepo;
         _researchRepo = researchRepo;
+        _optionsRepo = optionsRepo;
         _marketData = marketData;
         _stressDetector = stressDetector;
         _logger = logger;
@@ -70,7 +73,10 @@ public class PortfolioLifecycleService
             ConfidenceFloor: weights.GetValueOrDefault("sizing_confidence_floor", 35),
             ConfidenceCeiling: weights.GetValueOrDefault("sizing_confidence_ceiling", 85),
             EvBonus: weights.GetValueOrDefault("sizing_ev_bonus", 0.03),
-            EvPenalty: weights.GetValueOrDefault("sizing_ev_penalty", 0.50)
+            EvPenalty: weights.GetValueOrDefault("sizing_ev_penalty", 0.50),
+            VolBaselineAtrPct: weights.GetValueOrDefault("sizing_vol_baseline_atr_pct", 2.5),
+            VolMinFactor: weights.GetValueOrDefault("sizing_vol_min_factor", 0.25),
+            VolMaxFactor: weights.GetValueOrDefault("sizing_vol_max_factor", 2.0)
         );
 
     /// <summary>
@@ -93,6 +99,8 @@ public class PortfolioLifecycleService
         var minConfidence = (int)weights.GetValueOrDefault("min_confidence_threshold", 35);
         var maxPositions = (int)weights.GetValueOrDefault("max_open_positions", 8);
         var maxDrawdownPct = weights.GetValueOrDefault("max_drawdown_percent", 25);
+        var maxPerSector = (int)weights.GetValueOrDefault("max_positions_per_sector", 3);
+        var maxChasePercent = weights.GetValueOrDefault("max_entry_chase_percent", 2.0);
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
@@ -151,6 +159,21 @@ public class PortfolioLifecycleService
             var slotsAvailable = maxPositions - currentOpenCount;
             var opened = 0;
 
+            // ── Build sector concentration map from existing open positions ──
+            // Uses cached fundamentals (no extra API calls — already fetched during morning scan).
+            var sectorCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pos in openPositions)
+            {
+                try
+                {
+                    var fundamentals = await _marketData.GetFundamentalsAsync(pos.Ticker);
+                    var sector = fundamentals?.Sector;
+                    if (!string.IsNullOrEmpty(sector))
+                        sectorCounts[sector] = sectorCounts.GetValueOrDefault(sector) + 1;
+                }
+                catch { /* best-effort — unknown sector won't block */ }
+            }
+
             foreach (var c in eligible)
             {
                 if (opened >= slotsAvailable) break;
@@ -172,6 +195,59 @@ public class PortfolioLifecycleService
                     continue;
                 }
 
+                // ── Sector concentration check ──
+                // Don't overload any single sector — one bad sector day shouldn't wipe the portfolio.
+                string? candidateSector = null;
+                try
+                {
+                    var fundamentals = await _marketData.GetFundamentalsAsync(c.Ticker);
+                    candidateSector = fundamentals?.Sector;
+                }
+                catch { /* unknown sector won't block entry */ }
+
+                if (!string.IsNullOrEmpty(candidateSector)
+                    && sectorCounts.GetValueOrDefault(candidateSector) >= maxPerSector)
+                {
+                    _logger.LogInformation(
+                        "[portfolio] Skipping {Ticker} — sector {Sector} already at concentration limit ({Count}/{Max})",
+                        c.Ticker, candidateSector, sectorCounts[candidateSector], maxPerSector);
+                    continue;
+                }
+
+                // ── Entry timing filter — don't chase ──
+                // If the stock already moved significantly in the predicted direction
+                // since the prediction was generated, we'd be buying high (or selling low).
+                // Compare current price to the prediction's entry price snapshot.
+                if (maxChasePercent > 0 && c.EntryPrice is > 0)
+                {
+                    try
+                    {
+                        var currentQuote = await _marketData.GetQuoteAsync(c.Ticker);
+                        if (currentQuote is not null)
+                        {
+                            var movePercent = (currentQuote.Price - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
+                            var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
+
+                            // Bullish + stock already up > threshold = chasing
+                            // Bearish + stock already down > threshold = chasing
+                            var isChasing = (isBullish && movePercent >= maxChasePercent)
+                                         || (!isBullish && movePercent <= -maxChasePercent);
+
+                            if (isChasing)
+                            {
+                                _logger.LogInformation(
+                                    "[portfolio] Skipping {Ticker} — already moved {Move:F1}% in predicted direction (chase limit {Limit}%)",
+                                    c.Ticker, Math.Abs(movePercent), maxChasePercent);
+                                continue;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogDebug(ex, "[portfolio] Chase check quote fetch failed for {Ticker} — proceeding", c.Ticker);
+                    }
+                }
+
                 try
                 {
                     // Compute EV% from target/stop/entry if available
@@ -185,21 +261,69 @@ public class PortfolioLifecycleService
                         evPercent = (winProb * gainPct) - ((1 - winProb) * lossPct);
                     }
 
+                    // ── For options: use real option premium from paper option candidate ──
+                    // The stock candidate's EntryPrice is the stock price, not the option
+                    // premium. Look up the linked PaperCandidateEnhanced to get the actual
+                    // contract mid-price from MarketData.app.
+                    var entryPrice = c.EntryPrice!.Value;
+                    var optionSymbol = (string?)null;
+                    if (assetType == PositionAssetType.option && !string.IsNullOrEmpty(c.Id))
+                    {
+                        var optionCandidate = await _optionsRepo.GetByStockCandidateIdAsync(c.Id);
+                        if (optionCandidate is not null && optionCandidate.EntryMid > 0)
+                        {
+                            entryPrice = optionCandidate.EntryMid;
+                            optionSymbol = optionCandidate.OptionSymbol;
+                            _logger.LogInformation(
+                                "[portfolio] Using real option premium for {Ticker}: ${Premium:F2} ({Symbol}, strike ${Strike}, DTE {Dte})",
+                                c.Ticker, entryPrice, optionCandidate.OptionSymbol, optionCandidate.Strike, optionCandidate.DteAtEntry);
+                        }
+                        else
+                        {
+                            _logger.LogWarning(
+                                "[portfolio] No option candidate found for stock candidate {Id} ({Ticker}) — skipping option position",
+                                c.Id, c.Ticker);
+                            continue; // Don't open option positions without real premium data
+                        }
+                    }
+
+                    // ── Look up prediction's ATR% for volatility-adjusted sizing ──
+                    // Stored on PredictionCandidate at scan time — no extra API call.
+                    double? atrPct = null;
+                    if (!string.IsNullOrEmpty(c.PredictionId))
+                    {
+                        try
+                        {
+                            var prediction = await _researchRepo.GetPredictionByIdAsync(c.PredictionId);
+                            atrPct = prediction?.AtrPercent;
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "[portfolio] ATR lookup failed for {Ticker} — sizing without vol adjustment", c.Ticker);
+                        }
+                    }
+
                     var pos = await _portfolio.AutoOpenPositionAsync(
                         challenge.Id,
                         c.PredictionId,
                         c.Ticker,
-                        c.EntryPrice!.Value,
+                        entryPrice,
                         assetType,
-                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}, ev={evPercent:F1}%",
+                        $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}, ev={evPercent:F1}%, atr={atrPct?.ToString("F1") ?? "n/a"}%"
+                            + (optionSymbol is not null ? $", contract={optionSymbol}" : ""),
                         confidence: c.ConfidenceScore,
                         expectedValuePercent: evPercent,
-                        sizingConfig: sizingConfig);
+                        sizingConfig: sizingConfig,
+                        atrPercent: atrPct);
 
                     if (pos is not null)
                     {
                         portfolioPositionsOpened++;
                         opened++;
+
+                        // Update sector count so subsequent candidates respect the limit
+                        if (!string.IsNullOrEmpty(candidateSector))
+                            sectorCounts[candidateSector] = sectorCounts.GetValueOrDefault(candidateSector) + 1;
                     }
                 }
                 catch (Exception ex)

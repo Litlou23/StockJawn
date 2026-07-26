@@ -75,6 +75,20 @@ public partial class OptionsDataRepository
         return row is not null ? MapPaperCandidateEnhanced(row) : null;
     }
 
+    /// <summary>
+    /// Look up the option candidate generated from a specific paper stock candidate.
+    /// Used by portfolio lifecycle to get the real option premium for position opening.
+    /// Returns the most recent open candidate, or most recent overall if none are open.
+    /// </summary>
+    public async Task<PaperCandidateEnhanced?> GetByStockCandidateIdAsync(string stockCandidateId)
+    {
+        // Prefer open candidates; fall back to most recent of any status
+        var rows = await _db.SelectAsync("paper_option_candidates",
+            filter: $"paper_stock_candidate_id=eq.{stockCandidateId}",
+            order: "created_at.desc", limit: 1);
+        return rows.Count > 0 ? MapPaperCandidateEnhanced(rows[0]) : null;
+    }
+
     public async Task<List<PaperCandidateEnhanced>> GetOpenPaperCandidatesEnhancedAsync()
     {
         var rows = await _db.SelectAsync("paper_option_candidates",

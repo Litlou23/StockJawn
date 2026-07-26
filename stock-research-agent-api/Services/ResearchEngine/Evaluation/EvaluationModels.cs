@@ -121,7 +121,8 @@ public record EvaluationContext
         List<string> lessons,
         List<ResearchSignal> researchSignals,
         ResearchUniverseContext? researchUniverse = null,
-        VolatilityOpportunityAssessment? volatilityAssessment = null)
+        VolatilityOpportunityAssessment? volatilityAssessment = null,
+        MarketRegimeResult? marketRegimeResult = null)
     {
         var riskCapBoost = (int)Math.Clamp(weights.GetValueOrDefault("risk_cap_boost", 0.0), 0, 15);
         var calibrationFactor = Math.Clamp(weights.GetValueOrDefault("calibration_factor", 1.0), 0.85, 1.15);
@@ -136,6 +137,7 @@ public record EvaluationContext
             ResearchSignals = researchSignals,
             ResearchUniverse = researchUniverse ?? new ResearchUniverseContext(),
             VolatilityAssessment = volatilityAssessment,
+            MarketRegimeResult = marketRegimeResult,
             LearningData = new EvaluationLearningData
             {
                 Weights = new Dictionary<string, double>(weights),

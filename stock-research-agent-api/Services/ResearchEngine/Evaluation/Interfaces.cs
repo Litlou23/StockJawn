@@ -52,5 +52,6 @@ public interface IScoringEngine
         List<ResearchSignal>? researchSignals = null,
         MarketIntelligenceContext? intelligence = null,
         ResearchUniverseContext? researchUniverse = null,
-        VolatilityOpportunityAssessment? volatilityAssessment = null);
+        VolatilityOpportunityAssessment? volatilityAssessment = null,
+        MarketRegimeResult? marketRegimeResult = null);
 }

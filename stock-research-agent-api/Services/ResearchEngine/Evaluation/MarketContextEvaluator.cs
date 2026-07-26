@@ -24,10 +24,38 @@ public class MarketContextEvaluator : IMarketContextEvaluator
             else if (relQqq < -1.5) { bear += 4; signals.Add($"Market: lagging QQQ ({relQqq:F1}%)"); }
         }
 
+        // Multi-day SPY trend (EMA-based) — strongest market signal.
+        // This captures whether the market has been trending up/down over weeks,
+        // not just today's noise. Heavily weighted because counter-trend predictions
+        // have near-zero win rates historically.
+        if (ctx.SpyMultiDayTrend is not null)
+        {
+            if (ctx.SpyMultiDayTrend == "bullish") { bull += 8; signals.Add($"Market: SPY above 20-EMA (ratio {ctx.SpyEmaRatio:F4}) — multi-day uptrend"); }
+            else if (ctx.SpyMultiDayTrend == "bearish") { bear += 8; signals.Add($"Market: SPY below 20-EMA (ratio {ctx.SpyEmaRatio:F4}) — multi-day downtrend"); }
+        }
+
+        // Sector ETF momentum — is the stock's sector trending with or against it?
+        // A stock in a sector whose ETF is above its EMA has tailwinds; below = headwinds.
+        // Worth ~5 pts — meaningful but not dominant over broad market.
+        if (ctx.SectorEtfTrend is not null && ctx.SectorEtf is not null)
+        {
+            if (ctx.SectorEtfTrend == "bullish")
+            {
+                bull += 5;
+                signals.Add($"Sector: {ctx.SectorEtf} above EMA (ratio {ctx.SectorEtfEmaRatio:F4}) — sector uptrend");
+            }
+            else if (ctx.SectorEtfTrend == "bearish")
+            {
+                bear += 5;
+                signals.Add($"Sector: {ctx.SectorEtf} below EMA (ratio {ctx.SectorEtfEmaRatio:F4}) — sector downtrend");
+            }
+        }
+
+        // Intraday SPY trend (today's change) — lighter weight, noisy
         if (ctx.SpyTrend is not null)
         {
-            if (ctx.SpyTrend == "bullish") { bull += 3; signals.Add("Market: SPY trend bullish"); }
-            else if (ctx.SpyTrend == "bearish") { bear += 3; signals.Add("Market: SPY trend bearish"); }
+            if (ctx.SpyTrend == "bullish") { bull += 2; signals.Add("Market: SPY today bullish"); }
+            else if (ctx.SpyTrend == "bearish") { bear += 2; signals.Add("Market: SPY today bearish"); }
         }
         if (ctx.QqqTrend is not null)
         {
@@ -38,8 +66,8 @@ public class MarketContextEvaluator : IMarketContextEvaluator
         return new EvaluatorOutput
         {
             Kind = Kind,
-            BullishContribution = Math.Clamp(bull, 0, 15),
-            BearishContribution = Math.Clamp(bear, 0, 15),
+            BullishContribution = Math.Clamp(bull, 0, 25),
+            BearishContribution = Math.Clamp(bear, 0, 25),
             DebugSignals = signals,
             DebugInformation = new EvaluatorReasoning
             {

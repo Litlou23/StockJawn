@@ -157,6 +157,18 @@ public record BenchmarkContext
     public string? QqqTrend { get; init; }
     public double? RelativeStrengthVsSpy { get; init; }
     public double? RelativeStrengthVsQqq { get; init; }
+
+    /// <summary>SPY price / EMA(20). &gt;1.0 = above EMA (bullish), &lt;1.0 = below EMA (bearish).</summary>
+    public double? SpyEmaRatio { get; init; }
+    /// <summary>Multi-day SPY trend: "bullish" (above EMA20), "bearish" (below), or "neutral" (within 0.3%).</summary>
+    public string? SpyMultiDayTrend { get; init; }
+
+    /// <summary>Sector ETF ticker for this stock's sector (e.g., "XLK" for Technology). Null if sector unknown.</summary>
+    public string? SectorEtf { get; init; }
+    /// <summary>Sector ETF price / EMA26 ratio. &gt;1.0 = above EMA (sector bullish). Null if unavailable.</summary>
+    public double? SectorEtfEmaRatio { get; init; }
+    /// <summary>Sector ETF multi-day trend: "bullish", "bearish", or "neutral" based on EMA ratio.</summary>
+    public string? SectorEtfTrend { get; init; }
 }
 
 /// <summary>
@@ -390,6 +402,9 @@ public static class PredictionCategoryHelper
     ];
 
     public static bool IsDirectional(PredictionType type) => DirectionalTypes.Contains(type);
+
+    /// <summary>True if the prediction expects upward price movement.</summary>
+    public static bool IsBullish(PredictionType type) => type == PredictionType.bullish;
 
     /// <summary>True for neutral_* types that need evaluation by NeutralOutcomeEvaluator.</summary>
     public static bool IsNeutralEvaluable(PredictionType type) => NeutralEvaluableTypes.Contains(type);

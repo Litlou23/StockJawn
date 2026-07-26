@@ -8,6 +8,7 @@ using StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.Discovery;
+using StockResearchAgent.Api.Services.MarketRegime;
 using StockResearchAgent.Api.Services.ResearchUniverse;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 
@@ -44,6 +45,7 @@ public class PredictionGenerator
     private readonly VolatilityOpportunityEngine _voe;
     private readonly PredictionProfileRepository _profileRepo;
     private readonly MarketStressDetector _stressDetector;
+    private readonly IMarketRegimeEngine _regimeEngine;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
@@ -62,6 +64,7 @@ public class PredictionGenerator
         VolatilityOpportunityEngine voe,
         PredictionProfileRepository profileRepo,
         MarketStressDetector stressDetector,
+        IMarketRegimeEngine regimeEngine,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
@@ -78,6 +81,7 @@ public class PredictionGenerator
         _voe = voe;
         _profileRepo = profileRepo;
         _stressDetector = stressDetector;
+        _regimeEngine = regimeEngine;
         _logger = logger;
         _ensembleEnabled = string.Equals(
             configuration["ENSEMBLE_SCORING_ENABLED"], "true",
@@ -212,20 +216,89 @@ public class PredictionGenerator
 
         // Fetch SPY/QQQ for market context (best-effort)
         MarketSnapshotQuote? spyQuote = null, qqqQuote = null;
+        double? spyEma20 = null;
+        double? spyEma50 = null;
         try
         {
             var spyTask = _marketData.GetQuoteAsync("SPY");
             var qqqTask = _marketData.GetQuoteAsync("QQQ");
-            await Task.WhenAll(spyTask, qqqTask);
+            var spyEmaTask = _marketData.GetEmaAsync("SPY");
+            await Task.WhenAll(spyTask, qqqTask, spyEmaTask);
             spyQuote = spyTask.Result;
             qqqQuote = qqqTask.Result;
+            // Use EMA26 as ~20-day trend proxy (TwelveData returns 12/26/50)
+            spyEma20 = spyEmaTask.Result.Ema26;
+            spyEma50 = spyEmaTask.Result.Ema50;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "[prediction] Failed to fetch SPY/QQQ benchmark quotes for {Ticker}", ticker);
         }
 
-        var benchmark = IndicatorEngine.ComputeBenchmarkContext(snapshot.Quote, spyQuote, qqqQuote);
+        // Fetch sector ETF EMA for sector momentum signal (best-effort).
+        // Uses the stock's sector from fundamentals to look up the SPDR sector ETF,
+        // then fetches its quote + EMA to determine sector-level trend.
+        string? sectorEtf = null;
+        double? sectorEtfPrice = null;
+        double? sectorEtfEma = null;
+        try
+        {
+            var sector = snapshot.Fundamentals?.Sector;
+            sectorEtf = IndicatorEngine.GetSectorEtf(sector);
+            if (sectorEtf is not null)
+            {
+                var sectorQuoteTask = _marketData.GetQuoteAsync(sectorEtf);
+                var sectorEmaTask = _marketData.GetEmaAsync(sectorEtf);
+                await Task.WhenAll(sectorQuoteTask, sectorEmaTask);
+                sectorEtfPrice = sectorQuoteTask.Result?.Price;
+                sectorEtfEma = sectorEmaTask.Result.Ema26; // ~20-day proxy
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Failed to fetch sector ETF data for {Ticker}", ticker);
+        }
+
+        var benchmark = IndicatorEngine.ComputeBenchmarkContext(
+            snapshot.Quote, spyQuote, qqqQuote, spyEma20,
+            sectorEtf, sectorEtfPrice, sectorEtfEma);
+
+        // ── Market Regime Classification ──────────────────────────────
+        // Build context from available data and classify the current regime.
+        // The regime result flows into EvaluationContext for use by evaluators
+        // and ConfidenceEngine for counter-trend prediction suppression.
+        MarketRegimeResult? regimeResult = null;
+        try
+        {
+            var stressForRegime = await _stressDetector.EvaluateAsync();
+            var qqqEma = await _marketData.GetEmaAsync("QQQ");
+
+            var regimeCtx = new MarketRegimeContext
+            {
+                // SPY price / EMA26 as short-term trend ratio (~50-day proxy)
+                SpyTrendRatio = benchmark.SpyEmaRatio,
+                // QQQ price / EMA26
+                QqqTrendRatio = qqqQuote is not null && qqqEma.Ema26 is not null && qqqEma.Ema26 > 0
+                    ? Math.Round(qqqQuote.Price / qqqEma.Ema26.Value, 4)
+                    : null,
+                // SPY price / EMA50 as long-term trend ratio
+                SpyLongTrendRatio = spyQuote is not null && spyEma50 is not null && spyEma50 > 0
+                    ? Math.Round(spyQuote.Price / spyEma50.Value, 4)
+                    : null,
+                // VIX from stress detector (already cached)
+                Vix = stressForRegime.Vix,
+            };
+
+            regimeResult = _regimeEngine.Classify(regimeCtx);
+
+            _logger.LogInformation(
+                "[prediction] Market regime: {Primary} ({Confidence:P0}) — {Summary}",
+                regimeResult.PrimaryRegime, regimeResult.PrimaryConfidence, regimeResult.Summary);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Market regime classification failed for {Ticker}, continuing without", ticker);
+        }
 
         // Fetch active research signals for this ticker
         var researchSignals = await _signalService.GetActiveSignalsForTickerAsync(ticker);
@@ -291,7 +364,7 @@ public class PredictionGenerator
         {
             ensembleResult = await _ensemble.ScoreWithEnsembleAsync(
                 snapshot, indicators, benchmark, weights, lessons, researchSignals,
-                intelligence, researchUniverse, volatilityAssessment);
+                intelligence, researchUniverse, volatilityAssessment, regimeResult);
             scoring = ensembleResult.BlendedResult;
             _logger.LogInformation(
                 "[prediction] {Ticker}: ensemble scoring — agreement={Agreement:P0}, dominant={Dominant}",
@@ -301,7 +374,7 @@ public class PredictionGenerator
         {
             scoring = _scoringEngine.Evaluate(
                 snapshot, indicators, benchmark, weights, lessons, researchSignals,
-                intelligence, researchUniverse, volatilityAssessment);
+                intelligence, researchUniverse, volatilityAssessment, regimeResult);
         }
 
         var predType = scoring.PredictionType;

@@ -214,6 +214,44 @@ public class ConfidenceEngine : IConfidenceEngine
             capReason = "Strong market context conflict";
         }
 
+        // ── Market Regime suppression ─────────────────────────────────
+        // When MarketRegimeEngine detects a clear trend, counter-trend
+        // predictions get hard-capped. This is the primary gate that
+        // prevents the system from making bullish swing trades in a
+        // bear market (which historically have near-zero win rates).
+        var regime = context.MarketRegimeResult;
+        if (regime is not null)
+        {
+            var primary = regime.PrimaryRegime;
+            var regimeConf = regime.PrimaryConfidence;
+            var regimeCapThreshold = weights.GetValueOrDefault("regime_suppress_confidence", 0.50);
+
+            if (primary == MarketRegimeType.BearTrend && regimeConf >= regimeCapThreshold && winningDirection == "bullish")
+            {
+                // Bear market — cap bullish predictions aggressively
+                var bearCap = (int)weights.GetValueOrDefault("regime_bear_bullish_cap", 35.0);
+                rawConfidence = Math.Min(rawConfidence, bearCap);
+                capReason = $"Regime suppression: BearTrend ({regimeConf:P0}) caps bullish at {bearCap}";
+                debugSignals.Add($"REGIME_SUPPRESS: BearTrend ({regimeConf:P0}) → bullish capped at {bearCap}");
+            }
+            else if (primary == MarketRegimeType.BullTrend && regimeConf >= regimeCapThreshold && winningDirection == "bearish")
+            {
+                // Bull market — cap bearish predictions (less aggressive, bearish shorts can still work)
+                var bullCap = (int)weights.GetValueOrDefault("regime_bull_bearish_cap", 45.0);
+                rawConfidence = Math.Min(rawConfidence, bullCap);
+                capReason = $"Regime suppression: BullTrend ({regimeConf:P0}) caps bearish at {bullCap}";
+                debugSignals.Add($"REGIME_SUPPRESS: BullTrend ({regimeConf:P0}) → bearish capped at {bullCap}");
+            }
+            else if (primary == MarketRegimeType.HighVolatility && regimeConf >= regimeCapThreshold)
+            {
+                // High vol regime — cap all predictions to avoid noise trades
+                var volCap = (int)weights.GetValueOrDefault("regime_high_vol_cap", 50.0);
+                rawConfidence = Math.Min(rawConfidence, volCap);
+                capReason ??= $"Regime suppression: HighVolatility ({regimeConf:P0}) caps at {volCap}";
+                debugSignals.Add($"REGIME_SUPPRESS: HighVolatility ({regimeConf:P0}) → capped at {volCap}");
+            }
+        }
+
         var maxCap = weights.GetValueOrDefault("max_confidence_cap", 85.0);
         int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, maxCap));
 

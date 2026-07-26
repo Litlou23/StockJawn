@@ -294,6 +294,67 @@ public class PortfolioChallengeController : ControllerBase
     }
 
     /// <summary>
+    /// Lightweight intraday risk check — runs stop-loss, take-profit, and trailing stop
+    /// checks on all open portfolio positions and prediction pool.
+    /// No dashboard rebuild, no snapshot capture — just risk management.
+    /// Designed to be called every 30 minutes during market hours via pg_cron.
+    /// </summary>
+    [HttpPost("intraday-risk-check")]
+    public async Task<IActionResult> IntradayRiskCheck()
+    {
+        // ── Portfolio position risk checks ──
+        RiskCheckResult? riskResult = null;
+        try
+        {
+            riskResult = await _lifecycle.EvaluateRiskLimitsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[intraday-risk] Portfolio risk check failed");
+        }
+
+        // ── Prediction pool risk checks ──
+        OutcomeEvaluator.PredictionRiskCheckResult? predictionRiskResult = null;
+        try
+        {
+            predictionRiskResult = await _outcomeEvaluator.EvaluatePredictionRiskLimitsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[intraday-risk] Prediction risk check failed");
+        }
+
+        var totalClosed = (riskResult?.TotalClosed ?? 0) + (predictionRiskResult?.TotalEarlyEvaluated ?? 0);
+        if (totalClosed > 0)
+            _logger.LogWarning("[intraday-risk] Closed {Total} positions/predictions during intraday check", totalClosed);
+        else
+            _logger.LogInformation("[intraday-risk] No exits triggered");
+
+        return Ok(new
+        {
+            portfolioRisk = riskResult is not null ? new
+            {
+                riskResult.PositionsChecked,
+                riskResult.StopLossClosed,
+                riskResult.TakeProfitClosed,
+                riskResult.TrailingStopClosed,
+                riskResult.HighWaterMarksUpdated,
+                riskResult.TotalClosed,
+            } : null,
+            predictionRisk = predictionRiskResult is not null ? new
+            {
+                predictionRiskResult.PredictionsChecked,
+                predictionRiskResult.StopLossEvaluated,
+                predictionRiskResult.TargetHitEvaluated,
+                predictionRiskResult.InvalidationEvaluated,
+                predictionRiskResult.TotalEarlyEvaluated,
+                predictionRiskResult.QuotesFailed,
+            } : null,
+            totalClosed,
+        });
+    }
+
+    /// <summary>
     /// Builds a full dashboard snapshot: parallel quote fetch, equity curve, stats.
     /// </summary>
     private async Task<PortfolioDashboard?> BuildDashboardAsync(PortfolioChallengeSummary summary)

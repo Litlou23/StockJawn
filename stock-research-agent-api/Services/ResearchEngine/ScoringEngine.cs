@@ -119,7 +119,8 @@ public class ScoringEngine : IScoringEngine
         List<ResearchSignal>? researchSignals = null,
         MarketIntelligenceContext? intelligence = null,
         ResearchUniverseContext? researchUniverse = null,
-        VolatilityOpportunityAssessment? volatilityAssessment = null)
+        VolatilityOpportunityAssessment? volatilityAssessment = null,
+        MarketRegimeResult? marketRegimeResult = null)
     {
         intelligence ??= new MarketIntelligenceContext
         {
@@ -137,7 +138,8 @@ public class ScoringEngine : IScoringEngine
             lessons,
             researchSignals ?? [],
             researchUniverse,
-            volatilityAssessment);
+            volatilityAssessment,
+            marketRegimeResult);
 
         var outputs = new List<EvaluatorOutput>
         {

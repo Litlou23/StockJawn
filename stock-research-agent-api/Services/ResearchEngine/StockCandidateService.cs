@@ -825,13 +825,16 @@ public class StockCandidateService
 
     public static DurationPreference ChooseDuration(PaperStockCandidate stock)
     {
-        // High-confidence + low-risk + short timeframe -> one week.
-        // Otherwise lean two_week.
-        if (stock.ConfidenceScore >= 75 && stock.RiskScore <= 40 && stock.Timeframe != StockTimeframe.one_week)
-            return DurationPreference.one_week;
-        if (stock.RiskScore >= 60)
-            return DurationPreference.two_week;
-        return DurationPreference.system_recommended;
+        // Map prediction timeframe → option DTE range so we don't overpay
+        // for time value we don't need. A 1-day prediction doesn't need
+        // a 30-DTE option — that's 29 days of theta drag.
+        return stock.Timeframe switch
+        {
+            StockTimeframe.one_day => DurationPreference.one_week,     // 3-12 DTE: minimal theta waste
+            StockTimeframe.two_day => DurationPreference.one_week,     // 3-12 DTE: move should happen fast
+            StockTimeframe.one_week => DurationPreference.two_week,    // 10-25 DTE: buffer for 5-7 day thesis
+            _ => DurationPreference.two_week,                          // default to 2-week for longer holds
+        };
     }
 
     public static string ConfBucket(int conf) => conf switch

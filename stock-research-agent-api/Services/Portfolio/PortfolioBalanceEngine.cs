@@ -42,7 +42,12 @@ public class PortfolioBalanceEngine
         double ConfidenceFloor = 35,   // confidence below this gets minFraction
         double ConfidenceCeiling = 85, // confidence at/above this gets maxFraction (for the risk profile)
         double EvBonus = 0.03,         // extra 3% allocation when EV is strongly positive (>5%)
-        double EvPenalty = 0.50        // multiply fraction by 0.5 when EV is negative
+        double EvPenalty = 0.50,       // multiply fraction by 0.5 when EV is negative
+        // Volatility-adjusted sizing: scale position inversely with ATR%
+        // so high-vol stocks get smaller positions and dollar-risk is consistent.
+        double VolBaselineAtrPct = 2.5,  // "average" stock ATR% — positions at this level get no adjustment
+        double VolMinFactor = 0.25,      // floor — even the wildest stock gets at least 25% of base size
+        double VolMaxFactor = 2.0        // ceiling — low-vol stocks get at most 2x base size
     );
 
     // Risk profile sets the absolute ceiling on any single position.
@@ -82,7 +87,8 @@ public class PortfolioBalanceEngine
         PositionAssetType assetType,
         int confidence = 50,
         double? expectedValuePercent = null,
-        PositionSizingConfig? config = null)
+        PositionSizingConfig? config = null,
+        double? atrPercent = null)
     {
         if (pricePerUnit <= 0 || cashAvailable <= 0) return 0;
 
@@ -112,14 +118,25 @@ public class PortfolioBalanceEngine
             fraction *= config.EvPenalty;
         }
 
+        // ── Volatility adjustment — scale position inversely with ATR% ──
+        // A stock with 5% ATR should get a smaller position than one with 2% ATR,
+        // so the dollar-risk-per-trade stays roughly constant across volatility levels.
+        double volFactor = 1.0;
+        if (atrPercent is > 0 && config.VolBaselineAtrPct > 0)
+        {
+            volFactor = config.VolBaselineAtrPct / atrPercent.Value;
+            volFactor = Math.Clamp(volFactor, config.VolMinFactor, config.VolMaxFactor);
+            fraction *= volFactor;
+        }
+
         // Final clamp
         fraction = Math.Clamp(fraction, effectiveMin, profileCap);
 
         var maxDollars = cashAvailable * fraction;
 
         _logger.LogInformation(
-            "[sizing] conf={Confidence}, EV={EV:F1}%, profile={Profile}, fraction={Fraction:P1} → ${MaxDollars:F2} of ${Cash:F2}",
-            confidence, ev, riskProfile, fraction, maxDollars, cashAvailable);
+            "[sizing] conf={Confidence}, EV={EV:F1}%, ATR%={AtrPct}, volFactor={VolFactor:F2}, profile={Profile}, fraction={Fraction:P1} → ${MaxDollars:F2} of ${Cash:F2}",
+            confidence, ev, atrPercent?.ToString("F1") ?? "n/a", volFactor, riskProfile, fraction, maxDollars, cashAvailable);
 
         // Options: buy whole contracts (quantity in contracts, each = 100 shares).
         // Stocks: buy fractional shares if needed (round to 2 decimals).
@@ -148,14 +165,15 @@ public class PortfolioBalanceEngine
         string? reason,
         int confidence = 50,
         double? expectedValuePercent = null,
-        PositionSizingConfig? sizingConfig = null)
+        PositionSizingConfig? sizingConfig = null,
+        double? atrPercent = null)
     {
         var challenge = await _repo.GetChallengeAsync(portfolioId);
         if (challenge is null || challenge.Status != ChallengeStatus.active) return null;
 
         var quantity = CalculatePositionSize(
             challenge.CurrentCash, entryPrice, challenge.RiskProfile, assetType,
-            confidence, expectedValuePercent, sizingConfig);
+            confidence, expectedValuePercent, sizingConfig, atrPercent);
 
         if (quantity <= 0)
         {

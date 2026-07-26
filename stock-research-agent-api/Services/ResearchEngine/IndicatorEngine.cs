@@ -8,6 +8,30 @@ namespace StockResearchAgent.Api.Services.ResearchEngine;
 /// </summary>
 public static class IndicatorEngine
 {
+    // -----------------------------------------------------------------------
+    // Sector → ETF mapping (SPDR sector ETFs)
+    // Keys match TwelveData /profile "sector" values.
+    // -----------------------------------------------------------------------
+    public static readonly IReadOnlyDictionary<string, string> SectorEtfMap =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Technology"]              = "XLK",
+            ["Healthcare"]              = "XLV",
+            ["Financials"]              = "XLF",
+            ["Consumer Discretionary"]  = "XLY",
+            ["Consumer Staples"]        = "XLP",
+            ["Energy"]                  = "XLE",
+            ["Industrials"]             = "XLI",
+            ["Materials"]               = "XLB",
+            ["Real Estate"]             = "XLRE",
+            ["Utilities"]               = "XLU",
+            ["Communication Services"]  = "XLC",
+        };
+
+    /// <summary>Look up the sector ETF ticker for a TwelveData sector name. Returns null if unmapped.</summary>
+    public static string? GetSectorEtf(string? sector)
+        => sector is not null && SectorEtfMap.TryGetValue(sector, out var etf) ? etf : null;
+
     public static TechnicalIndicators Compute(List<MarketSnapshotBar> bars)
     {
         var computed = new List<string>();
@@ -220,7 +244,11 @@ public static class IndicatorEngine
     public static BenchmarkContext ComputeBenchmarkContext(
         MarketSnapshotQuote? tickerQuote,
         MarketSnapshotQuote? spyQuote,
-        MarketSnapshotQuote? qqqQuote)
+        MarketSnapshotQuote? qqqQuote,
+        double? spyEma20 = null,
+        string? sectorEtf = null,
+        double? sectorEtfPrice = null,
+        double? sectorEtfEma = null)
     {
         double? spyChange = null, qqqChange = null;
         double? relSpy = null, relQqq = null;
@@ -246,6 +274,28 @@ public static class IndicatorEngine
                 relQqq = Math.Round(tickerQuote.ChangePercent - qqqChange.Value, 2);
         }
 
+        // Multi-day SPY trend from EMA(20): price/EMA ratio tells us if the market
+        // has been trending up or down over ~4 weeks, not just today's move.
+        double? spyEmaRatio = null;
+        string? spyMultiDayTrend = null;
+        if (spyQuote is not null && spyEma20 is not null && spyEma20 > 0)
+        {
+            spyEmaRatio = Math.Round(spyQuote.Price / spyEma20.Value, 4);
+            // >0.3% above EMA = bullish trend, >0.3% below = bearish, else neutral
+            var deviation = (spyEmaRatio.Value - 1.0) * 100;
+            spyMultiDayTrend = deviation > 0.3 ? "bullish" : deviation < -0.3 ? "bearish" : "neutral";
+        }
+
+        // Sector ETF trend from EMA — same logic as SPY multi-day trend.
+        double? sectorEmaRatio = null;
+        string? sectorEtfTrend = null;
+        if (sectorEtf is not null && sectorEtfPrice is not null && sectorEtfEma is not null && sectorEtfEma > 0)
+        {
+            sectorEmaRatio = Math.Round(sectorEtfPrice.Value / sectorEtfEma.Value, 4);
+            var sectorDeviation = (sectorEmaRatio.Value - 1.0) * 100;
+            sectorEtfTrend = sectorDeviation > 0.3 ? "bullish" : sectorDeviation < -0.3 ? "bearish" : "neutral";
+        }
+
         return new BenchmarkContext
         {
             SpyChangePercent = spyChange,
@@ -254,6 +304,11 @@ public static class IndicatorEngine
             QqqTrend = qqqTrend,
             RelativeStrengthVsSpy = relSpy,
             RelativeStrengthVsQqq = relQqq,
+            SpyEmaRatio = spyEmaRatio,
+            SpyMultiDayTrend = spyMultiDayTrend,
+            SectorEtf = sectorEtf,
+            SectorEtfEmaRatio = sectorEmaRatio,
+            SectorEtfTrend = sectorEtfTrend,
         };
     }
 

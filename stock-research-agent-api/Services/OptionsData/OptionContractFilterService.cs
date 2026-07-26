@@ -199,45 +199,39 @@ public class OptionContractFilterService
         double riskScore)
     {
         int minDte, maxDte;
+        double minDelta, maxDelta;
+        double strikeRange;
         string durationBucket;
 
         switch (duration)
         {
             case DurationPreference.one_week:
+                // Short-term: tight DTE, higher delta for max responsiveness,
+                // narrower strike range (closer to ATM for better fills)
                 minDte = 3;
-                maxDte = 10;
+                maxDte = 12;
+                minDelta = 0.40;   // higher floor — we need the contract to move with the stock
+                maxDelta = 0.70;   // allow slightly ITM for better delta exposure
+                strikeRange = 0.10; // ±10% strike range
                 durationBucket = "one_week";
                 break;
             case DurationPreference.two_week:
+                // Medium-term: moderate DTE with room for thesis to play out,
+                // standard delta range
                 minDte = 10;
-                maxDte = 21;
+                maxDte = 25;
+                minDelta = 0.30;
+                maxDelta = 0.60;
+                strikeRange = 0.12; // ±12% strike range
                 durationBucket = "two_week";
                 break;
-            default: // system_recommended
-                if (confidenceScore > 70 && riskScore < 40)
-                {
-                    minDte = 3;
-                    maxDte = 10;
-                    durationBucket = "one_week";
-                }
-                else if (confidenceScore >= 50 && confidenceScore <= 70)
-                {
-                    minDte = 10;
-                    maxDte = 21;
-                    durationBucket = "two_week";
-                }
-                else if (riskScore > 60)
-                {
-                    minDte = 7;
-                    maxDte = 30;
-                    durationBucket = "two_week";
-                }
-                else
-                {
-                    minDte = 7;
-                    maxDte = 30;
-                    durationBucket = "system_recommended";
-                }
+            default: // system_recommended — shouldn't hit often now that ChooseDuration maps timeframes
+                minDte = 7;
+                maxDte = 21;
+                minDelta = 0.35;
+                maxDelta = 0.65;
+                strikeRange = 0.12;
+                durationBucket = "system_recommended";
                 break;
         }
 
@@ -250,10 +244,10 @@ public class OptionContractFilterService
             MinOpenInterest = 100,
             MinVolume = 10,
             MaxBidAskSpreadPercent = 20,
-            MinDelta = 0.30,
-            MaxDelta = 0.60,
-            MinStrike = Math.Round(underlyingPrice * 0.85, 2),
-            MaxStrike = Math.Round(underlyingPrice * 1.15, 2),
+            MinDelta = minDelta,
+            MaxDelta = maxDelta,
+            MinStrike = Math.Round(underlyingPrice * (1 - strikeRange), 2),
+            MaxStrike = Math.Round(underlyingPrice * (1 + strikeRange), 2),
         };
 
         if (predictionType == "bullish")
@@ -308,14 +302,17 @@ public class OptionContractFilterService
                 _ => 20,
             });
 
-            // DTE: 7-45 days preferred for short-term research
+            // DTE: prefer shorter DTE that's still safe — don't overpay for time.
+            // Short DTE = less theta drag, more capital-efficient.
+            // But too short (<3) risks expiring before the thesis plays out.
             var dteScore = (double)(c.Dte switch
             {
-                >= 7 and <= 45 => 100,
-                >= 3 and < 7 => 70,
-                > 45 and <= 90 => 70,
-                > 90 and <= 120 => 50,
-                _ => 20,
+                >= 5 and <= 14 => 100,   // sweet spot: enough time, minimal waste
+                >= 3 and < 5 => 80,      // tight but workable
+                > 14 and <= 25 => 80,    // fine for 1-2 week holds
+                > 25 and <= 45 => 50,    // paying for time you probably don't need
+                > 45 => 20,              // way too much theta drag
+                _ => 10,                 // <3 DTE too risky
             });
 
             // Direction fit: does the contract side match the prediction?
@@ -336,19 +333,40 @@ public class OptionContractFilterService
                 _ => 50.0,
             };
 
-            var overall = liquidityScore * 0.25
-                + spreadScore * 0.20
-                + ivScore * 0.15
-                + dteScore * 0.10
+            // Theta efficiency: delta/|theta| ratio — how much directional
+            // exposure you get per dollar of daily time decay.
+            // Higher = the contract moves more per underlying dollar move
+            // relative to what theta costs you each day.
+            var thetaEfficiency = 50.0; // neutral default
+            if (Math.Abs(c.Theta) > 0.001 && Math.Abs(c.Delta) > 0)
+            {
+                var ratio = Math.Abs(c.Delta) / Math.Abs(c.Theta);
+                thetaEfficiency = ratio switch
+                {
+                    >= 15 => 100,   // excellent: delta dominates theta
+                    >= 8 => 80,     // good ratio
+                    >= 4 => 60,     // acceptable
+                    >= 2 => 40,     // theta is eating a lot
+                    _ => 20,        // theta dominates — bad trade
+                };
+            }
+
+            var overall = liquidityScore * 0.20
+                + spreadScore * 0.15
+                + ivScore * 0.10
+                + dteScore * 0.15
                 + directionFit * 0.15
-                + priceFit * 0.15;
+                + priceFit * 0.10
+                + thetaEfficiency * 0.15;
 
             var parts = new List<string>();
             if (liquidityScore >= 70) parts.Add("high liquidity");
             if (spreadScore >= 80) parts.Add("tight spread");
             if (ivScore >= 70) parts.Add("favorable IV");
-            if (dteScore >= 70) parts.Add("good DTE range");
+            if (dteScore >= 70) parts.Add("good DTE");
             if (directionFit >= 80) parts.Add("direction match");
+            if (thetaEfficiency >= 70) parts.Add("theta-efficient");
+            else if (thetaEfficiency <= 30) parts.Add("theta drag");
             parts.Add($"price:{priceBucket}");
 
             return new ContractScore

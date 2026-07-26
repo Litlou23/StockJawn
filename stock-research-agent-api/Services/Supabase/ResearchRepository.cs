@@ -259,36 +259,51 @@ public class ResearchRepository
     public async Task<PredictionStatsAggregate> GetPredictionStatsAsync(string? profileId = null)
     {
         var predFilter = profileId is not null ? $"profile_id=eq.{profileId}" : null;
-        // For outcomes, filter via prediction_candidates join isn't possible with PostgREST count,
-        // so we fetch matching prediction IDs first when profile-scoped
-        string? outcomeFilter = null;
+
+        var totalTask = _db.CountAsync("prediction_candidates", predFilter);
+
+        int outcomesTotal, correct, incorrect;
+
         if (profileId is not null)
         {
+            // Profile-scoped: fetch prediction IDs, then count outcomes in chunks
+            // to avoid PostgREST URL length limits with large in() filters
             var predRows = await _db.SelectAsync("prediction_candidates",
                 filter: predFilter, select: "id", limit: 5000);
             var ids = predRows.Select(r => r["id"]?.ToString()).Where(id => id is not null).ToList();
             if (ids.Count == 0)
-                return new PredictionStatsAggregate();
-            outcomeFilter = $"prediction_id=in.({string.Join(",", ids)})";
+                return new PredictionStatsAggregate { TotalPredictions = await totalTask };
+
+            outcomesTotal = 0; correct = 0; incorrect = 0;
+            const int chunkSize = 100;
+            foreach (var chunk in ids.Chunk(chunkSize))
+            {
+                var inFilter = $"prediction_id=in.({string.Join(",", chunk)})";
+                var tasks = new[]
+                {
+                    _db.CountAsync("prediction_outcomes", inFilter),
+                    _db.CountAsync("prediction_outcomes", $"{inFilter}&direction_correct=eq.true"),
+                    _db.CountAsync("prediction_outcomes", $"{inFilter}&direction_correct=eq.false"),
+                };
+                await Task.WhenAll(tasks);
+                outcomesTotal += tasks[0].Result;
+                correct += tasks[1].Result;
+                incorrect += tasks[2].Result;
+            }
+        }
+        else
+        {
+            // Unscoped: no in() filter needed
+            var outcomesTotalTask = _db.CountAsync("prediction_outcomes");
+            var correctTask = _db.CountAsync("prediction_outcomes", "direction_correct=eq.true");
+            var incorrectTask = _db.CountAsync("prediction_outcomes", "direction_correct=eq.false");
+            await Task.WhenAll(outcomesTotalTask, correctTask, incorrectTask);
+            outcomesTotal = outcomesTotalTask.Result;
+            correct = correctTask.Result;
+            incorrect = incorrectTask.Result;
         }
 
-        var totalTask = _db.CountAsync("prediction_candidates", predFilter);
-        var outcomesTotalTask = _db.CountAsync("prediction_outcomes", outcomeFilter);
-        var correctFilter = outcomeFilter is not null
-            ? $"{outcomeFilter}&direction_correct=eq.true"
-            : "direction_correct=eq.true";
-        var incorrectFilter = outcomeFilter is not null
-            ? $"{outcomeFilter}&direction_correct=eq.false"
-            : "direction_correct=eq.false";
-        var correctTask = _db.CountAsync("prediction_outcomes", correctFilter);
-        var incorrectTask = _db.CountAsync("prediction_outcomes", incorrectFilter);
-
-        await Task.WhenAll(totalTask, outcomesTotalTask, correctTask, incorrectTask);
-
-        var total = totalTask.Result;
-        var outcomesTotal = outcomesTotalTask.Result;
-        var correct = correctTask.Result;
-        var incorrect = incorrectTask.Result;
+        var total = await totalTask;
         var inconclusive = outcomesTotal - correct - incorrect;
         var pending = total - outcomesTotal;
         var denominator = correct + incorrect;
@@ -437,11 +452,13 @@ public class ResearchRepository
         if (predictions.Count > 0)
         {
             var predIds = predictions.Select(p => p["id"]?.ToString()).Where(id => id is not null).Select(id => id!).ToList();
-            if (predIds.Count > 0)
+            // Chunk to avoid PostgREST URL length limits with large in() filters
+            const int chunkSize = 100;
+            foreach (var chunk in predIds.Chunk(chunkSize))
             {
-                var idsFilter = $"prediction_id=in.({string.Join(",", predIds!)})";
+                var idsFilter = $"prediction_id=in.({string.Join(",", chunk)})";
                 var outcomeRows = await _db.SelectAsync("prediction_outcomes",
-                    filter: idsFilter, select: "prediction_id,direction_correct", limit: 500);
+                    filter: idsFilter, select: "prediction_id,direction_correct", limit: chunk.Length);
                 foreach (var row in outcomeRows)
                 {
                     var pid = row["prediction_id"]?.ToString();
@@ -938,16 +955,21 @@ public class ResearchRepository
         if (predIds.Count == 0)
             return new CategoryStatsAggregate { Category = category };
 
-        var idsFilter = $"prediction_id=in.({string.Join(",", predIds)})";
-        var correctTask = _db.CountAsync("prediction_outcomes", $"{idsFilter}&direction_correct=eq.true");
-        var incorrectTask = _db.CountAsync("prediction_outcomes", $"{idsFilter}&direction_correct=eq.false");
+        // Chunk to avoid PostgREST URL length limits with large in() filters
+        int correct = 0, incorrect = 0;
+        const int chunkSize = 100;
+        foreach (var chunk in predIds.Chunk(chunkSize))
+        {
+            var inFilter = $"prediction_id=in.({string.Join(",", chunk)})";
+            var correctTask = _db.CountAsync("prediction_outcomes", $"{inFilter}&direction_correct=eq.true");
+            var incorrectTask = _db.CountAsync("prediction_outcomes", $"{inFilter}&direction_correct=eq.false");
+            await Task.WhenAll(correctTask, incorrectTask);
+            correct += correctTask.Result;
+            incorrect += incorrectTask.Result;
+        }
 
-        await Task.WhenAll(correctTask, incorrectTask);
-        var correct = correctTask.Result;
-        var incorrect = incorrectTask.Result;
         var evaluated = correct + incorrect;
         var pending = total - evaluated;
-        var denom = correct + incorrect;
 
         return new CategoryStatsAggregate
         {
@@ -957,7 +979,7 @@ public class ResearchRepository
             Correct = correct,
             Incorrect = incorrect,
             Pending = pending > 0 ? pending : 0,
-            AccuracyPercent = denom > 0 ? Math.Round(100.0 * correct / denom, 1) : null,
+            AccuracyPercent = evaluated > 0 ? Math.Round(100.0 * correct / evaluated, 1) : null,
         };
     }
 
