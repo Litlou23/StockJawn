@@ -94,7 +94,8 @@ public class DashboardController : ControllerBase
                 {
                     i.Ticker,
                     Warnings = (i.MissingDataWarnings as System.Text.Json.Nodes.JsonArray)?
-                        .Select(w => w?.ToString() ?? "").Where(w => w != "").ToList() ?? new List<string>()
+                        .Select(w => w?.ToString() ?? "").Where(w => w != "").OfType<string>().ToList()
+                        ?? new List<string>()
                 })
                 .ToList();
 
@@ -276,6 +277,129 @@ public class DashboardController : ControllerBase
         {
             _logger.LogError(ex, "[dashboard] Failed to build summary");
             return StatusCode(500, new { error = "Failed to build dashboard summary", detail = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// GET /api/dashboard/accuracy-history — daily prediction accuracy for charting.
+    /// Returns per-day evaluated/correct/accuracy for the last 60 days,
+    /// plus rolling 7-day and 30-day accuracy.
+    /// </summary>
+    [HttpGet("accuracy-history")]
+    public async Task<IActionResult> GetAccuracyHistory()
+    {
+        try
+        {
+            var since = DateTimeOffset.UtcNow.AddDays(-90);
+            var outcomes = await _researchRepo.GetOutcomesSinceAsync(since, limit: 2000);
+
+            if (outcomes.Count == 0)
+                return Ok(new { days = Array.Empty<object>() });
+
+            // Group by evaluation date
+            var byDay = outcomes
+                .Where(o => o.DirectionCorrect is not null)
+                .GroupBy(o => o.EvaluationTime.Date)
+                .OrderBy(g => g.Key)
+                .Select(g => new
+                {
+                    date = g.Key.ToString("yyyy-MM-dd"),
+                    evaluated = g.Count(),
+                    correct = g.Count(o => o.DirectionCorrect == true),
+                    incorrect = g.Count(o => o.DirectionCorrect == false),
+                    accuracy = g.Count() > 0
+                        ? Math.Round(100.0 * g.Count(o => o.DirectionCorrect == true) / g.Count(), 1)
+                        : 0.0,
+                })
+                .ToList();
+
+            // Compute rolling averages
+            var result = new List<object>();
+            for (int i = 0; i < byDay.Count; i++)
+            {
+                var day = byDay[i];
+
+                // 7-day rolling
+                var window7 = byDay.Skip(Math.Max(0, i - 6)).Take(Math.Min(7, i + 1)).ToList();
+                var total7 = window7.Sum(d => d.evaluated);
+                var correct7 = window7.Sum(d => d.correct);
+                var accuracy7 = total7 > 0 ? (double?)Math.Round(100.0 * correct7 / total7, 1) : null;
+
+                // 30-day rolling
+                var window30 = byDay.Skip(Math.Max(0, i - 29)).Take(Math.Min(30, i + 1)).ToList();
+                var total30 = window30.Sum(d => d.evaluated);
+                var correct30 = window30.Sum(d => d.correct);
+                var accuracy30 = total30 > 0 ? (double?)Math.Round(100.0 * correct30 / total30, 1) : null;
+
+                result.Add(new
+                {
+                    day.date,
+                    day.evaluated,
+                    day.correct,
+                    day.incorrect,
+                    day.accuracy,
+                    rolling7 = accuracy7,
+                    rolling30 = accuracy30,
+                    cumTotal = byDay.Take(i + 1).Sum(d => d.evaluated),
+                    cumCorrect = byDay.Take(i + 1).Sum(d => d.correct),
+                });
+            }
+
+            // Streak data
+            var orderedOutcomes = outcomes
+                .Where(o => o.DirectionCorrect is not null)
+                .OrderByDescending(o => o.EvaluationTime)
+                .ToList();
+
+            int currentStreak = 0;
+            bool? streakType = null;
+            int longestWin = 0, longestLoss = 0, tempStreak = 0;
+            bool? lastDirection = null;
+
+            foreach (var o in orderedOutcomes)
+            {
+                if (streakType is null)
+                {
+                    streakType = o.DirectionCorrect;
+                    currentStreak = 1;
+                }
+                else if (currentStreak > 0 && o.DirectionCorrect == streakType)
+                {
+                    currentStreak++;
+                }
+
+                // longest streaks
+                if (o.DirectionCorrect == lastDirection)
+                {
+                    tempStreak++;
+                }
+                else
+                {
+                    if (lastDirection == true) longestWin = Math.Max(longestWin, tempStreak);
+                    if (lastDirection == false) longestLoss = Math.Max(longestLoss, tempStreak);
+                    tempStreak = 1;
+                    lastDirection = o.DirectionCorrect;
+                }
+            }
+            if (lastDirection == true) longestWin = Math.Max(longestWin, tempStreak);
+            if (lastDirection == false) longestLoss = Math.Max(longestLoss, tempStreak);
+
+            return Ok(new
+            {
+                days = result,
+                streak = new
+                {
+                    current = currentStreak,
+                    type = streakType == true ? "win" : streakType == false ? "loss" : "none",
+                    longestWin,
+                    longestLoss,
+                },
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[dashboard] Failed to compute accuracy history");
+            return StatusCode(500, new { error = "Failed to compute accuracy history" });
         }
     }
 

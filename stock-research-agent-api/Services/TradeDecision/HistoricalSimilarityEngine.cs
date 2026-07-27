@@ -1,39 +1,45 @@
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.CaseRepository;
 
 namespace StockResearchAgent.Api.Services.TradeDecision;
 
 /// <summary>
 /// Deterministic historical similarity engine.
 ///
-/// Phase 1:  No database access — works with an in-memory case library
-/// that is empty by default.  A future phase will inject a case provider
-/// (e.g. from setup_learning_stats / trade_setups) without changing this
-/// interface.
+/// Queries the <see cref="IHistoricalCaseRepository"/> for evaluated
+/// prediction outcomes and scores them against the current trade.
+/// Cases are cached for 1 hour to avoid repeated repo queries.
 ///
 /// Similarity scoring (configurable weights, must sum to 1.0):
 ///   Trade Grade       30%
 ///   Direction match   20%
 ///   Feature overlap   25%
 ///   Evidence overlap  25%
-///
-/// Stateless, no I/O, safe to register as singleton.
 /// </summary>
 public class HistoricalSimilarityEngine : IHistoricalSimilarityEngine
 {
+    private readonly IHistoricalCaseRepository _caseRepo;
+
     // ── Configurable similarity weights ──────────────────────────────
     private const double WeightTradeGrade       = 0.30;
     private const double WeightDirection        = 0.20;
     private const double WeightFeatureOverlap   = 0.25;
     private const double WeightEvidenceOverlap  = 0.25;
 
-    /// <summary>
-    /// In-memory case library.  Empty in Phase 1.
-    /// Future: injected via constructor from a case provider service.
-    /// </summary>
-    private readonly List<HistoricalCaseRecord> _caseLibrary = [];
+    // ── Cached case library (refreshed hourly) ──────────────────────
+    private List<HistoricalCaseRecord> _caseLibrary = [];
+    private DateTimeOffset _cacheExpiry = DateTimeOffset.MinValue;
+    private readonly SemaphoreSlim _cacheLock = new(1, 1);
+
+    public HistoricalSimilarityEngine(IHistoricalCaseRepository caseRepo)
+    {
+        _caseRepo = caseRepo;
+    }
 
     public HistoricalSimilarityResult FindSimilar(HistoricalSimilarityRequest request)
     {
+        RefreshCacheIfNeeded();
+
         var trade = request.Trade;
 
         // ── Score every case against the query ───────────────────────
@@ -230,14 +236,59 @@ public class HistoricalSimilarityEngine : IHistoricalSimilarityEngine
     }
 
     // ═════════════════════════════════════════════════════════════════
-    // Internal case record (future: replaced by DB-backed provider)
+    // Case library loading from IHistoricalCaseRepository
+    // ═════════════════════════════════════════════════════════════════
+
+    private void RefreshCacheIfNeeded()
+    {
+        if (DateTimeOffset.UtcNow < _cacheExpiry)
+            return;
+
+        _cacheLock.Wait();
+        try
+        {
+            if (DateTimeOffset.UtcNow < _cacheExpiry)
+                return;
+
+            // Load winning and losing cases from the repo
+            var winners = _caseRepo.FindWinningCasesAsync(200).GetAwaiter().GetResult();
+            var losers = _caseRepo.FindLosingCasesAsync(200).GetAwaiter().GetResult();
+
+            var allCases = winners.Concat(losers).DistinctBy(c => c.CaseId).ToList();
+
+            _caseLibrary = allCases.Select(c => new HistoricalCaseRecord
+            {
+                CaseId = c.CaseId,
+                Ticker = c.Ticker,
+                Date = c.Date,
+                Direction = c.Prediction?.WinningDirection ?? c.Prediction?.PredictionType.ToString(),
+                Grade = TradeGrade.Unspecified, // no trade grade stored on case yet
+                MarketRegime = Enum.TryParse<MarketRegimeType>(c.MarketRegime, true, out var regime)
+                    ? regime : MarketRegimeType.Unknown,
+                Outcome = c.Outcome?.DirectionCorrect == true ? "win" : "loss",
+                ReturnPercent = c.Outcome?.PercentMove ?? 0,
+                HoldingPeriod = c.Outcome is not null
+                    ? (int)(c.Outcome.EvaluationTime - c.Date).TotalDays
+                    : 0,
+                Features = c.Features.Select(f => f.FeatureId).ToList(),
+                Evidence = c.Evidence.Select(e => e.EvidenceId).ToList(),
+            }).ToList();
+
+            _cacheExpiry = DateTimeOffset.UtcNow.AddHours(1);
+        }
+        finally
+        {
+            _cacheLock.Release();
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════════
+    // Internal case record
     // ═════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Internal representation of a historical case.
-    /// In Phase 1 the library is empty.  A future phase will populate
-    /// this from setup_learning_stats / trade_setups via an injected
-    /// case provider, without changing the engine's interface.
+    /// Internal representation of a historical case, projected from
+    /// <see cref="HistoricalCase"/> for efficient similarity scoring.
     /// </summary>
     internal record HistoricalCaseRecord
     {

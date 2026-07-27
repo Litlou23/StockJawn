@@ -137,8 +137,8 @@ Navigation is organized into 5 top-level groups (from `navItems.tsx`): Chat, Das
 ### `/learning` — System Learning
 - Purpose: shows the output of the learning feedback loop in plain language.
 - Route: `app/learning/page.tsx` (server component).
-- Outputs: `LearningReportCard` (latest learning report), `SignalPerformancePanel` (per-signal accuracy), and a "Run Fresh Analysis" button.
-- Connections: `services/persistence/learningRepository.ts` — direct Supabase reads (legacy `learning_reports` / `signal_performance` tables) from the Next.js app, not the .NET dynamic pipeline's `research_signal_performance`/`learning_insights` tables. The "Run Fresh Analysis" button calls `POST /api/jobs/analyze-learning`, a self-contained Next.js-only analysis job (`services/learning/learningAnalysisService.ts`) that is distinct from every other job described in this document: it reads real `prediction_candidates`/`prediction_outcomes` plus live RSS news intake, computes signal performance and suggested weight changes, generates a small set of unsaved "auto picks" from today's headlines (`rssPickGenerator.ts`), asks the shared AI gateway for a short market briefing, and persists the resulting signal-performance and report rows back to the legacy `signal_performance`/`learning_reports` tables this page reads from.
+- Outputs: AI learning report (latest enhanced report), signal performance leaderboard with chart, feature importance analysis, confidence calibration chart, adaptive weight adjustments, pattern detection (failure clusters, signal synergies), model performance dashboard (scoring buckets, ensemble models, catalyst types), and an RSS news intake section.
+- Connections: fetches from the .NET API via `fetchFromApi()` — `/api/learning/report/latest` (enhanced learning reports from `enhanced_learning_reports` table), `/api/learning/signals` (from `research_signal_performance`), `/api/learning/weights` (from `scoring_weight_overrides`), `/api/learning/patterns/full-analysis`, `/api/learning/model-performance`, `/api/learning/feature-importance`, and `/api/intake/latest`. All data comes from the live dynamic pipeline tables. Also shows RSS intake analysis from a self-contained Next.js analysis job.
 
 ### `/connectivity` — Connection Status
 - Purpose: a live health check across every external dependency.
@@ -146,11 +146,11 @@ Navigation is organized into 5 top-level groups (from `navItems.tsx`): Chat, Das
 - Outputs: status dot (ok/error/not_configured), latency, and message per service: .NET API health, Supabase (via .NET), Twelve Data, OpenAI, Finnhub, and each configured RSS feed.
 - Connections: `GET /api/connectivity`, a Next.js route that pings each dependency (some directly, some by asking the .NET API to check its own configured services).
 
-### `/settings` — Settings
-- Purpose: read-only preview of the current signal weighting used by the (legacy) scoring model.
+### `/settings` — Scoring Weights
+- Purpose: read-only view of the live scoring weights and config overrides used by the current pipeline.
 - Route: `app/settings/page.tsx` (server component).
-- Outputs: a list of signal names, their current weight multiplier, active/inactive status, and notes. The page explicitly states in its own copy that these will become user-adjustable "in a future update" — today it is view-only.
-- Connections: `services/persistence/picksRepository.ts` (`getSignalWeightsFromDb`) — direct Supabase read of the legacy `signal_weights` table.
+- Outputs: the 8 scoring bucket weights (trend, momentum, volume, etc.) with base weight, learning-engine adjustment %, effective weight, sample size, and reason; plus all config overrides (calibration factor, position sizing params, risk caps, Kelly fraction, etc.). Weights can be adjusted via the chat assistant.
+- Connections: fetches from the .NET API `/api/learning/weights` (live `scoring_weight_overrides` table, same endpoint as the Learning page's "Adaptive Weights" section).
 
 ### `/demo` — Demo (unlisted)
 - Purpose: appears to be a leftover development/test page, not linked from navigation. Renders four `<iframe>`s pointing at external news sites (NYT, The Dispatch, Fox News, Al Jazeera) with the label "News source pipeline test."
@@ -382,7 +382,7 @@ End-to-end, in execution order:
 
 **Outcome tracking.** On End of Day review, four separate evaluators re-fetch live quotes and score every open item: `OutcomeEvaluator` for raw predictions (`prediction_outcomes`), `DynamicPickOrchestrator`'s stock evaluator for paper stock candidates (`paper_stock_outcomes`), `DynamicPickOrchestrator`'s trade setup evaluator for active `trade_setups` (resolving as target_hit/stop_hit/invalidated/expired based on current prices), and `PaperOptionsService` for paper option candidates (`paper_option_outcomes`). Each computes direction-correctness, target/stop/invalidation hits, maximum favorable/adverse excursion, and a 0–100 outcome score; each writes a short plain-English "lesson." Any item whose live quote can't be fetched is left open rather than scored with placeholder data. Paper option candidates are only closed when the contract has actually expired, hit a ±50% profit target or stop loss, or is on its last day before expiry — otherwise the P&L is logged as a snapshot and the candidate remains open for re-evaluation on the next EOD run.
 
-**Learning updates.** `LearningEngine` re-tallies which named signals were present in predictions that turned out correct vs. incorrect (`research_signal_performance`), and nudges `research_scoring_weights` toward signals that have been performing well and away from ones that haven't (bounded to a maximum ±0.3 adjustment per cycle, requiring at least 5 qualifying predictions before adjusting a given signal), and writes summary `learning_insights`. It then runs confidence calibration — measuring predicted vs. actual accuracy across confidence bands, computing a weighted-average calibration error, and persisting a `calibration_factor` (0.85–1.15, moved max 1%/day) as a weight override that `ScoringEngine` reads on the next Morning Scan. Finally, it runs setup performance analytics — grouping resolved predictions by setup fingerprint and computing per-fingerprint win rate, average win/loss, expected value, regime breakdown, and degradation flags into `setup_learning_stats`. In parallel, the stock/option evaluators upsert `stock_learning_stats`/`option_learning_stats`, bucketed by ticker, timeframe, prediction type, confidence bucket, catalyst type, and trend/volume-signal strength. All of these — weights, calibration factor, setup history, and per-ticker stats — are read back in on the next Morning Scan by `ScoringEngine` (weights, calibration factor, setup history adjustment), `PredictionGenerator` (setup fingerprint lookup and confidence adjustment), and `DynamicPickOrchestrator` (per-ticker historical accuracy, trade setup classification) — closing the loop.
+**Learning updates.** `LearningEngine` re-tallies which named signals were present in predictions that turned out correct vs. incorrect (`research_signal_performance`), and nudges `research_scoring_weights` toward signals that have been performing well and away from ones that haven't (bounded to a maximum ±50% adjustment per cycle with 5% max daily movement, requiring at least 50 qualifying predictions before adjusting a given signal), and writes summary `learning_insights`. It then runs confidence calibration — measuring predicted vs. actual accuracy across confidence bands, computing a weighted-average calibration error, and persisting a `calibration_factor` (0.85–1.15, moved max 1%/day) as a weight override that `ScoringEngine` reads on the next Morning Scan. It runs setup performance analytics — grouping resolved predictions by setup fingerprint and computing per-fingerprint win rate, average win/loss, expected value, regime breakdown, and degradation flags into `setup_learning_stats`. The AI-generated learning report now also includes two additional analysis sections: **Kelly criterion status** (whether Kelly sizing is active, the computed full Kelly fraction vs. the configured fractional Kelly, win rate and payoff ratio from `TradeStatsProvider`) and **trade filter performance** (retrospective analysis of how many evaluated predictions would have been blocked by each filter threshold, cross-referenced with actual outcomes to detect whether filters are too aggressive or too loose). In parallel, the stock/option evaluators upsert `stock_learning_stats`/`option_learning_stats`, bucketed by ticker, timeframe, prediction type, confidence bucket, catalyst type, and trend/volume-signal strength. All of these — weights, calibration factor, setup history, and per-ticker stats — are read back in on the next Morning Scan by `ScoringEngine` (weights, calibration factor, setup history adjustment), `PredictionGenerator` (setup fingerprint lookup and confidence adjustment), and `DynamicPickOrchestrator` (per-ticker historical accuracy, trade setup classification) — closing the loop.
 
 ---
 
@@ -408,7 +408,7 @@ End-to-end, in execution order:
 
 The codebase contains a full, hardcoded-13-ticker TypeScript reimplementation of the research pipeline (`services/researchEngine/*`, `services/weeklyResearch/weeklyResearchService.ts`) that, by tracing every import in the current routes, is not called from anywhere reachable in the running app — the actual pipeline behind every job name (legacy-sounding or "dynamic") is implemented once, in .NET, and the "dynamic" endpoints are a wrapper around the same underlying service the "legacy-named" endpoints call directly (see §4). This orphaned TS code and its output tables (`picks`, `signal_weights`, `result_placeholders`, `weekly_research_runs`, `weekly_stock_reviews`, `weekly_candidates`) still exist in the repository and are still read by a few pages (History, Pick Detail, Settings, Learning), which means those pages are showing historical/frozen data with no currently-active write path feeding them, rather than being wired to whichever pipeline generation is actually running today.
 
-The Learning page (`/learning`) and Settings page (`/settings`) read from the *legacy* tables (`learning_reports`, `signal_performance`, `signal_weights`) rather than the tables the current dynamic pipeline actually updates (`learning_insights`, `research_signal_performance`, `research_scoring_weights`), while the Dashboard reads from the newer tables. This means the Learning/Settings pages and the Dashboard's own "What the System Has Learned" section can be describing two different scoring systems at the same time.
+The Learning page (`/learning`) and Settings page (`/settings`) now both read from the live dynamic pipeline via the .NET API (`/api/learning/*` endpoints), drawing from `enhanced_learning_reports`, `research_signal_performance`, and `scoring_weight_overrides`. The earlier versions of these pages read from legacy tables (`learning_reports`, `signal_performance`, `signal_weights`) but this has been corrected — all pages now show consistent data from the same pipeline.
 
 `lib/ai/prompts.ts`, including the more elaborate `AGENT_CHAT_SYSTEM_PROMPT` context-stuffing design, is present in the codebase but not imported or executed anywhere — it has been fully superseded by the slim tool-calling chat design in `lib/ai/chatToolDefinitions.ts` / `/api/agent-chat`.
 
@@ -717,28 +717,50 @@ Built in a prior phase, the Market Intelligence layer provides context-aware ana
 
 ## 13. Trade Decision Pipeline
 
-The Trade Decision pipeline transforms raw predictions into fully-qualified trade decisions with grades, explanations, and portfolio context.
+The Trade Decision pipeline transforms raw predictions into fully-qualified trade decisions with grades, explanations, and portfolio context. Pipeline order: EV → Risk/Reward → Filters → Grade → Explanation → Decision. Every registered `ITradeFilter` runs on every call — the engine never short-circuits on the first failure.
 
 ### Components (all in `Services/TradeDecision/`):
 
-1. **TradeDecisionEngine** — orchestrator. Takes a prediction + market data, runs it through EV calculation, risk-reward analysis, trade filters, grading, and explanation generation. Returns a `TradeDecisionResult`.
+1. **TradeDecisionEngine** (`TradeDecisionEngine.cs`) — orchestrator. Takes a `PredictionCandidate`, runs it through EV calculation (using real historical stats from `TradeStatsProvider`), risk-reward analysis, all trade filters, grading, and explanation generation. Filter failures → `TradeDecisionType.Reject` + `TradeGrade.Reject`; otherwise → `TradeDecisionType.Watch`. Returns a `TradeDecision` record.
 
-2. **EVService** — calculates expected value using prediction confidence, historical accuracy by setup type, and risk-reward ratio. Returns `EVCalculation` with raw EV, risk-adjusted EV, and Kelly fraction.
+2. **ExpectedValueCalculator** (`IExpectedValueCalculator`) — calculates expected value from `TradeStatsProvider`'s cached real performance stats (win rate, average win%, average loss%). Returns `ExpectedValueResult` with raw EV and `PositiveExpectancy` flag.
 
-3. **RiskRewardService** — computes target price, stop price, risk-reward ratio, max position size, and drawdown estimates. Returns `RiskRewardAnalysis`.
+3. **RiskRewardAnalyzer** (`IRiskRewardAnalyzer`) — computes risk-reward ratio from entry/target/stop prices. Returns `RiskRewardResult` with ratio, `IsFavorable` (≥2.0), and optional `ValidationError`.
 
-4. **Trade Filters** (`ITradeFilter` pattern):
-   - `VolatilityFilter` — blocks trades in extreme volatility.
-   - `LiquidityFilter` — blocks illiquid tickers.
-   - `CorrelationFilter` — blocks trades too correlated with existing portfolio.
+4. **TradeStatsProvider** (`TradeStatsProvider.cs`) — singleton providing cached (1-hour) aggregate outcome statistics from `prediction_outcomes`. Returns `TradeStats(WinRate, AverageWinPercent, AverageLossPercent, SampleSize, IsReal)`. Falls back to conservative defaults (50% WR, 5%/5%) when fewer than 10 valid outcomes exist.
 
-5. **TradeGradeService** — assigns letter grades (A+ through F) based on EV, confidence, risk, and filter results. Returns `TradeGrade` with component scores.
+5. **Trade Filters** (`ITradeFilter` pattern, all in `Filters/`):
+   - **ConfidenceTradeFilter** — Fail: confidence < 20. Warning: confidence < 35, or risk ≥ 70 with confidence < 50 (risk/confidence misalignment).
+   - **VolatilityTradeFilter** — Fail: ATR% ≥ 8% on day trades. Warning: ATR% ≥ 8% on swings, ATR% ≥ 5% on day trades, or stop distance < 0.5× ATR. Pass with note when no ATR data.
+   - **LiquidityTradeFilter** — Fail: entry price < $2 (penny stock). Warning: entry price < $5, R/R validation error, or no entry price available.
 
-6. **DecisionExplanationService** — generates human-readable explanations of why a trade was graded the way it was, what factors contributed, and what risks exist.
+6. **TradeGradeService** (`ITradeGradeService`) — assigns grades (A+ through F) based on EV, confidence, risk, and filter results.
 
-7. **PortfolioDecisionEngine** — adds portfolio-level context: existing exposure, sector concentration, correlation with current holdings. Returns `PortfolioDecisionResult`.
+7. **DecisionExplanationService** (`IDecisionExplanationService`) — generates human-readable explanations surfacing filter warnings/failures, EV assessment, risk-reward analysis, and grade rationale.
 
-8. **HistoricalSimilarityEngine** — finds past predictions with similar signal profiles and compares outcomes. Returns `SimilarityResult` with matched cases and statistical summary.
+8. **PortfolioDecisionEngine** (`PortfolioDecisionEngine.cs`) — portfolio-level allocation: ranks accepted trades and distributes buying power proportionally using **Kelly-weighted allocation**. Each trade's share is its fractional Kelly fraction (f* × 0.25) modulated by the trade's confidence score, with EV bonuses/penalties. When real stats aren't available (<30 outcomes), falls back to confidence-proportional allocation. Injects `TradeStatsProvider` for real win rate and payoff ratio. Warns on high concentration (>40% to a single trade).
+
+9. **HistoricalSimilarityEngine** — finds past predictions with similar signal profiles from `IHistoricalCaseRepository` (persisted to Supabase `historical_cases` table) and compares outcomes.
+
+### Position Sizing (in `Services/Portfolio/PortfolioBalanceEngine.cs`)
+
+Position sizing uses **fractional Kelly criterion** as the primary method when sufficient real data exists:
+
+- **Kelly formula**: `f* = (p × b - q) / b` where p = win rate, b = avg_win/avg_loss, q = 1-p
+- **Fractional Kelly**: full Kelly × `KellyFraction` (default 0.25 = quarter-Kelly, configurable via `sizing_kelly_fraction` weight override)
+- **Confidence modulation**: Kelly output scaled by 50-100% based on prediction confidence
+- **ATR volatility adjustment**: when `atrPercent` is provided, position size scaled by `atrTarget / atrPercent` (default target 2%)
+- **Activation threshold**: requires `TradeStatsProvider.IsReal == true` AND `SampleSize >= KellyMinSampleSize` (default 30)
+- **Fallback**: linear confidence-based sizing when Kelly can't activate (insufficient data)
+- **Risk profile caps**: Conservative 5%, Moderate 10%, Aggressive 15% of portfolio per position
+
+`PortfolioLifecycleService` passes real trade stats from `TradeStatsProvider` into the sizing call chain.
+
+### Learning Engine Integration
+
+`LearningEngine` includes Kelly and filter performance analysis in the AI learning report via two helper methods:
+- `BuildKellySizingSectionAsync()` — reports Kelly activation status, computed full Kelly fraction, configured fractional Kelly, win rate, payoff ratio, and sample size
+- `BuildTradeFilterSection()` — retrospectively applies filter thresholds to evaluated predictions, cross-references with outcomes to measure whether filters are blocking winners (too aggressive) or letting through losers (too loose), and reports estimated pass rate
 
 ---
 
@@ -776,9 +798,11 @@ IKnowledgeBase → SupabaseKnowledgeBase
 IHistoricalCaseRepository → SupabaseHistoricalCaseRepository
 
 // Trade Decision
-EVService, RiskRewardService, TradeGradeService, DecisionExplanationService
-ITradeFilter → VolatilityFilter, LiquidityFilter, CorrelationFilter
-TradeDecisionEngine, PortfolioDecisionEngine, HistoricalSimilarityEngine
+IExpectedValueCalculator, IRiskRewardAnalyzer, ITradeGradeService, IDecisionExplanationService
+ITradeFilter → ConfidenceTradeFilter, VolatilityTradeFilter, LiquidityTradeFilter
+ITradeDecisionEngine → TradeDecisionEngine
+TradeStatsProvider (singleton, cached 1hr real outcome stats)
+PortfolioDecisionEngine, HistoricalSimilarityEngine
 ```
 
 ---

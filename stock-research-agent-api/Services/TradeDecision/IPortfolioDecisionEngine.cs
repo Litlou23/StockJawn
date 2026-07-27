@@ -12,5 +12,5 @@ namespace StockResearchAgent.Api.Services.TradeDecision;
 /// </summary>
 public interface IPortfolioDecisionEngine
 {
-    PortfolioRecommendation Evaluate(PortfolioEvaluationRequest request);
+    Task<PortfolioRecommendation> EvaluateAsync(PortfolioEvaluationRequest request);
 }

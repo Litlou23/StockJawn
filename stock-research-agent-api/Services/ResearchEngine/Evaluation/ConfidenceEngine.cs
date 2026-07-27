@@ -133,6 +133,61 @@ public class ConfidenceEngine : IConfidenceEngine
         confirmMult -= weightedConflicting * 0.15;
         confirmMult = Math.Clamp(confirmMult, 0.75, 1.25);
 
+        var weights = context.LearningData.Weights;
+
+        // ── Learned synergy boost ──────────────────────────────────────
+        // When two evaluators both contribute strongly to the same direction,
+        // look up the historical pair synergy score from scoring_weight_overrides
+        // (written by LearningEngine). Positive synergy = proven profitable pair.
+        // Negative synergy = historically bad pair. Apply as confidence multiplier.
+        double synergyMult = 1.0;
+        {
+            var activeKinds = new List<string>();
+            foreach (var (kind, output) in aggregate.Outputs)
+            {
+                var net = output.BullishContribution - output.BearishContribution;
+                bool kindVotesBullish = net > 0;
+                // Signal must contribute at least 8 points and align with winning direction
+                if (Math.Abs(net) >= 8 && kindVotesBullish == winIsBullish)
+                    activeKinds.Add(kind.ToString());
+            }
+
+            if (activeKinds.Count >= 2)
+            {
+                double totalSynergyScore = 0;
+                int pairsFound = 0;
+                for (int i = 0; i < activeKinds.Count; i++)
+                {
+                    for (int j = i + 1; j < activeKinds.Count; j++)
+                    {
+                        // Look up both orderings since we don't know which the learning engine used
+                        var key1 = $"synergy_pair_{activeKinds[i]}_{activeKinds[j]}";
+                        var key2 = $"synergy_pair_{activeKinds[j]}_{activeKinds[i]}";
+                        if (weights.TryGetValue(key1, out var score1))
+                        {
+                            totalSynergyScore += score1;
+                            pairsFound++;
+                        }
+                        else if (weights.TryGetValue(key2, out var score2))
+                        {
+                            totalSynergyScore += score2;
+                            pairsFound++;
+                        }
+                    }
+                }
+
+                if (pairsFound > 0)
+                {
+                    var avgSynergy = totalSynergyScore / pairsFound;
+                    // Scale: +10% synergy → 1.05 multiplier. -10% synergy → 0.95 multiplier.
+                    // Capped at ±8% confidence adjustment to avoid wild swings.
+                    synergyMult = Math.Clamp(1.0 + avgSynergy * 0.005, 0.92, 1.08);
+                    if (Math.Abs(synergyMult - 1.0) > 0.005)
+                        debugSignals.Add($"Confidence: synergy {(synergyMult > 1 ? "boost" : "penalty")} {synergyMult:F3} — {pairsFound} active pair(s), avg synergy {avgSynergy:+0.0;-0.0}%");
+                }
+            }
+        }
+
         var riskAdj = 1.0 - Math.Min(Math.Abs(riskAssessment.RiskPenalty), 30) / 100.0;
         var calFactor = context.LearningData.CalibrationFactor;
 
@@ -153,7 +208,6 @@ public class ConfidenceEngine : IConfidenceEngine
         var mktBull = market.BullishContribution;
         var mktBear = market.BearishContribution;
         var mktDiff = Math.Abs(mktBull - mktBear);
-        var weights = context.LearningData.Weights;
 
         if (mktDiff < 5) // sideways: bull and bear scores within 5 points
         {
@@ -171,7 +225,7 @@ public class ConfidenceEngine : IConfidenceEngine
         // Overconfidence penalty: learned cap when high-confidence predictions fail disproportionately
         var overconfidencePenalty = Math.Clamp(weights.GetValueOrDefault("regime_overconfidence_penalty", 1.0), 0.70, 1.0);
 
-        var rawConfidence = winningScore * dataQualityFactor * confirmMult * riskAdj * calFactor * oppositionPenalty * regimePenalty;
+        var rawConfidence = winningScore * dataQualityFactor * confirmMult * riskAdj * calFactor * oppositionPenalty * regimePenalty * synergyMult;
 
         // ── Bearish mean-reversion trap penalty ──
         // Data: strong trend + strong momentum bearish = only 38% accuracy, +4.29% avg move

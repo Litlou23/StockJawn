@@ -78,12 +78,26 @@ public record MarketSnapshotTechnical
 public record MarketSnapshotNews
 {
     public string Title { get; init; } = "";
+    public string? Summary { get; init; }
     public string SourceName { get; init; } = "";
     public string Url { get; init; } = "";
     public string PublishedAt { get; init; } = "";
     public string? CatalystType { get; init; }
     public string? Sentiment { get; init; }
     public double ImportanceScore { get; init; }
+
+    // ── LLM-classified catalyst quality (set by NewsCatalystClassifier) ──
+    /// <summary>
+    /// fundamental_catalyst | technical_momentum | noise | null (unclassified).
+    /// fundamental_catalyst = real event driving the move (earnings, FDA, merger, etc.)
+    /// technical_momentum = price action only, no fundamental driver
+    /// noise = irrelevant or low-quality article
+    /// </summary>
+    public string? CatalystQuality { get; set; }
+    /// <summary>LLM confidence in the classification (0-100). Null if unclassified.</summary>
+    public int? CatalystConfidence { get; set; }
+    /// <summary>Brief LLM reasoning for the classification.</summary>
+    public string? CatalystReasoning { get; set; }
 }
 
 public record MarketSnapshotAvailability

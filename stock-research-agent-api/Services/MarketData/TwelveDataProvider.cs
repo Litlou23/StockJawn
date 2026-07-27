@@ -54,6 +54,63 @@ public class TwelveDataProvider
 
     public bool IsConfigured => _configured;
 
+    // -----------------------------------------------------------------------
+    // Retry helper — retries transient failures (429, 503, timeouts, network)
+    // -----------------------------------------------------------------------
+
+    private const int MaxRetries = 2; // 3 attempts total
+
+    /// <summary>
+    /// GET with automatic retry on transient errors. Does NOT re-consume a
+    /// throttle slot on retry — the first attempt already counted it.
+    /// Returns the response body string, or throws if all attempts fail.
+    /// </summary>
+    private async Task<string> GetStringWithRetryAsync(string url, string endpoint, string ticker)
+    {
+        Exception? lastException = null;
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
+        {
+            try
+            {
+                using var resp = await _http.GetAsync(url);
+                var body = await resp.Content.ReadAsStringAsync();
+
+                // Retry on rate-limit or server error
+                if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
+                {
+                    var delayMs = (attempt + 1) * 2000; // 2s, 4s, 6s
+                    _logger.LogWarning(
+                        "[twelve-data] {Endpoint} for {Ticker} returned {Status}, retry {Attempt}/{Max} in {Delay}ms",
+                        endpoint, ticker, (int)resp.StatusCode, attempt + 1, MaxRetries, delayMs);
+                    await Task.Delay(delayMs);
+                    continue;
+                }
+
+                return body;
+            }
+            catch (TaskCanceledException) when (attempt < MaxRetries)
+            {
+                var delayMs = (attempt + 1) * 2000;
+                _logger.LogWarning(
+                    "[twelve-data] {Endpoint} for {Ticker} timed out, retry {Attempt}/{Max} in {Delay}ms",
+                    endpoint, ticker, attempt + 1, MaxRetries, delayMs);
+                lastException = new TimeoutException($"{endpoint} timed out for {ticker}");
+                await Task.Delay(delayMs);
+            }
+            catch (HttpRequestException ex) when (attempt < MaxRetries)
+            {
+                var delayMs = (attempt + 1) * 2000;
+                _logger.LogWarning(ex,
+                    "[twelve-data] {Endpoint} for {Ticker} network error, retry {Attempt}/{Max} in {Delay}ms",
+                    endpoint, ticker, attempt + 1, MaxRetries, delayMs);
+                lastException = ex;
+                await Task.Delay(delayMs);
+            }
+        }
+
+        throw lastException ?? new HttpRequestException($"{endpoint} failed for {ticker} after {MaxRetries + 1} attempts");
+    }
+
     /// <summary>
     /// Waits if necessary to stay within rate limits (per-minute and daily).
     /// Returns false if the daily quota is exhausted — caller should skip the request.
@@ -121,7 +178,7 @@ public class TwelveDataProvider
         var url = $"{BaseUrl}/quote?symbol={ticker}&apikey={_apiKey}";
         try
         {
-            var resp = await _http.GetStringAsync(url);
+            var resp = await GetStringWithRetryAsync(url, "/quote", ticker);
             var json = JsonNode.Parse(resp);
             if (json is null || json["status"]?.ToString() == "error")
             {
@@ -163,7 +220,7 @@ public class TwelveDataProvider
         var url = $"{BaseUrl}/time_series?symbol={ticker}&interval=1day&outputsize={count}&apikey={_apiKey}";
         try
         {
-            var resp = await _http.GetStringAsync(url);
+            var resp = await GetStringWithRetryAsync(url, "/time_series", ticker);
             var json = JsonNode.Parse(resp);
             if (json is null || json["status"]?.ToString() == "error") return [];
 
@@ -253,7 +310,7 @@ public class TwelveDataProvider
         var url = $"{BaseUrl}/macd?symbol={ticker}&interval=1day&fast_period=12&slow_period=26&signal_period=9&outputsize=1&apikey={_apiKey}";
         try
         {
-            var resp = await _http.GetStringAsync(url);
+            var resp = await GetStringWithRetryAsync(url, "/macd", ticker);
             var json = JsonNode.Parse(resp);
             if (json is null || json["status"]?.ToString() == "error") return null;
 
@@ -290,7 +347,7 @@ public class TwelveDataProvider
             var url = $"{BaseUrl}/ema?symbol={ticker}&interval=1day&time_period={period}&outputsize=1&apikey={_apiKey}";
             try
             {
-                var resp = await _http.GetStringAsync(url);
+                var resp = await GetStringWithRetryAsync(url, $"/ema({period})", ticker);
                 var json = JsonNode.Parse(resp);
                 if (json is null || json["status"]?.ToString() == "error") return null;
                 var values = json["values"]?.AsArray();
@@ -334,7 +391,7 @@ public class TwelveDataProvider
         JsonNode? profileJson = null;
         try
         {
-            var resp = await _http.GetStringAsync($"{BaseUrl}/profile?symbol={ticker}&apikey={_apiKey}");
+            var resp = await GetStringWithRetryAsync($"{BaseUrl}/profile?symbol={ticker}&apikey={_apiKey}", "/profile", ticker);
             profileJson = JsonNode.Parse(resp);
             if (profileJson?["status"]?.ToString() == "error")
             {
@@ -355,7 +412,7 @@ public class TwelveDataProvider
         JsonNode? statsJson = null;
         try
         {
-            var resp = await _http.GetStringAsync($"{BaseUrl}/statistics?symbol={ticker}&apikey={_apiKey}");
+            var resp = await GetStringWithRetryAsync($"{BaseUrl}/statistics?symbol={ticker}&apikey={_apiKey}", "/statistics", ticker);
             statsJson = JsonNode.Parse(resp);
             if (statsJson?["status"]?.ToString() == "error")
             {

@@ -47,7 +47,11 @@ public class PortfolioBalanceEngine
         // so high-vol stocks get smaller positions and dollar-risk is consistent.
         double VolBaselineAtrPct = 2.5,  // "average" stock ATR% — positions at this level get no adjustment
         double VolMinFactor = 0.25,      // floor — even the wildest stock gets at least 25% of base size
-        double VolMaxFactor = 2.0        // ceiling — low-vol stocks get at most 2x base size
+        double VolMaxFactor = 2.0,       // ceiling — low-vol stocks get at most 2x base size
+        // Fractional Kelly criterion: use real win rate + avg win/loss to compute
+        // mathematically optimal position size, then scale down for safety.
+        double KellyFraction = 0.25,     // quarter-Kelly — industry standard conservative fraction
+        double KellyMinSampleSize = 30   // need at least 30 outcomes for Kelly to kick in
     );
 
     // Risk profile sets the absolute ceiling on any single position.
@@ -76,8 +80,9 @@ public class PortfolioBalanceEngine
     }
 
     /// <summary>
-    /// Calculate how many shares/contracts to buy, scaling position size by
-    /// prediction confidence and expected value. Risk profile caps the maximum.
+    /// Calculate how many shares/contracts to buy using fractional Kelly criterion
+    /// when real stats are available, falling back to confidence-scaled sizing otherwise.
+    /// Risk profile caps the maximum. ATR adjusts for volatility.
     /// Returns 0 if the position cannot be afforded.
     /// </summary>
     public double CalculatePositionSize(
@@ -88,7 +93,11 @@ public class PortfolioBalanceEngine
         int confidence = 50,
         double? expectedValuePercent = null,
         PositionSizingConfig? config = null,
-        double? atrPercent = null)
+        double? atrPercent = null,
+        double? winRate = null,
+        double? avgWinPercent = null,
+        double? avgLossPercent = null,
+        int statsSampleSize = 0)
     {
         if (pricePerUnit <= 0 || cashAvailable <= 0) return 0;
 
@@ -99,11 +108,50 @@ public class PortfolioBalanceEngine
         // Ensure minFraction doesn't exceed profileCap (could happen via config override)
         var effectiveMin = Math.Min(config.MinFraction, profileCap);
 
-        // ── Scale fraction linearly from effectiveMin to profileCap based on confidence ──
-        var clampedConf = Math.Clamp(confidence, config.ConfidenceFloor, config.ConfidenceCeiling);
-        var confRange = config.ConfidenceCeiling - config.ConfidenceFloor;
-        var confT = confRange > 0 ? (clampedConf - config.ConfidenceFloor) / confRange : 0.5;
-        var fraction = effectiveMin + confT * (profileCap - effectiveMin);
+        double fraction;
+        string sizingMethod;
+
+        // ── Fractional Kelly criterion (when real stats available) ──────
+        // Kelly formula: f* = (p × b - q) / b
+        //   p = win probability, q = 1-p, b = avg win / avg loss (odds)
+        // Then scale by KellyFraction (default 0.25 = quarter-Kelly) for safety.
+        // Confidence modulates Kelly: high confidence → full fractional Kelly,
+        // low confidence → scaled down toward minFraction.
+        if (winRate is > 0 && avgWinPercent is > 0 && avgLossPercent is > 0
+            && statsSampleSize >= config.KellyMinSampleSize)
+        {
+            var p = winRate.Value;
+            var q = 1.0 - p;
+            var b = avgWinPercent.Value / avgLossPercent.Value; // payoff ratio
+
+            var fullKelly = (p * b - q) / b;
+
+            // Kelly can go negative when edge is negative — clamp to 0
+            var fractionalKelly = Math.Max(0, fullKelly * config.KellyFraction);
+
+            // Confidence modulates: at ConfidenceCeiling → full fractional Kelly,
+            // at ConfidenceFloor → half of fractional Kelly
+            var clampedConf = Math.Clamp(confidence, config.ConfidenceFloor, config.ConfidenceCeiling);
+            var confRange = config.ConfidenceCeiling - config.ConfidenceFloor;
+            var confT = confRange > 0 ? (clampedConf - config.ConfidenceFloor) / confRange : 0.5;
+            var confScale = 0.5 + 0.5 * confT; // range: 0.5 to 1.0
+
+            fraction = fractionalKelly * confScale;
+
+            // Ensure at least minFraction for any trade that passes filters
+            fraction = Math.Max(fraction, effectiveMin);
+
+            sizingMethod = $"Kelly(f*={fullKelly:F3}, frac={config.KellyFraction:F2}, confScale={confScale:F2}, n={statsSampleSize})";
+        }
+        else
+        {
+            // ── Fallback: linear confidence scaling (pre-Kelly behavior) ──
+            var clampedConf = Math.Clamp(confidence, config.ConfidenceFloor, config.ConfidenceCeiling);
+            var confRange = config.ConfidenceCeiling - config.ConfidenceFloor;
+            var confT = confRange > 0 ? (clampedConf - config.ConfidenceFloor) / confRange : 0.5;
+            fraction = effectiveMin + confT * (profileCap - effectiveMin);
+            sizingMethod = "linear-confidence";
+        }
 
         // ── Adjust for expected value ──
         var ev = expectedValuePercent ?? 0;
@@ -135,8 +183,8 @@ public class PortfolioBalanceEngine
         var maxDollars = cashAvailable * fraction;
 
         _logger.LogInformation(
-            "[sizing] conf={Confidence}, EV={EV:F1}%, ATR%={AtrPct}, volFactor={VolFactor:F2}, profile={Profile}, fraction={Fraction:P1} → ${MaxDollars:F2} of ${Cash:F2}",
-            confidence, ev, atrPercent?.ToString("F1") ?? "n/a", volFactor, riskProfile, fraction, maxDollars, cashAvailable);
+            "[sizing] {Method} conf={Confidence}, EV={EV:F1}%, ATR%={AtrPct}, volFactor={VolFactor:F2}, profile={Profile}, fraction={Fraction:P1} → ${MaxDollars:F2} of ${Cash:F2}",
+            sizingMethod, confidence, ev, atrPercent?.ToString("F1") ?? "n/a", volFactor, riskProfile, fraction, maxDollars, cashAvailable);
 
         // Options: buy whole contracts (quantity in contracts, each = 100 shares).
         // Stocks: buy fractional shares if needed (round to 2 decimals).
@@ -154,6 +202,7 @@ public class PortfolioBalanceEngine
 
     /// <summary>
     /// Open a position with auto-calculated quantity based on confidence, EV, and risk profile.
+    /// When real trade stats are provided, uses fractional Kelly criterion for sizing.
     /// Used by the orchestrator for automated portfolio tracking.
     /// </summary>
     public async Task<PortfolioPosition?> AutoOpenPositionAsync(
@@ -166,14 +215,19 @@ public class PortfolioBalanceEngine
         int confidence = 50,
         double? expectedValuePercent = null,
         PositionSizingConfig? sizingConfig = null,
-        double? atrPercent = null)
+        double? atrPercent = null,
+        double? winRate = null,
+        double? avgWinPercent = null,
+        double? avgLossPercent = null,
+        int statsSampleSize = 0)
     {
         var challenge = await _repo.GetChallengeAsync(portfolioId);
         if (challenge is null || challenge.Status != ChallengeStatus.active) return null;
 
         var quantity = CalculatePositionSize(
             challenge.CurrentCash, entryPrice, challenge.RiskProfile, assetType,
-            confidence, expectedValuePercent, sizingConfig, atrPercent);
+            confidence, expectedValuePercent, sizingConfig, atrPercent,
+            winRate, avgWinPercent, avgLossPercent, statsSampleSize);
 
         if (quantity <= 0)
         {

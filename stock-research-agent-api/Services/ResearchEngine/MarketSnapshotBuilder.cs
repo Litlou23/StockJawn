@@ -15,17 +15,20 @@ public class MarketSnapshotBuilder
     private readonly MarketDataService _marketData;
     private readonly StockFitProvider _stockFit;
     private readonly FinnhubProvider _finnhub;
+    private readonly NewsCatalystClassifier _newsClassifier;
     private readonly ILogger<MarketSnapshotBuilder> _logger;
 
     public MarketSnapshotBuilder(
         MarketDataService marketData,
         StockFitProvider stockFit,
         FinnhubProvider finnhub,
+        NewsCatalystClassifier newsClassifier,
         ILogger<MarketSnapshotBuilder> logger)
     {
         _marketData = marketData;
         _stockFit = stockFit;
         _finnhub = finnhub;
+        _newsClassifier = newsClassifier;
         _logger = logger;
     }
 
@@ -62,6 +65,7 @@ public class MarketSnapshotBuilder
                     newsContext.Add(new MarketSnapshotNews
                     {
                         Title = a.Title,
+                        Summary = a.Summary,
                         SourceName = a.Publisher ?? "stockfit",
                         Url = a.ArticleUrl ?? "",
                         PublishedAt = (a.PublishedAt ?? DateTimeOffset.UtcNow).ToString("o"),
@@ -158,6 +162,12 @@ public class MarketSnapshotBuilder
         {
             _logger.LogWarning(ex, "[snapshot] Finnhub news fetch failed for {Ticker}", ticker);
             warnings.Add($"finnhub_news_exception:{ex.Message}");
+        }
+
+        // ── LLM catalyst classification (best-effort, top 5-10 articles) ──
+        if (newsContext.Count > 0)
+        {
+            await _newsClassifier.ClassifyAsync(ticker, newsContext);
         }
 
         var availability = new MarketSnapshotAvailability

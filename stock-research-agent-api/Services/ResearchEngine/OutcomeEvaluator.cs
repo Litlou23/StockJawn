@@ -1,5 +1,6 @@
 using System.Text.Json;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.CaseRepository;
 using StockResearchAgent.Api.Services.Evidence;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Supabase;
@@ -16,17 +17,20 @@ public class OutcomeEvaluator
     private readonly MarketDataService _marketData;
     private readonly ResearchRepository _repo;
     private readonly IEvidenceService _evidence;
+    private readonly IHistoricalCaseRepository _caseRepo;
     private readonly ILogger<OutcomeEvaluator> _logger;
 
     public OutcomeEvaluator(
         MarketDataService marketData,
         ResearchRepository repo,
         IEvidenceService evidence,
+        IHistoricalCaseRepository caseRepo,
         ILogger<OutcomeEvaluator> logger)
     {
         _marketData = marketData;
         _repo = repo;
         _evidence = evidence;
+        _caseRepo = caseRepo;
         _logger = logger;
     }
 
@@ -70,37 +74,79 @@ public class OutcomeEvaluator
             }
         }
 
-        bool? directionCorrect = prediction.PredictionType switch
-        {
-            PredictionType.bullish => percentMove > 0,
-            PredictionType.bearish => percentMove < 0,
-            _ => null,
-        };
+        // ── Compute true high/low across the entire holding period ──
+        // For multi-day predictions, the quote's intraday high/low only
+        // covers today. Fetch bars since prediction was created to get
+        // the actual peak favorable and adverse moves.
+        var holdingDays = (int)(DateTimeOffset.UtcNow - prediction.CreatedAt).TotalDays;
+        double periodHigh = quote.High;
+        double periodLow = quote.Low;
 
-        var invalidationHit = (prediction.PredictionType == PredictionType.bullish && percentMove < -2)
-            || (prediction.PredictionType == PredictionType.bearish && percentMove > 2);
+        if (holdingDays >= 2)
+        {
+            // Fetch enough bars to cover holding period + buffer
+            var barCount = Math.Min(holdingDays + 3, 60);
+            var bars = await _marketData.GetRecentBarsAsync(prediction.Ticker, barCount);
+
+            if (bars.Count > 0)
+            {
+                // Filter to bars on or after prediction creation date
+                var predDateStr = prediction.CreatedAt.ToString("yyyy-MM-dd");
+                var holdingBars = bars.Where(b =>
+                    string.Compare(b.Date, predDateStr, StringComparison.Ordinal) >= 0).ToList();
+
+                if (holdingBars.Count > 0)
+                {
+                    periodHigh = Math.Max(periodHigh, holdingBars.Max(b => b.High));
+                    periodLow = Math.Min(periodLow, holdingBars.Min(b => b.Low));
+                    _logger.LogDebug(
+                        "[outcome-evaluator] {Ticker}: used {BarCount} bars for holding period high/low (${High:F2}/${Low:F2})",
+                        prediction.Ticker, holdingBars.Count, periodHigh, periodLow);
+                }
+            }
+        }
 
         var maxFavorable = prediction.PredictionType == PredictionType.bullish
-            ? ((quote.High - startPrice) / startPrice) * 100
-            : ((startPrice - quote.Low) / startPrice) * 100;
+            ? ((periodHigh - startPrice) / startPrice) * 100
+            : ((startPrice - periodLow) / startPrice) * 100;
         var maxAdverse = prediction.PredictionType == PredictionType.bullish
-            ? ((startPrice - quote.Low) / startPrice) * 100
-            : ((quote.High - startPrice) / startPrice) * 100;
+            ? ((startPrice - periodLow) / startPrice) * 100
+            : ((periodHigh - startPrice) / startPrice) * 100;
 
         bool? targetHit = null;
         bool? stopHit = null;
         if (prediction.TargetPrice is double tp and > 0)
         {
+            // Check target against full holding period range, not just today
             targetHit = prediction.PredictionType == PredictionType.bullish
-                ? quote.High >= tp
-                : quote.Low <= tp;
+                ? periodHigh >= tp
+                : periodLow <= tp;
         }
         if (prediction.StopPrice is double sp and > 0)
         {
+            // Check stop against full holding period range, not just today
             stopHit = prediction.PredictionType == PredictionType.bullish
-                ? quote.Low <= sp
-                : quote.High >= sp;
+                ? periodLow <= sp
+                : periodHigh >= sp;
         }
+
+        // ── Direction scoring: use intraday extremes, not just close ──
+        // A prediction is "direction correct" if ANY of these are true:
+        //   1. Close price moved in the predicted direction
+        //   2. Target was hit intraday (even if close pulled back)
+        //   3. Significant favorable intraday move (≥1%) in predicted direction
+        // This aligns with how a real trader would trade: take profit at target,
+        // not hold blindly to close. Old logic only checked (1), which penalized
+        // picks that hit target then reversed — destroying measured accuracy.
+        bool? directionCorrect = prediction.PredictionType switch
+        {
+            PredictionType.bullish => percentMove > 0 || targetHit == true || maxFavorable >= 1.0,
+            PredictionType.bearish => percentMove < 0 || targetHit == true || maxFavorable >= 1.0,
+            _ => null,
+        };
+
+        var invalidationHit = (prediction.PredictionType == PredictionType.bullish && percentMove < -2)
+            || (prediction.PredictionType == PredictionType.bearish && percentMove > 2);
 
         // Price accuracy: how close was the predicted price to the actual close?
         double? priceAccuracyPercent = null;
@@ -167,8 +213,8 @@ public class OutcomeEvaluator
             evaluation_time = DateTimeOffset.UtcNow.ToString("o"),
             start_price = startPrice,
             close_price = closePrice,
-            high_after_prediction = quote.High,
-            low_after_prediction = quote.Low,
+            high_after_prediction = periodHigh,
+            low_after_prediction = periodLow,
             percent_move = Math.Round(percentMove, 2),
             direction_correct = directionCorrect,
             predicted_direction = prediction.WinningDirection,
@@ -225,6 +271,48 @@ public class OutcomeEvaluator
         _ = CreateVolatilityLearningRecordAsync(
             prediction, outcome, startPrice,
             Math.Round(maxFavorable, 2), Math.Round(maxAdverse, 2));
+
+        // Store as historical case for similarity engine — non-blocking, best-effort
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var outcomeStr = directionCorrect == true ? "win" : directionCorrect == false ? "loss" : "neutral";
+                var holdingDays = (int)(DateTimeOffset.UtcNow - prediction.CreatedAt).TotalDays;
+
+                var tags = new List<string> { outcomeStr };
+                if (targetHit == true) tags.Add("target_hit");
+                if (stopHit == true) tags.Add("stop_hit");
+                tags.Add(prediction.PredictionType.ToString());
+                if (prediction.TimeWindow is not null) tags.Add(prediction.TimeWindow);
+
+                // Enrich outcome with fields used by case repo queries
+                var caseOutcome = outcome with
+                {
+                    Outcome = outcomeStr,
+                    ReturnPercent = Math.Round(percentMove, 2),
+                    HoldingPeriodDays = holdingDays,
+                };
+
+                await _caseRepo.StoreCaseAsync(new HistoricalCase
+                {
+                    CaseId = $"pred-{prediction.Id}",
+                    Ticker = prediction.Ticker,
+                    Date = prediction.CreatedAt,
+                    MarketRegime = "unknown",
+                    Prediction = prediction,
+                    Outcome = caseOutcome,
+                    MaximumFavorableExcursion = Math.Round(maxFavorable, 2),
+                    MaximumAdverseExcursion = Math.Round(maxAdverse, 2),
+                    LessonsLearned = lesson is not null ? [lesson] : [],
+                    Tags = tags,
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[outcome-evaluator] Failed to store historical case for {Ticker}", prediction.Ticker);
+            }
+        });
 
         return new EvaluationResult(prediction.Id, prediction.Ticker, outcome, true);
     }
@@ -390,24 +478,24 @@ public class OutcomeEvaluator
                 originalDirection = percentMove > 0 ? "bullish" : "bearish"; // last resort: hindsight
         }
 
-        // Was the original lean correct?
-        bool? directionWouldHaveBeenCorrect = originalDirection switch
-        {
-            "bullish" => percentMove > 0,
-            "bearish" => percentMove < 0,
-            _ => null,
-        };
-
-        // Missed alpha: how much return did we leave on the table?
-        var missedAlpha = directionWouldHaveBeenCorrect == true ? absMove : 0;
-
-        // Max favorable move in the lean direction
+        // Max favorable move in the lean direction (computed before direction check)
         var maxFavorable = originalDirection == "bullish"
             ? ((quote.High - startPrice) / startPrice) * 100
             : ((startPrice - quote.Low) / startPrice) * 100;
         var maxAdverse = originalDirection == "bullish"
             ? ((startPrice - quote.Low) / startPrice) * 100
             : ((quote.High - startPrice) / startPrice) * 100;
+
+        // Was the original lean correct? (uses intraday extremes, not just close)
+        bool? directionWouldHaveBeenCorrect = originalDirection switch
+        {
+            "bullish" => percentMove > 0 || maxFavorable >= 1.0,
+            "bearish" => percentMove < 0 || maxFavorable >= 1.0,
+            _ => null,
+        };
+
+        // Missed alpha: how much return did we leave on the table?
+        var missedAlpha = directionWouldHaveBeenCorrect == true ? absMove : 0;
 
         // Was abstaining the correct decision?
         // Correct if: the stock didn't move significantly OR moved against the lean

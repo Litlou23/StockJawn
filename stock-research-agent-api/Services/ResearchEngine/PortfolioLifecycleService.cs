@@ -2,6 +2,7 @@ using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.TradeDecision;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
@@ -23,6 +24,7 @@ public class PortfolioLifecycleService
     private readonly OptionsDataRepository _optionsRepo;
     private readonly MarketDataService _marketData;
     private readonly MarketStressDetector _stressDetector;
+    private readonly TradeStatsProvider _tradeStats;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -33,6 +35,7 @@ public class PortfolioLifecycleService
         OptionsDataRepository optionsRepo,
         MarketDataService marketData,
         MarketStressDetector stressDetector,
+        TradeStatsProvider tradeStats,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -42,6 +45,7 @@ public class PortfolioLifecycleService
         _optionsRepo = optionsRepo;
         _marketData = marketData;
         _stressDetector = stressDetector;
+        _tradeStats = tradeStats;
         _logger = logger;
     }
 
@@ -76,7 +80,9 @@ public class PortfolioLifecycleService
             EvPenalty: weights.GetValueOrDefault("sizing_ev_penalty", 0.50),
             VolBaselineAtrPct: weights.GetValueOrDefault("sizing_vol_baseline_atr_pct", 2.5),
             VolMinFactor: weights.GetValueOrDefault("sizing_vol_min_factor", 0.25),
-            VolMaxFactor: weights.GetValueOrDefault("sizing_vol_max_factor", 2.0)
+            VolMaxFactor: weights.GetValueOrDefault("sizing_vol_max_factor", 2.0),
+            KellyFraction: weights.GetValueOrDefault("sizing_kelly_fraction", 0.25),
+            KellyMinSampleSize: weights.GetValueOrDefault("sizing_kelly_min_samples", 30)
         );
 
     /// <summary>
@@ -101,9 +107,48 @@ public class PortfolioLifecycleService
         var maxDrawdownPct = weights.GetValueOrDefault("max_drawdown_percent", 25);
         var maxPerSector = (int)weights.GetValueOrDefault("max_positions_per_sector", 3);
         var maxChasePercent = weights.GetValueOrDefault("max_entry_chase_percent", 2.0);
+        var minEvPercent = weights.GetValueOrDefault("min_ev_threshold", 0.5);
+        var regimeGateEnabled = weights.GetValueOrDefault("regime_gate_enabled", 1.0) >= 1.0;
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
+
+        // ── Market regime gate ──
+        // Don't open bullish positions in a bearish market or vice versa.
+        // Uses SPY price vs EMA26 (proxy for 20-day) — same signal the scoring
+        // pipeline uses, but here it's a hard gate rather than a score modifier.
+        string? marketRegime = null; // "bullish", "bearish", or null (neutral/unknown)
+        if (regimeGateEnabled)
+        {
+            try
+            {
+                var spyQuoteTask = _marketData.GetQuoteAsync("SPY");
+                var spyEmaTask = _marketData.GetEmaAsync("SPY");
+                await Task.WhenAll(spyQuoteTask, spyEmaTask);
+
+                var spyPrice = spyQuoteTask.Result?.Price;
+                var spyEma = spyEmaTask.Result.Ema26; // EMA26 used as 20-EMA proxy throughout codebase
+
+                if (spyPrice is > 0 && spyEma is > 0)
+                {
+                    var spyRatio = spyPrice.Value / spyEma.Value;
+                    // Use same 0.3% deviation threshold as BenchmarkContext
+                    if (spyRatio > 1.003)
+                        marketRegime = "bullish";
+                    else if (spyRatio < 0.997)
+                        marketRegime = "bearish";
+                    // else: neutral — no gate applied
+
+                    _logger.LogInformation(
+                        "[portfolio] Regime gate: SPY ${Price:F2}, EMA ${Ema:F2}, ratio {Ratio:F4} → regime={Regime}",
+                        spyPrice, spyEma, spyRatio, marketRegime ?? "neutral");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[portfolio] Regime gate SPY fetch failed — proceeding without gate");
+            }
+        }
 
         var eligible = actionableCandidates
             .Where(c => c.IsActionable
@@ -159,6 +204,9 @@ public class PortfolioLifecycleService
             var slotsAvailable = maxPositions - currentOpenCount;
             var opened = 0;
 
+            // ── Fetch real trade stats for Kelly criterion position sizing ──
+            var tradeStats = await _tradeStats.GetStatsAsync();
+
             // ── Build sector concentration map from existing open positions ──
             // Uses cached fundamentals (no extra API calls — already fetched during morning scan).
             var sectorCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -185,6 +233,23 @@ public class PortfolioLifecycleService
                     _logger.LogDebug("[portfolio] Skipping {Ticker} for challenge {Challenge} — mode {Mode} rejects this candidate (options={QualifiesForOptions}, tf={Timeframe})",
                         c.Ticker, challenge.Name, challenge.PortfolioMode, c.QualifiesForOptions, c.Timeframe);
                     continue;
+                }
+
+                // ── Regime gate — don't trade against the market trend ──
+                // Bullish picks in a bearish market get slaughtered (data shows 4-23% accuracy).
+                // Bearish picks in a bullish market face a rising tide.
+                if (marketRegime is not null)
+                {
+                    var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
+                    var blocked = (isBullish && marketRegime == "bearish")
+                               || (!isBullish && marketRegime == "bullish");
+                    if (blocked)
+                    {
+                        _logger.LogInformation(
+                            "[portfolio] REGIME GATE: Skipping {Direction} {Ticker} — market regime is {Regime}",
+                            c.PredictionType, c.Ticker, marketRegime);
+                        continue;
+                    }
                 }
 
                 // Skip tickers we already hold
@@ -261,6 +326,21 @@ public class PortfolioLifecycleService
                         evPercent = (winProb * gainPct) - ((1 - winProb) * lossPct);
                     }
 
+                    // ── EV gate — never enter negative-EV trades ──
+                    // A real trader would never take a trade where the math says you lose money.
+                    // min_ev_threshold defaults to 0.5% — configurable via scoring_weight_overrides.
+                    if (evPercent is not null && evPercent < minEvPercent)
+                    {
+                        _logger.LogInformation(
+                            "[portfolio] Skipping {Ticker} — EV {Ev:F1}% below threshold {Min}% (conf={Conf}, gain={Gain:F1}%, loss={Loss:F1}%)",
+                            c.Ticker, evPercent, minEvPercent, c.ConfidenceScore,
+                            c.TargetPrice is > 0 && c.EntryPrice is > 0
+                                ? Math.Abs(c.TargetPrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100 : 0,
+                            c.StopPrice is > 0 && c.EntryPrice is > 0
+                                ? Math.Abs(c.EntryPrice.Value - c.StopPrice.Value) / c.EntryPrice.Value * 100 : 0);
+                        continue;
+                    }
+
                     // ── For options: use real option premium from paper option candidate ──
                     // The stock candidate's EntryPrice is the stock price, not the option
                     // premium. Look up the linked PaperCandidateEnhanced to get the actual
@@ -310,11 +390,16 @@ public class PortfolioLifecycleService
                         entryPrice,
                         assetType,
                         $"Auto from paper stock candidate. Mode={c.CandidateMode}, tier={c.QualityTier}, conf={c.ConfidenceScore}, ev={evPercent:F1}%, atr={atrPct?.ToString("F1") ?? "n/a"}%"
-                            + (optionSymbol is not null ? $", contract={optionSymbol}" : ""),
+                            + (optionSymbol is not null ? $", contract={optionSymbol}" : "")
+                            + (tradeStats.IsReal ? $", kelly(wr={tradeStats.WinRate:P0},n={tradeStats.SampleSize})" : ""),
                         confidence: c.ConfidenceScore,
                         expectedValuePercent: evPercent,
                         sizingConfig: sizingConfig,
-                        atrPercent: atrPct);
+                        atrPercent: atrPct,
+                        winRate: tradeStats.IsReal ? tradeStats.WinRate : null,
+                        avgWinPercent: tradeStats.IsReal ? tradeStats.AverageWinPercent : null,
+                        avgLossPercent: tradeStats.IsReal ? tradeStats.AverageLossPercent : null,
+                        statsSampleSize: tradeStats.SampleSize);
 
                     if (pos is not null)
                     {

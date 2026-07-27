@@ -3,16 +3,19 @@ using StockResearchAgent.Api.Models;
 namespace StockResearchAgent.Api.Services.Evidence;
 
 /// <summary>
-/// Placeholder decay strategy — no decay applied.
-/// Returns the original weight unchanged.
+/// Exponential decay strategy — evidence loses weight over time based on
+/// configurable half-life per evidence type.
 ///
-/// This exists so the architecture compiles and runs end-to-end.
-/// Replace with a real decay implementation (exponential, half-life, etc.)
-/// when ready to tune evidence aging.
+/// Formula: decayedWeight = originalWeight × 2^(-ageDays / halfLifeDays)
 ///
-/// Default TTL configs are set here for future use — they define
-/// how long each evidence type should live before being considered
-/// stale, even though decay math isn't applied yet.
+/// Examples with default configs:
+///   - News (half-life 1d): 50% weight after 1 day, 25% after 2 days
+///   - SEC filings (half-life 45d): 50% weight after 45 days
+///   - Congress trades (half-life 14d): 50% weight after 2 weeks
+///
+/// Evidence is considered "effectively expired" when its decayed weight
+/// drops below 5% of the original — at that point it no longer
+/// meaningfully contributes to the interest score.
 /// </summary>
 public class PassthroughDecayStrategy : IEvidenceDecayStrategy
 {
@@ -86,14 +89,30 @@ public class PassthroughDecayStrategy : IEvidenceDecayStrategy
         },
     };
 
+    private const double MinWeightThreshold = 0.05;
+
     /// <summary>
-    /// No decay — returns original weight.
-    /// Future: apply exponential decay based on HalfLifeDays.
+    /// Applies exponential decay: weight × 2^(-ageDays / halfLifeDays).
+    /// Returns 0.0 if the record is effectively expired.
     /// </summary>
     public double ApplyDecay(EvidenceRecord record, DateTimeOffset asOf)
     {
-        // Passthrough — no decay applied yet
-        return record.Weight;
+        if (IsEffectivelyExpired(record, asOf))
+            return 0.0;
+
+        var config = GetConfig(record.EvidenceType);
+        var ageDays = (asOf - record.Timestamp).TotalDays;
+
+        if (ageDays <= 0)
+            return record.Weight;
+
+        var decayFactor = Math.Pow(0.5, ageDays / (config.HalfLifeDays ?? 3));
+        var decayed = record.Weight * decayFactor;
+
+        // Clamp to zero if below minimum threshold (relative to original)
+        return Math.Abs(decayed) < MinWeightThreshold * Math.Abs(record.Weight)
+            ? 0.0
+            : decayed;
     }
 
     public EvidenceDecayConfig GetConfig(EvidenceType type)
@@ -105,8 +124,24 @@ public class PassthroughDecayStrategy : IEvidenceDecayStrategy
 
     public bool IsEffectivelyExpired(EvidenceRecord record, DateTimeOffset asOf)
     {
-        // Only check explicit expiration for now
-        // Future: also check if decayed weight < MinWeight
-        return record.Expiration.HasValue && record.Expiration.Value <= asOf;
+        // Explicit expiration takes priority
+        if (record.Expiration.HasValue && record.Expiration.Value <= asOf)
+            return true;
+
+        // Check if age exceeds TTL
+        var config = GetConfig(record.EvidenceType);
+        var ageDays = (asOf - record.Timestamp).TotalDays;
+        if (ageDays >= config.DefaultTtlDays)
+            return true;
+
+        // Check if decayed weight is below minimum threshold
+        if (ageDays > 0)
+        {
+            var decayFactor = Math.Pow(0.5, ageDays / (config.HalfLifeDays ?? 3));
+            if (Math.Abs(decayFactor) < MinWeightThreshold)
+                return true;
+        }
+
+        return false;
     }
 }

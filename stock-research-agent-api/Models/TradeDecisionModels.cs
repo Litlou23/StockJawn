@@ -381,7 +381,9 @@ public record PortfolioRecommendation
     public List<PortfolioTradeEntry> RejectedTrades { get; init; } = [];
     /// <summary>
     /// Recommended capital per accepted trade (ticker → dollars).
-    /// Placeholder — uniform allocation for now.
+    /// Kelly-proportional: each trade's share is weighted by its
+    /// fractional Kelly fraction × confidence. Falls back to
+    /// confidence-proportional when &lt;30 outcomes exist.
     /// </summary>
     public Dictionary<string, double> RecommendedCapitalAllocation { get; init; } = [];
     /// <summary>Portfolio-level warnings (max positions, buying power, concentration).</summary>

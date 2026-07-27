@@ -36,7 +36,8 @@ public class CaseLibraryBuilder : ICaseLibraryBuilder
             var thesis = BuildThesis(prediction, caseInputs, evidence);
             var concepts = _concepts.InferConcepts(features, evidence, thesis);
             var lessons = caseInputs.Where(i => i.InputType == "prior_lesson").Select(i => i.Summary)
-                .Concat(new[] { outcome.Lesson, outcome.OutcomeSummary }.Where(x => !string.IsNullOrWhiteSpace(x))!)
+                .Concat(new[] { outcome.Lesson, outcome.OutcomeSummary }.Where(x => !string.IsNullOrWhiteSpace(x)))
+                .Where(x => x is not null).Select(x => x!)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 

@@ -5,7 +5,13 @@ import CatalystIntelligenceSection from '@/components/dashboard/CatalystIntellig
 import SortableWatchlistTable from '@/components/dashboard/SortableWatchlistTable';
 import SortableSignalTable from '@/components/dashboard/SortableSignalTable';
 import { InfoBanner } from '@/components/InfoTip';
+import PredictionCard from '@/components/predictions/PredictionCard';
 import Link from 'next/link';
+import dynamic_import from 'next/dynamic';
+
+const SignalPerformanceChart = dynamic_import(() => import('@/components/charts/SignalPerformanceChart'), { ssr: false });
+const AccuracyOverTimeChart = dynamic_import(() => import('@/components/charts/AccuracyOverTimeChart'), { ssr: false });
+const WinLossCalendar = dynamic_import(() => import('@/components/charts/WinLossCalendar'), { ssr: false });
 
 // Force dynamic rendering — never serve a cached page
 export const dynamic = 'force-dynamic';
@@ -248,34 +254,6 @@ async function getDashboardData(): Promise<DashboardSummary | null> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function scoreColor(score: number | null): string {
-  if (score === null) return 'text-zinc-500';
-  if (score >= 70) return 'text-green-400';
-  if (score >= 50) return 'text-yellow-400';
-  return 'text-red-400';
-}
-
-function scoreBg(score: number | null): string {
-  if (score === null) return 'bg-zinc-800';
-  if (score >= 70) return 'bg-green-500/15';
-  if (score >= 50) return 'bg-yellow-500/15';
-  return 'bg-red-500/15';
-}
-
-function confidenceBadge(c: string | null) {
-  if (!c) return null;
-  const styles: Record<string, string> = {
-    high: 'text-green-400 bg-green-500/10',
-    medium: 'text-yellow-400 bg-yellow-500/10',
-    low: 'text-red-400 bg-red-500/10',
-  };
-  return (
-    <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-medium ${styles[c] ?? 'text-zinc-400 bg-zinc-800'}`}>
-      {c}
-    </span>
-  );
-}
-
 function jobStatusBadge(job: JobStatus) {
   if (job.status === 'never_run') return <span className="text-[10px] text-zinc-500">never run</span>;
   const color = job.status === 'completed' ? 'text-green-400' : job.status === 'failed' ? 'text-red-400' : 'text-yellow-400';
@@ -319,13 +297,6 @@ function predictionBadge(type: string) {
     : type === 'rejected' ? 'text-orange-400 bg-orange-500/10'
     : 'text-zinc-400 bg-zinc-800';
   return <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${color}`}>{type.replace(/_/g, ' ')}</span>;
-}
-
-function verdictBadge(verdict: boolean | null) {
-  if (verdict === null || verdict === undefined) return <span className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">Pending</span>;
-  return verdict
-    ? <span className="rounded border border-green-500/30 bg-green-500/10 px-1.5 py-0.5 text-[10px] font-bold text-green-400">CORRECT</span>
-    : <span className="rounded border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-bold text-red-400">WRONG</span>;
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +375,15 @@ export default async function DashboardPage() {
           { term: 'Stuck in a Range', definition: 'The stock isn\'t going anywhere — mixed signals, no clear direction.' },
           { term: 'Just Watching', definition: 'Signs are too weak to act on, but worth keeping an eye on.' },
         ]} />
+
+        {/* ── Accuracy Over Time + Win/Loss Calendar ─────────────── */}
+        <Section title="Accuracy Trend" subtitle="Rolling 7-day and 30-day prediction accuracy">
+          <AccuracyOverTimeChart />
+        </Section>
+
+        <Section title="Daily Win/Loss" subtitle="Last 60 days — hover for details">
+          <WinLossCalendar />
+        </Section>
 
         {/* Dynamic pick orchestrator summary — fetched client-side */}
         <Section title="Today's Picks" subtitle="Stocks and options the system found today">
@@ -492,65 +472,41 @@ export default async function DashboardPage() {
           ) : (
             <div className="flex flex-col gap-2">
               {recentPredictions.map((p) => (
-                <div key={p.id} className="rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5">
-                  <div className="flex items-start gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-semibold text-zinc-100">{p.ticker}</span>
-                        {predictionBadge(p.predictionType)}
-                        {verdictBadge(p.verdict)}
-                        <div className="flex items-center gap-1">
-                          <div className="h-1.5 w-10 overflow-hidden rounded-full bg-zinc-800">
-                            <div className={`h-full rounded-full ${p.confidenceScore >= 70 ? 'bg-green-500' : p.confidenceScore >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${p.confidenceScore}%` }} />
-                          </div>
-                          <span className="text-[10px] text-zinc-500">{p.confidenceScore}/100</span>
-                        </div>
-                        <span className="text-[10px] text-zinc-500">{p.timeWindow.replace(/_/g, ' ')}</span>
-                        {p.dataSourcesUsed?.includes('openai-analysis') && (
-                          <span className="rounded bg-violet-500/10 px-1 py-0.5 text-[9px] font-medium text-violet-400">AI</span>
-                        )}
-                      </div>
-                      <p className="mt-1.5 line-clamp-3 text-xs leading-relaxed text-zinc-300">{p.predictionReason}</p>
-                      <div className="mt-1.5 flex flex-wrap gap-3 text-[10px]">
-                        <span className="text-zinc-500">Risk: <span className={`font-medium ${p.riskScore >= 70 ? 'text-red-400' : p.riskScore >= 40 ? 'text-yellow-400' : 'text-green-400'}`}>{p.riskScore}</span></span>
-                        <span className="text-zinc-500">Significance: <span className="text-zinc-400">{p.importanceScore}</span></span>
-                        {p.entryReferencePrice != null && (
-                          <span className="text-zinc-500">Starting Price: <span className="text-zinc-300">${p.entryReferencePrice.toFixed(2)}</span></span>
-                        )}
-                        {p.projectedPriceLow != null && p.projectedPriceHigh != null && (
-                          <span className="text-zinc-500">Expected Range: <span className="font-bold text-violet-400">${p.projectedPriceLow.toFixed(2)}–${p.projectedPriceHigh.toFixed(2)}</span></span>
-                        )}
-                        {p.targetPrice != null && (
-                          <span className="text-zinc-500">Goal: <span className="text-green-400">${p.targetPrice.toFixed(2)}</span></span>
-                        )}
-                        {p.stopPrice != null && (
-                          <span className="text-zinc-500">Exit At: <span className="text-red-400">${p.stopPrice.toFixed(2)}</span></span>
-                        )}
-                        {p.riskRewardRatio != null && (
-                          <span className="text-zinc-500">Risk/Reward: <span className={p.riskRewardRatio >= 2 ? 'text-green-400' : p.riskRewardRatio >= 1.5 ? 'text-yellow-400' : 'text-red-400'}>{p.riskRewardRatio.toFixed(1)}</span></span>
-                        )}
-                        {p.priceAccuracyPercent != null && (
-                          <span className={p.priceAccuracyPercent >= 98 ? 'font-bold text-green-400' : p.priceAccuracyPercent >= 95 ? 'text-yellow-400' : 'text-red-400'}>
-                            {p.priceAccuracyPercent.toFixed(1)}% accurate
-                          </span>
-                        )}
-                        {p.finalMovePercent != null && (
-                          <span className="text-zinc-500">Move: <span className={`font-bold ${p.finalMovePercent >= 0 ? 'text-green-400' : 'text-red-400'}`}>{p.finalMovePercent > 0 ? '+' : ''}{p.finalMovePercent.toFixed(2)}%</span></span>
-                        )}
-                        {p.targetHit != null && (
-                          <span className={p.targetHit ? 'font-bold text-green-400' : 'text-zinc-500'}>{p.targetHit ? 'Reached Goal' : ''}</span>
-                        )}
-                        {p.stopHit != null && (
-                          <span className={p.stopHit ? 'font-bold text-red-400' : 'text-zinc-500'}>{p.stopHit ? 'Hit Safety Exit' : ''}</span>
-                        )}
-                        {p.evaluatedAt && (
-                          <span className="text-zinc-500">Evaluated: <span className="text-zinc-400">{timeAgo(p.evaluatedAt)}</span></span>
-                        )}
-                      </div>
-                    </div>
-                    <span className="shrink-0 text-[10px] text-zinc-600">{timeAgo(p.createdAt)}</span>
-                  </div>
-                </div>
+                <PredictionCard
+                  key={p.id}
+                  compact
+                  prediction={{
+                    id: p.id,
+                    ticker: p.ticker,
+                    predictionType: p.predictionType,
+                    confidenceScore: p.confidenceScore,
+                    importanceScore: p.importanceScore,
+                    riskScore: p.riskScore,
+                    predictionReason: p.predictionReason,
+                    bullishCase: p.bullishCase,
+                    bearishCase: p.bearishCase,
+                    timeWindow: p.timeWindow,
+                    entryReferencePrice: p.entryReferencePrice,
+                    projectedPriceLow: p.projectedPriceLow,
+                    projectedPriceHigh: p.projectedPriceHigh,
+                    predictedPrice: p.predictedPrice,
+                    predictedMovePercent: p.predictedMovePercent,
+                    targetPrice: p.targetPrice,
+                    stopPrice: p.stopPrice,
+                    riskRewardRatio: p.riskRewardRatio,
+                    dataSourcesUsed: p.dataSourcesUsed,
+                    createdAt: p.createdAt,
+                    hasOutcome: p.hasOutcome,
+                    verdict: p.verdict,
+                    finalMovePercent: p.finalMovePercent,
+                    targetHit: p.targetHit,
+                    stopHit: p.stopHit,
+                    priceAccuracyPercent: p.priceAccuracyPercent,
+                    maxFavorablePercent: p.maxFavorablePercent,
+                    maxAdversePercent: p.maxAdversePercent,
+                    evaluatedAt: p.evaluatedAt,
+                  }}
+                />
               ))}
             </div>
           )}
@@ -657,7 +613,20 @@ export default async function DashboardPage() {
           ) : (
             <>
               {learning.signalPerformance.length > 0 && (
-                <SortableSignalTable signals={learning.signalPerformance} />
+                <>
+                  <SignalPerformanceChart
+                    signals={learning.signalPerformance
+                      .filter(s => s.signalType === 'all' || !s.signalType)
+                      .map(s => ({
+                        signalName: s.signalName,
+                        accuracy: s.accuracy,
+                        sampleSize: s.totalPredictions,
+                      }))}
+                  />
+                  <div className="mt-3">
+                    <SortableSignalTable signals={learning.signalPerformance} />
+                  </div>
+                </>
               )}
 
               {learning.recentInsights.length > 0 && (

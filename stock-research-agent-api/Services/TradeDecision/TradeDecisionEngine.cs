@@ -10,7 +10,7 @@ namespace StockResearchAgent.Api.Services.TradeDecision;
 /// the engine never short-circuits on the first failure.
 ///
 /// Current behaviour: every prediction maps to Watch.
-/// Filters are placeholders. EV uses placeholder statistics.
+/// EV uses real historical stats from TradeStatsProvider (cached 1h).
 /// </summary>
 public class TradeDecisionEngine : ITradeDecisionEngine
 {
@@ -19,29 +19,33 @@ public class TradeDecisionEngine : ITradeDecisionEngine
     private readonly IEnumerable<ITradeFilter> _filters;
     private readonly ITradeGradeService _gradeService;
     private readonly IDecisionExplanationService _explanationService;
+    private readonly TradeStatsProvider _statsProvider;
 
     public TradeDecisionEngine(
         IExpectedValueCalculator evCalculator,
         IRiskRewardAnalyzer rrAnalyzer,
         IEnumerable<ITradeFilter> filters,
         ITradeGradeService gradeService,
-        IDecisionExplanationService explanationService)
+        IDecisionExplanationService explanationService,
+        TradeStatsProvider statsProvider)
     {
         _evCalculator = evCalculator;
         _rrAnalyzer = rrAnalyzer;
         _filters = filters;
         _gradeService = gradeService;
         _explanationService = explanationService;
+        _statsProvider = statsProvider;
     }
 
-    public Models.TradeDecision Decide(PredictionCandidate prediction)
+    public async Task<Models.TradeDecision> DecideAsync(PredictionCandidate prediction)
     {
-        // ── EV calculation (placeholder inputs) ───────────────────────
+        // ── EV calculation from real historical performance ───────────
+        var stats = await _statsProvider.GetStatsAsync();
         var evResult = _evCalculator.Calculate(new ExpectedValueRequest
         {
-            WinRate = 0.55,
-            AverageWinPercent = 8.0,
-            AverageLossPercent = 5.0,
+            WinRate = stats.WinRate,
+            AverageWinPercent = stats.AverageWinPercent,
+            AverageLossPercent = stats.AverageLossPercent,
         });
 
         // ── Risk/reward analysis ──────────────────────────────────────
@@ -101,16 +105,28 @@ public class TradeDecisionEngine : ITradeDecisionEngine
         }
 
         // ── Decision ──────────────────────────────────────────────────
-        // Future phases will use filter results + EV + RR to promote
-        // from Watch → Consider → PaperTrade → LiveEligible, and to
-        // compute TradeGrade and position sizing.
+        // Filter failures → Reject (trade is fundamentally flawed).
+        // Otherwise → Watch (monitoring for portfolio consideration).
+        var failedFilters = filterResults.Where(f => f.Status == TradeFilterStatus.Fail).ToList();
+        var decision = TradeDecisionType.Watch;
+        var reasons = new List<string>();
+
+        if (failedFilters.Count > 0)
+        {
+            decision = TradeDecisionType.Reject;
+            reasons.Add($"Rejected by {failedFilters.Count} filter(s): {string.Join(", ", failedFilters.Select(f => f.FilterName))}.");
+        }
+        else
+        {
+            reasons.Add($"Passed {filterResults.Count} trade filters.");
+        }
 
         var tradeDecision = new Models.TradeDecision
         {
             PredictionId = prediction.Id,
             Ticker = prediction.Ticker,
-            Decision = TradeDecisionType.Watch,
-            TradeGrade = gradeResult.Grade,
+            Decision = decision,
+            TradeGrade = failedFilters.Count > 0 ? TradeGrade.Reject : gradeResult.Grade,
             ExpectedValue = evResult.ExpectedValue,
             RiskRewardRatio = rrResult.RiskRewardRatio > 0 ? rrResult.RiskRewardRatio : prediction.RiskRewardRatio,
             RecommendedPositionSize = null,
@@ -122,7 +138,7 @@ public class TradeDecisionEngine : ITradeDecisionEngine
             RiskScore = prediction.RiskScore,
             Direction = prediction.WinningDirection ?? prediction.PredictionType.ToString(),
             SetupFingerprint = null,
-            Reasons = [$"Ran {filterResults.Count} trade filters. Decision gating arrives in a future phase."],
+            Reasons = reasons,
             Warnings = warnings,
         };
 

@@ -43,6 +43,10 @@
 **Special weight overrides:**
 - `risk_cap_boost` — auto-managed by Stage 3c self-tuning. Integer 0-15, added to risk-confidence caps when direction is clear. Max movement ±2 pts/day. Loosens caps when calibration error shows underconfidence, tightens when overconfident.
 - `max_position_hold_hours` — backstop (default 720 = 30 days) used by `PortfolioLifecycleService.CloseExpiredPositionsAsync` for open positions whose originating paper stock candidate can no longer be found, so no timeframe window can be resolved. Positions *with* a resolvable candidate use `StockCandidateService.MaxEvalHours` for their timeframe instead. Lower this to release legacy orphaned positions sooner.
+- `sizing_kelly_fraction` — fractional Kelly multiplier (default 0.25 = quarter-Kelly). Controls what fraction of the full Kelly criterion is used for position sizing. Range 0.0–1.0. Higher = more aggressive sizing.
+- `sizing_kelly_min_samples` — minimum outcome count before Kelly criterion activates (default 30). Below this, falls back to linear confidence-based sizing.
+- `sizing_min_fraction` / `sizing_max_fraction` / `sizing_min_fraction_options` / `sizing_max_fraction_options` — position sizing floor/ceiling for stocks and options respectively.
+- `sizing_atr_target_pct` — ATR-based volatility target for position sizing (default 2.0%). Scales position size inversely with ATR% so volatile stocks get smaller positions.
 
 ### learning_insights
 `id`, `run_id`, `insight_type`, `insight_text`, `action_suggested`, `created_at`
@@ -230,6 +234,48 @@ stats = root["statistics"]
 - `MarketDataService.cs` — cached wrappers (5-min for MACD, 12-hour for EMA/fundamentals)
 - `IndicatorEngine.cs` — `MergeApiIndicators(manual, apiMacd, apiEma)` merges API data into local indicators
 - `PredictionGenerator.cs` — calls MACD + EMA APIs, merges via `IndicatorEngine.MergeApiIndicators`
+
+## Trade Decision Engine — Filters & Position Sizing
+
+### Trade Filters (active)
+
+Three `ITradeFilter` implementations run on every prediction in `TradeDecisionEngine.DecideAsync`. Filter failures → `TradeDecisionType.Reject` + `TradeGrade.Reject`. Warnings are surfaced in the explanation but don't block.
+
+**ConfidenceTradeFilter** (`Filters/ConfidenceTradeFilter.cs`):
+- Fail: confidence < 20 (too speculative)
+- Warning: confidence < 35 (low confidence)
+- Warning: risk ≥ 70 && confidence < 50 (risk/confidence misalignment)
+
+**VolatilityTradeFilter** (`Filters/VolatilityTradeFilter.cs`):
+- Fail: ATR% ≥ 8% on day trades (extreme volatility)
+- Warning: ATR% ≥ 8% on swings, or ≥ 5% on day trades
+- Warning: stop distance < 0.5× ATR (noise stop-out risk)
+- Pass with note: no ATR data available
+
+**LiquidityTradeFilter** (`Filters/LiquidityTradeFilter.cs`):
+- Fail: entry price < $2 (penny stock)
+- Warning: entry price < $5 (low-priced)
+- Warning: R/R validation error (market data quality concern)
+
+### Fractional Kelly Position Sizing (active)
+
+`PortfolioBalanceEngine.CalculatePositionSize` uses fractional Kelly criterion when real trade stats are available from `TradeStatsProvider` (cached 1hr). Formula: `f* = (p × b - q) / b` where p=win rate, b=avg_win/avg_loss, q=1-p. The full Kelly is then multiplied by `KellyFraction` (default 0.25 = quarter-Kelly) and modulated by confidence (50-100% scale).
+
+Activation requires: `TradeStatsProvider.IsReal == true` AND `SampleSize >= KellyMinSampleSize` (default 30). Below threshold, falls back to linear confidence-based sizing.
+
+ATR volatility adjustment: when `atrPercent` is provided, position size is scaled by `atrTarget / atrPercent` so volatile stocks get smaller positions automatically.
+
+`PortfolioLifecycleService` passes real trade stats (win rate, avg win%, avg loss%, sample size) from `TradeStatsProvider` into the sizing call chain.
+
+### Portfolio-Level Capital Allocation (Kelly-proportional)
+
+`PortfolioDecisionEngine.EvaluateAsync` distributes buying power across accepted trades proportionally based on each trade's Kelly-derived edge. Each trade's raw weight = `fullKelly × KellyFraction × confScale` (confidence modulates 0.5–1.0), with EV bonuses (+20% for EV>5%) and penalties (×0.6 for negative EV). Capital is then normalized proportionally. Falls back to confidence-proportional allocation when <30 outcomes exist. Warns on high concentration (>40% to any single trade).
+
+### Learning Engine Integration
+
+`LearningEngine` includes Kelly and filter analysis in the AI learning report:
+- `BuildKellySizingSectionAsync()` — reports Kelly status (active/inactive), computed full Kelly fraction, configured fractional Kelly, and sample size
+- `BuildTradeFilterSection()` — retrospectively analyzes evaluated predictions against filter thresholds, cross-references with outcomes to show whether filters are blocking winners or letting through losers
 
 ## Research Asset Enrichment (FUTURE — not yet implemented)
 

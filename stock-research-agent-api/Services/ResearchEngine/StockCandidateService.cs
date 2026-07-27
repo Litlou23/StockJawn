@@ -322,16 +322,23 @@ public class StockCandidateService
         var exit = quote.Price;
         var move = (exit - entry) / entry * 100;
 
-        bool? directionCorrect = c.PredictionType switch
-        {
-            PredictionType.bullish => move > 0,
-            PredictionType.bearish => move < 0,
-            _ => null,
-        };
-
         bool targetHit = c.TargetPrice is not null && (
             (c.PredictionType == PredictionType.bullish && quote.High >= c.TargetPrice) ||
             (c.PredictionType == PredictionType.bearish && quote.Low <= c.TargetPrice));
+
+        // Max favorable intraday move in the predicted direction
+        var maxFav = c.PredictionType == PredictionType.bullish
+            ? ((quote.High - entry) / entry) * 100
+            : ((entry - quote.Low) / entry) * 100;
+
+        // Direction scoring: credit intraday target hits and significant favorable moves,
+        // not just close price. Aligns with how a real trader would take profit.
+        bool? directionCorrect = c.PredictionType switch
+        {
+            PredictionType.bullish => move > 0 || targetHit || maxFav >= 1.0,
+            PredictionType.bearish => move < 0 || targetHit || maxFav >= 1.0,
+            _ => null,
+        };
 
         bool stopHit = c.StopPrice is not null && (
             (c.PredictionType == PredictionType.bullish && quote.Low <= c.StopPrice) ||

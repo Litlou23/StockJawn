@@ -100,9 +100,12 @@ public sealed class StockFitClient
         }
     }
 
+    private const int MaxRetries = 2; // 3 attempts total
+
     /// <summary>
-    /// Perform a GET. Never throws — every failure is captured as a non-2xx
-    /// status plus a diagnostic body ("timeout", "network error: ...", etc.).
+    /// Perform a GET with automatic retry on transient errors (429, 503,
+    /// timeouts, network failures). Never throws — every failure is captured
+    /// as a non-2xx status plus a diagnostic body.
     /// </summary>
     public async Task<RawResponse> GetAsync(string path, IDictionary<string, string>? query = null,
         CancellationToken cancellationToken = default)
@@ -116,31 +119,64 @@ public sealed class StockFitClient
             return new RawResponse(0, "stockfit_not_configured", url, stopwatch.Elapsed);
         }
 
-        try
+        RawResponse? lastResponse = null;
+        for (int attempt = 0; attempt <= MaxRetries; attempt++)
         {
-            await ThrottleAsync();
-            var resp = await _http.GetAsync(url, cancellationToken);
-            var body = await resp.Content.ReadAsStringAsync(cancellationToken);
-            stopwatch.Stop();
-
-            if (!resp.IsSuccessStatusCode)
+            try
             {
-                _logger.LogWarning("[stockfit] {Path} returned {Status}", path, (int)resp.StatusCode);
+                // Only throttle on first attempt — retries shouldn't re-queue
+                if (attempt == 0) await ThrottleAsync();
+                else await Task.Delay((attempt) * 2000, cancellationToken); // 2s, 4s backoff
+
+                var resp = await _http.GetAsync(url, cancellationToken);
+                var body = await resp.Content.ReadAsStringAsync(cancellationToken);
+
+                // Retry on rate-limit or server error
+                if (((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500) && attempt < MaxRetries)
+                {
+                    _logger.LogWarning(
+                        "[stockfit] {Path} returned {Status}, retry {Attempt}/{Max}",
+                        path, (int)resp.StatusCode, attempt + 1, MaxRetries);
+                    lastResponse = new RawResponse((int)resp.StatusCode, body, url, stopwatch.Elapsed);
+                    continue;
+                }
+
+                stopwatch.Stop();
+                if (!resp.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("[stockfit] {Path} returned {Status}", path, (int)resp.StatusCode);
+                }
+                return new RawResponse((int)resp.StatusCode, body, url, stopwatch.Elapsed);
             }
-            return new RawResponse((int)resp.StatusCode, body, url, stopwatch.Elapsed);
+            catch (TaskCanceledException) when (attempt < MaxRetries)
+            {
+                _logger.LogWarning("[stockfit] {Path} timed out, retry {Attempt}/{Max}",
+                    path, attempt + 1, MaxRetries);
+                lastResponse = new RawResponse(-1, "timeout", url, stopwatch.Elapsed);
+            }
+            catch (TaskCanceledException)
+            {
+                stopwatch.Stop();
+                _logger.LogWarning("[stockfit] {Path} timed out after {Sec}s (all retries exhausted)",
+                    path, DefaultTimeoutSeconds);
+                return new RawResponse(-1, "timeout", url, stopwatch.Elapsed);
+            }
+            catch (Exception ex) when (attempt < MaxRetries)
+            {
+                _logger.LogWarning(ex, "[stockfit] {Path} network error, retry {Attempt}/{Max}",
+                    path, attempt + 1, MaxRetries);
+                lastResponse = new RawResponse(-1, $"network error: {ex.Message}", url, stopwatch.Elapsed);
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                _logger.LogError(ex, "[stockfit] {Path} network error (all retries exhausted)", path);
+                return new RawResponse(-1, $"network error: {ex.Message}", url, stopwatch.Elapsed);
+            }
         }
-        catch (TaskCanceledException)
-        {
-            stopwatch.Stop();
-            _logger.LogWarning("[stockfit] {Path} timed out after {Sec}s", path, DefaultTimeoutSeconds);
-            return new RawResponse(-1, "timeout", url, stopwatch.Elapsed);
-        }
-        catch (Exception ex)
-        {
-            stopwatch.Stop();
-            _logger.LogError(ex, "[stockfit] {Path} network error", path);
-            return new RawResponse(-1, $"network error: {ex.Message}", url, stopwatch.Elapsed);
-        }
+
+        stopwatch.Stop();
+        return lastResponse ?? new RawResponse(-1, "all retries exhausted", url, stopwatch.Elapsed);
     }
 
     private string BuildUrl(string path, IDictionary<string, string>? query)

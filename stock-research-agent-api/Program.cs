@@ -125,6 +125,7 @@ try
     builder.Services.AddSingleton<ITradeFilter, VolatilityTradeFilter>();
     builder.Services.AddSingleton<ITradeGradeService, TradeGradeService>();
     builder.Services.AddSingleton<IDecisionExplanationService, DecisionExplanationService>();
+    builder.Services.AddSingleton<TradeStatsProvider>();
     builder.Services.AddSingleton<ITradeDecisionEngine, TradeDecisionEngine>();
     builder.Services.AddSingleton<IHistoricalSimilarityEngine, HistoricalSimilarityEngine>();
     builder.Services.AddSingleton<IPortfolioDecisionEngine, PortfolioDecisionEngine>();
@@ -165,6 +166,7 @@ try
     builder.Services.AddSingleton<OpportunityLearningConfig>();
     builder.Services.AddSingleton<IOpportunityLearningRepository, SupabaseOpportunityLearningRepository>();
     builder.Services.AddSingleton<IOpportunityLearningService, OpportunityLearningService>();
+    builder.Services.AddSingleton<NewsCatalystClassifier>();
     builder.Services.AddSingleton<MarketSnapshotBuilder>();
     builder.Services.AddSingleton<PredictionProfileRepository>();
     builder.Services.AddSingleton<PredictionGenerator>();

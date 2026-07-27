@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.TradeDecision;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
@@ -65,6 +66,7 @@ public class LearningEngine
     private readonly PaperStockCandidateRepository _candidateRepo;
     private readonly PatternDetectionService _patternDetection;
     private readonly TradeSetupEngine _setupEngine;
+    private readonly TradeStatsProvider _tradeStats;
     private readonly IOpenAiCompletionService _ai;
     private readonly WeightUpdateValidator _guardrail;
     private readonly ILogger<LearningEngine> _logger;
@@ -76,6 +78,7 @@ public class LearningEngine
         PaperStockCandidateRepository candidateRepo,
         PatternDetectionService patternDetection,
         TradeSetupEngine setupEngine,
+        TradeStatsProvider tradeStats,
         IOpenAiCompletionService ai, WeightUpdateValidator guardrail,
         ILogger<LearningEngine> logger)
     {
@@ -86,6 +89,7 @@ public class LearningEngine
         _candidateRepo = candidateRepo;
         _patternDetection = patternDetection;
         _setupEngine = setupEngine;
+        _tradeStats = tradeStats;
         _ai = ai;
         _guardrail = guardrail;
         _logger = logger;
@@ -1663,6 +1667,15 @@ public class LearningEngine
                     .Select(g => ReconstructEvidence(g.Breakdown!).Count(e => e.Value.IsActive))
                     .Average();
 
+                // Compute actual average holding days from prediction creation to evaluation
+                var holdingDays = group
+                    .Select(g => (g.Outcome.EvaluationTime - g.Pred.CreatedAt).TotalDays)
+                    .Where(d => d > 0)
+                    .ToList();
+                var avgHoldingDays = holdingDays.Count > 0
+                    ? Math.Round(holdingDays.Average(), 2)
+                    : 1.0;
+
                 if (isChampion)
                 {
                     await _repo.UpsertSetupLearningStatAsync(new
@@ -1677,7 +1690,7 @@ public class LearningEngine
                         average_win_percent = Math.Round(avgWin, 4),
                         average_loss_percent = Math.Round(avgLoss, 4),
                         expected_value_percent = Math.Round(ev, 4),
-                        average_holding_days = 1.0, // TODO: track actual holding days once multi-day tracking is live
+                        average_holding_days = avgHoldingDays,
                         average_confirmation_count = (int)Math.Round(avgConfirmation),
                         confidence = Math.Round(confidence, 4),
                         risk_rating = riskRating,
@@ -2529,6 +2542,25 @@ public class LearningEngine
                 });
             }
 
+            // ── Store pair synergy scores for ConfidenceEngine to use at prediction time ──
+            // Format: synergy_pair_{signal1}_{signal2} = synergy score (e.g. 5.2 means +5.2% above average)
+            // ConfidenceEngine reads these when both signals fire strongly on the same prediction.
+            var allSignificantCombos = combos.BestCombinations.Where(c => Math.Abs(c.SynergyScore) > 2 && c.CoOccurrences >= 8)
+                .Concat(combos.WorstCombinations.Where(c => Math.Abs(c.SynergyScore) > 2 && c.CoOccurrences >= 8));
+            foreach (var combo in allSignificantCombos)
+            {
+                var pairKey = $"synergy_pair_{combo.Signal1}_{combo.Signal2}";
+                recommendations.Add(new PatternRecommendation
+                {
+                    Type = "synergy_pair_score",
+                    SignalName = pairKey,
+                    RecommendedAdjustment = Math.Round(combo.SynergyScore, 1),
+                    Confidence = Math.Min((double)combo.CoOccurrences / 20, 1.0),
+                    Evidence = combo.CoOccurrences,
+                    Reason = $"Pair synergy: {combo.Signal1}+{combo.Signal2} = {combo.SynergyScore:+0.0}% (joint {combo.JointAccuracy:F1}%, n={combo.CoOccurrences})",
+                });
+            }
+
             // Synergy-based weight recommendations from signal combinations
             // Scale adjustment proportionally to synergy strength and evidence.
             // With ≥20 co-occurrences and strong synergy, allow up to the full daily movement cap.
@@ -2703,6 +2735,34 @@ public class LearningEngine
             _logger.LogInformation(
                 "[learning-engine] Applied regime penalty {Key}: {Prev:F3} → {New:F3} ({Movement:+0.0;-0.0}%)",
                 weightKey, currentPenalty, newPenalty, movement * 100);
+        }
+
+        // ── Write pair synergy scores for ConfidenceEngine to read at prediction time ──
+        // These are stored as scoring_weight_overrides with keys like synergy_pair_trend_momentum
+        // Value = synergy score (e.g. 5.2). ConfidenceEngine uses these to boost/penalize
+        // confidence when both signals in the pair fire strongly on the same prediction.
+        var pairRecs = recommendations.Where(r => r.Type == "synergy_pair_score").ToList();
+        foreach (var rec in pairRecs)
+        {
+            var currentVal = overrideMap.TryGetValue(rec.SignalName, out var existingPair)
+                ? existingPair.EffectiveWeight : 0.0;
+
+            // Blend toward the new value (smooth updates, don't whipsaw)
+            var blended = currentVal == 0 ? rec.RecommendedAdjustment
+                : currentVal * 0.7 + rec.RecommendedAdjustment * 0.3;
+
+            var pairOverride = new ScoringWeightOverride
+            {
+                SignalName = rec.SignalName,
+                BaseWeight = 0.0, // not a signal weight, it's a synergy score
+                AdjustmentPercent = 0.0,
+                EffectiveWeight = Math.Round(blended, 1),
+                Confidence = rec.Confidence,
+                SampleSize = rec.Evidence,
+                Status = "active",
+                Reason = rec.Reason,
+            };
+            await WriteWeightUpdateAsync(rec.SignalName, blended, pairOverride, profileId, isChampion);
         }
 
         // Also save as insights for visibility in the learning report
@@ -2978,6 +3038,163 @@ public class LearningEngine
         return string.Join("\n", lines);
     }
 
+    /// <summary>Builds Kelly criterion status section for the AI learning report.</summary>
+    private async Task<string> BuildKellySizingSectionAsync()
+    {
+        try
+        {
+            var stats = await _tradeStats.GetStatsAsync();
+
+            if (!stats.IsReal || stats.SampleSize < 10)
+                return "  Kelly criterion: INACTIVE — not enough outcome data yet " +
+                       $"({stats.SampleSize} samples, need ≥30 for Kelly to activate).";
+
+            // Compute full Kelly: f* = (p*b - q) / b
+            var p = stats.WinRate;
+            var q = 1.0 - p;
+            var b = stats.AverageLossPercent > 0
+                ? stats.AverageWinPercent / stats.AverageLossPercent
+                : 1.0;
+            var fullKelly = b > 0 ? (p * b - q) / b : 0;
+
+            var lines = new List<string>
+            {
+                $"  Win rate: {stats.WinRate:P1} ({stats.SampleSize} outcomes)",
+                $"  Avg win: {stats.AverageWinPercent:F2}%, Avg loss: {stats.AverageLossPercent:F2}%",
+                $"  Payoff ratio (b): {b:F2}",
+                $"  Full Kelly fraction: {fullKelly:F3} ({fullKelly * 100:F1}% of capital)",
+            };
+
+            if (stats.SampleSize < 30)
+            {
+                lines.Add($"  Status: INACTIVE — {stats.SampleSize} samples, need ≥30 for Kelly to engage.");
+                lines.Add("  Currently using linear confidence-based sizing as fallback.");
+            }
+            else
+            {
+                // Default quarter-Kelly
+                var quarterKelly = Math.Max(0, fullKelly * 0.25);
+                lines.Add($"  Quarter-Kelly (configured): {quarterKelly:F3} ({quarterKelly * 100:F1}% of capital)");
+                lines.Add(fullKelly <= 0
+                    ? "  WARNING: Full Kelly is zero or negative — edge is not statistically present."
+                    : $"  Status: ACTIVE — sizing {stats.SampleSize} outcomes, Kelly engaged.");
+            }
+
+            return string.Join("\n", lines);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to build Kelly section");
+            return "  Kelly criterion status: unavailable (error fetching stats).";
+        }
+    }
+
+    /// <summary>Builds trade filter performance section for the AI learning report.</summary>
+    private string BuildTradeFilterSection(
+        List<PredictionCandidate> evaluated,
+        Dictionary<string, PredictionOutcome> outcomeMap)
+    {
+        if (evaluated.Count == 0)
+            return "  No evaluated predictions to analyze filter performance.";
+
+        // Simulate filter checks on historical evaluated predictions
+        var lowConfidence = evaluated.Where(p => p.ConfidenceScore < 20).ToList();
+        var warnConfidence = evaluated.Where(p => p.ConfidenceScore >= 20 && p.ConfidenceScore < 35).ToList();
+        var pennyStock = evaluated.Where(p => p.EntryReferencePrice is > 0 and < 2.0).ToList();
+        var lowPrice = evaluated.Where(p => p.EntryReferencePrice is >= 2.0 and < 5.0).ToList();
+        var extremeVol = evaluated.Where(p => p.AtrPercent >= 8.0).ToList();
+        var highVol = evaluated.Where(p => p.AtrPercent is >= 5.0 and < 8.0).ToList();
+
+        // Check outcomes for each bucket
+        int CountCorrect(List<PredictionCandidate> preds)
+        {
+            return preds.Count(p =>
+                outcomeMap.TryGetValue(p.Id, out var o) &&
+                ResolveCorrectness(p, o) == true);
+        }
+
+        var lines = new List<string>
+        {
+            $"  Total evaluated: {evaluated.Count}",
+        };
+
+        // Confidence filter analysis
+        if (lowConfidence.Count > 0)
+        {
+            var correct = CountCorrect(lowConfidence);
+            lines.Add($"  Confidence <20 (would BLOCK): {lowConfidence.Count} predictions, " +
+                       $"{correct} correct ({(lowConfidence.Count > 0 ? 100.0 * correct / lowConfidence.Count : 0):F0}% accuracy)");
+        }
+
+        if (warnConfidence.Count > 0)
+        {
+            var correct = CountCorrect(warnConfidence);
+            lines.Add($"  Confidence 20-34 (WARNING zone): {warnConfidence.Count} predictions, " +
+                       $"{correct} correct ({(warnConfidence.Count > 0 ? 100.0 * correct / warnConfidence.Count : 0):F0}% accuracy)");
+        }
+
+        // Liquidity filter analysis
+        if (pennyStock.Count > 0)
+        {
+            var correct = CountCorrect(pennyStock);
+            lines.Add($"  Penny stock <$2 (would BLOCK): {pennyStock.Count} predictions, " +
+                       $"{correct} correct ({(pennyStock.Count > 0 ? 100.0 * correct / pennyStock.Count : 0):F0}% accuracy)");
+        }
+
+        if (lowPrice.Count > 0)
+        {
+            var correct = CountCorrect(lowPrice);
+            lines.Add($"  Low price $2-$5 (WARNING zone): {lowPrice.Count} predictions, " +
+                       $"{correct} correct ({(lowPrice.Count > 0 ? 100.0 * correct / lowPrice.Count : 0):F0}% accuracy)");
+        }
+
+        // Volatility filter analysis
+        if (extremeVol.Count > 0)
+        {
+            var dayTradeExtreme = extremeVol.Where(p => p.TimeWindow is "1_day" or "intraday").ToList();
+            var correct = CountCorrect(extremeVol);
+            lines.Add($"  Extreme volatility ATR≥8% (BLOCK day trades): {extremeVol.Count} predictions " +
+                       $"({dayTradeExtreme.Count} day trades), " +
+                       $"{correct} correct ({(extremeVol.Count > 0 ? 100.0 * correct / extremeVol.Count : 0):F0}% accuracy)");
+        }
+
+        if (highVol.Count > 0)
+        {
+            var correct = CountCorrect(highVol);
+            lines.Add($"  High volatility ATR 5-8% (WARNING): {highVol.Count} predictions, " +
+                       $"{correct} correct ({(highVol.Count > 0 ? 100.0 * correct / highVol.Count : 0):F0}% accuracy)");
+        }
+
+        // Overall pass rate
+        var wouldBlock = lowConfidence.Count + pennyStock.Count +
+                         extremeVol.Count(p => p.TimeWindow is "1_day" or "intraday");
+        var passRate = evaluated.Count > 0
+            ? 100.0 * (evaluated.Count - wouldBlock) / evaluated.Count
+            : 100.0;
+        lines.Add($"  Estimated filter pass rate: {passRate:F0}% ({evaluated.Count - wouldBlock}/{evaluated.Count})");
+
+        // Key insight: are filters blocking winners or letting through losers?
+        if (wouldBlock > 0)
+        {
+            var blockedCorrect = CountCorrect(lowConfidence) + CountCorrect(pennyStock) +
+                                 lowConfidence.Count(p => false); // day-trade extreme vol already counted
+            // Recompute for the actual would-block set
+            var allBlocked = lowConfidence
+                .Concat(pennyStock)
+                .Concat(extremeVol.Where(p => p.TimeWindow is "1_day" or "intraday"))
+                .DistinctBy(p => p.Id).ToList();
+            var blockedWinners = CountCorrect(allBlocked);
+            lines.Add($"  Of {allBlocked.Count} predictions that would be blocked: " +
+                       $"{blockedWinners} were actually correct " +
+                       $"({(allBlocked.Count > 0 ? 100.0 * blockedWinners / allBlocked.Count : 0):F0}% accuracy)");
+        }
+
+        if (lines.Count == 1)
+            lines.Add("  All predictions passed filter criteria — no blocks or warnings triggered.");
+
+        return string.Join("\n", lines);
+    }
+
     // -----------------------------------------------------------------------
     // Stage 6: AI-Summarized Learning Report
     // -----------------------------------------------------------------------
@@ -3234,6 +3451,12 @@ VOLATILITY OPPORTUNITY LEARNING (VOE Stage 5c):
 RISK MANAGEMENT OUTCOMES (portfolio stop-loss/take-profit/trailing-stop closures):
 {BuildRiskManagementReportSection(riskLearningSummary ?? new RiskLearningSummary())}
 
+POSITION SIZING — KELLY CRITERION STATUS:
+{await BuildKellySizingSectionAsync()}
+
+TRADE FILTER PERFORMANCE:
+{BuildTradeFilterSection(evaluated, outcomeMap)}
+
 INSTRUCTIONS:
 - Write 4-6 paragraphs, conversational but data-driven. No bullet points, no headers — flowing prose only.
 - PARAGRAPH 1: Open with the single most important change or finding. Name specific numbers. Compare to prior period if trend data exists. Example: ""Accuracy dropped from 52% to 41% this week, driven entirely by bearish calls going 1-for-7.""
@@ -3241,8 +3464,9 @@ INSTRUCTIONS:
 - PARAGRAPH 3: Evaluate price prediction quality. Are targets being set too aggressively (low hit rate, high stop rate)? Is the MFE/MAE ratio healthy? Are we leaving money on the table (high MFE but low target hits)?
 - PARAGRAPH 4: Assess signal effectiveness. Which signals actually drive correct predictions vs. which are along for the ride? If influence data shows redundant signals, name them and recommend downweighting. If correlations show a signal with strong predictive power, highlight it.
 - PARAGRAPH 5: Analyze risk management performance. Are stop-losses firing too often on a particular timeframe or ticker? Are take-profits and trailing stops locking in gains effectively? If certain tickers keep hitting stop-losses, recommend avoiding them or adjusting thresholds. If a timeframe tier has excessive stop-loss events, recommend widening stops for that tier.
-- PARAGRAPH 6: Provide 2-3 specific, actionable recommendations. Not generic advice — concrete changes. Examples: ""Consider dropping the sentiment signal weight below 0.5 — it's been redundant in 80% of predictions."" Or ""Day-trade stop-losses at 5% are too tight — 3 of 5 stop-outs recovered within the day."" Or ""TSLA has triggered 4 stop-losses in 2 weeks — consider excluding it from day trades.""
-- PARAGRAPH 7 (optional): Note what data is still missing or pending, and what you'd want to see before making stronger recommendations.
+- PARAGRAPH 6: Evaluate position sizing and trade filters. Is Kelly criterion active? If so, how does the computed Kelly fraction compare to what we're actually using? Are trade filters blocking predictions that should pass, or letting through bad ones? If filter-blocked predictions would have been winners, recommend loosening. If filter-passed predictions keep losing, recommend tightening.
+- PARAGRAPH 7: Provide 2-3 specific, actionable recommendations. Not generic advice — concrete changes. Examples: ""Consider dropping the sentiment signal weight below 0.5 — it's been redundant in 80% of predictions."" Or ""Kelly suggests 8% sizing but we're using quarter-Kelly at 2% — consider moving to half-Kelly."" Or ""Confidence filter blocked 12 predictions but 9 would have been winners — lower the threshold from 20 to 15.""
+- PARAGRAPH 8 (optional): Note what data is still missing or pending, and what you'd want to see before making stronger recommendations.
 - CRITICAL: Every report must contain specific numbers, ticker names, and concrete recommendations. A report that could apply to any day is a BAD report.
 - Keep under 700 words";
 

@@ -200,6 +200,31 @@ function plBg(n: number): string {
   return n > 0 ? 'bg-green-500/10' : n < 0 ? 'bg-red-500/10' : '';
 }
 
+function PnLBar({ pct }: { pct: number }) {
+  // Visual bar showing P&L magnitude, centered at 0
+  // Max display range: -20% to +20%
+  if (!Number.isFinite(pct)) return <div className="h-3 w-full" />;
+  const clamped = Math.max(-20, Math.min(20, pct));
+  const width = Math.abs(clamped) / 20 * 50; // 50% of bar max
+  const isPos = clamped >= 0;
+  return (
+    <div className="flex h-3 w-full items-center">
+      <div className="relative h-2 w-full rounded-full bg-zinc-800">
+        {/* Center line */}
+        <div className="absolute left-1/2 top-0 h-full w-px bg-zinc-600" />
+        {/* Bar */}
+        <div
+          className={`absolute top-0 h-full rounded-full ${isPos ? 'bg-green-500' : 'bg-red-500'}`}
+          style={{
+            left: isPos ? '50%' : `${50 - width}%`,
+            width: `${width}%`,
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 const RISK_PROFILES = ['conservative', 'moderate', 'aggressive'] as const;
 const PORTFOLIO_MODES = ['swing_trading', 'day_trading', 'options_only', 'stock_only', 'mixed'] as const;
 const SIZING_MAP: Record<string, string> = {
@@ -857,6 +882,7 @@ export default function PortfolioPage() {
                         <th className="py-2 pr-3 text-right">Value</th>
                         <th className="py-2 pr-3 text-right">P&L</th>
                         <th className="py-2 pr-3 text-right">%</th>
+                        <th className="py-2 pr-3 w-20">P&L</th>
                         <th className="py-2 pr-3 text-right">Held</th>
                         <th className="py-2"></th>
                       </tr>
@@ -875,6 +901,9 @@ export default function PortfolioPage() {
                           </td>
                           <td className={`py-2 pr-3 text-right ${plColor(p.unrealizedPnLPercent)}`}>
                             {pct(p.unrealizedPnLPercent)}
+                          </td>
+                          <td className="py-2 pr-3">
+                            <PnLBar pct={p.unrealizedPnLPercent} />
                           </td>
                           <td className="py-2 pr-3 text-right text-zinc-500">{holdTime(p.hoursHeld)}</td>
                           <td className="py-2">
@@ -899,7 +928,7 @@ export default function PortfolioPage() {
                         <td className={`py-2 pr-3 text-right ${plColor(dashboard.totalUnrealizedPnL)}`}>
                           {dashboard.totalUnrealizedPnL >= 0 ? '+' : ''}{usd(dashboard.totalUnrealizedPnL)}
                         </td>
-                        <td colSpan={3}></td>
+                        <td colSpan={4}></td>
                       </tr>
                     </tfoot>
                   </table>

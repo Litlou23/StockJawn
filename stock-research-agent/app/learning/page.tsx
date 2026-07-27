@@ -1,4 +1,8 @@
 import AppShell from '@/components/AppShell';
+import dynamic_import from 'next/dynamic';
+
+const SignalPerformanceChart = dynamic_import(() => import('@/components/charts/SignalPerformanceChart'), { ssr: false });
+const CalibrationChart = dynamic_import(() => import('@/components/charts/CalibrationChart'), { ssr: false });
 
 export const dynamic = 'force-dynamic';
 
@@ -263,6 +267,18 @@ export default async function LearningPage() {
           </div>
         )}
 
+        {/* Signal Performance Chart (Recharts) */}
+        {allDirectionSignals.length > 0 && (
+          <SignalPerformanceChart
+            signals={allDirectionSignals.map(s => ({
+              signalName: s.signalName,
+              accuracy: s.accuracy,
+              sampleSize: s.totalPredictions,
+            }))}
+            title="Signal Accuracy (Chart)"
+          />
+        )}
+
         {/* Feature Importance */}
         {featureImportance && featureImportance.features.length > 0 && (
           <div className="rounded-xl border border-blue-900/40 bg-zinc-900 p-4">
@@ -352,31 +368,41 @@ export default async function LearningPage() {
 
         {/* Confidence Calibration */}
         {report?.confidenceCalibration && report.confidenceCalibration.buckets.length > 0 && (
-          <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
-            <h2 className="text-sm font-semibold text-zinc-100">Confidence Calibration</h2>
-            <p className="mt-1 text-xs text-zinc-500">{report.confidenceCalibration.summary}</p>
-            <div className="mt-3 space-y-1.5">
-              {report.confidenceCalibration.buckets.map((b, idx) => (
-                <div key={`${b.range}-${idx}`} className="flex items-center justify-between text-xs">
-                  <span className="text-zinc-400">Confidence {b.range}</span>
-                  <div className="flex items-center gap-3">
-                    <span className="text-zinc-600">{b.count} predictions</span>
-                    <span className={
-                      Math.abs(b.calibrationError) < 0.1 ? 'text-green-400' :
-                      b.calibrationError < -0.1 ? 'text-red-400' : 'text-yellow-400'
-                    }>
-                      {(b.actualAccuracy * 100).toFixed(0)}% actual
-                    </span>
+          <>
+            <CalibrationChart
+              buckets={report.confidenceCalibration.buckets.map(b => ({
+                bucket: b.range,
+                avgConfidence: b.expectedAccuracy * 100,
+                actualAccuracy: b.actualAccuracy * 100,
+                count: b.count,
+              }))}
+            />
+            <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+              <h2 className="text-sm font-semibold text-zinc-100">Confidence Calibration Detail</h2>
+              <p className="mt-1 text-xs text-zinc-500">{report.confidenceCalibration.summary}</p>
+              <div className="mt-3 space-y-1.5">
+                {report.confidenceCalibration.buckets.map((b, idx) => (
+                  <div key={`${b.range}-${idx}`} className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-400">Confidence {b.range}</span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-zinc-600">{b.count} predictions</span>
+                      <span className={
+                        Math.abs(b.calibrationError) < 0.1 ? 'text-green-400' :
+                        b.calibrationError < -0.1 ? 'text-red-400' : 'text-yellow-400'
+                      }>
+                        {(b.actualAccuracy * 100).toFixed(0)}% actual
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
+              {report.confidenceCalibration.isOverconfident && (
+                <p className="mt-2 text-xs text-red-400">
+                  The system is overconfident — actual accuracy is below expected in multiple bands.
+                </p>
+              )}
             </div>
-            {report.confidenceCalibration.isOverconfident && (
-              <p className="mt-2 text-xs text-red-400">
-                The system is overconfident — actual accuracy is below expected in multiple bands.
-              </p>
-            )}
-          </div>
+          </>
         )}
 
         {/* Pattern Detection */}
