@@ -155,7 +155,7 @@ public class PortfolioLifecycleService
             .Where(c => c.IsActionable
                 && c.Status == PaperStockStatus.open
                 && c.EntryPrice is > 0
-                && c.EntryPrice.Value >= (decimal)minEntryPrice // Penny stock filter — skip sub-$2 stocks
+                && (double)c.EntryPrice.Value >= minEntryPrice // Penny stock filter — skip sub-$2 stocks
                 && c.Timeframe != StockTimeframe.one_day // 1-day predictions are 15% accurate — pure noise
                 && PredictionCategoryHelper.IsDirectional(c.PredictionType)
                 && c.ConfidenceScore >= minConfidence) // EXP-005: filter low-confidence noise
