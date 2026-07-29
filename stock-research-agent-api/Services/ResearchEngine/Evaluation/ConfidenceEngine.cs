@@ -309,11 +309,12 @@ public class ConfidenceEngine : IConfidenceEngine
         var maxCap = weights.GetValueOrDefault("max_confidence_cap", 85.0);
         int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, maxCap));
 
-        // Apply overconfidence penalty to high-confidence predictions only
-        if (overconfidencePenalty < 1.0 && confidence >= 60)
+        // Apply overconfidence penalty only to predictions that exceed the cap
+        // (avoids double-taxing predictions already clamped by max_confidence_cap)
+        if (overconfidencePenalty < 1.0 && rawConfidence > maxCap)
         {
             confidence = (int)Math.Round(confidence * overconfidencePenalty);
-            capReason ??= $"Overconfidence penalty {overconfidencePenalty:F2} (learned from high-conf failures)";
+            capReason ??= $"Overconfidence penalty {overconfidencePenalty:F2} (raw {rawConfidence:F0} exceeded cap {maxCap})";
         }
 
         bool clearDirection = decisionMargin > 0.54;

@@ -108,6 +108,7 @@ public class PortfolioLifecycleService
         var maxPerSector = (int)weights.GetValueOrDefault("max_positions_per_sector", 3);
         var maxChasePercent = weights.GetValueOrDefault("max_entry_chase_percent", 2.0);
         var minEvPercent = weights.GetValueOrDefault("min_ev_threshold", 0.5);
+        var minEntryPrice = weights.GetValueOrDefault("min_entry_price", 2.0);
         var regimeGateEnabled = weights.GetValueOrDefault("regime_gate_enabled", 1.0) >= 1.0;
 
         // ── Position sizing config ──
@@ -154,6 +155,8 @@ public class PortfolioLifecycleService
             .Where(c => c.IsActionable
                 && c.Status == PaperStockStatus.open
                 && c.EntryPrice is > 0
+                && c.EntryPrice.Value >= (decimal)minEntryPrice // Penny stock filter — skip sub-$2 stocks
+                && c.Timeframe != StockTimeframe.one_day // 1-day predictions are 15% accurate — pure noise
                 && PredictionCategoryHelper.IsDirectional(c.PredictionType)
                 && c.ConfidenceScore >= minConfidence) // EXP-005: filter low-confidence noise
             .ToList();

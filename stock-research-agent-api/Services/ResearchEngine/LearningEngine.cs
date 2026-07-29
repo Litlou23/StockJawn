@@ -20,16 +20,18 @@ public class LearningEngine
     private const double TimeDecayHalfLifeDays = 45.0;
 
     // Base weights for the 8 scoring buckets (Layer 1 — never modified)
+    // Lowered catalyst/learning/research_signal bases to match observed signal value.
+    // These signals consistently show <20% accuracy and zero decisive influence.
     private static readonly Dictionary<string, double> DefaultBaseWeights = new()
     {
         ["trend"] = 1.0,
         ["momentum"] = 1.0,
         ["volume"] = 0.8,
-        ["volatility"] = 0.7,
+        ["volatility"] = 0.3,
         ["market_context"] = 0.9,
-        ["catalyst"] = 1.1,
-        ["learning"] = 0.5,
-        ["research_signal"] = 1.0,
+        ["catalyst"] = 0.3,
+        ["learning"] = 0.2,
+        ["research_signal"] = 0.3,
     };
 
     // The 8 bucket names matching ScoringBreakdown properties
@@ -106,7 +108,11 @@ public class LearningEngine
         var outcomes = profileId is not null
             ? await _repo.GetOutcomesForProfileAsync(profileId, 500)
             : await _repo.GetRecentOutcomesAsync(500);
-        var map = outcomes.ToDictionary(o => o.PredictionId);
+        // GroupBy handles duplicate outcomes for the same prediction
+        // (can occur when EOD review retries). Keep the most recent evaluation.
+        var map = outcomes
+            .GroupBy(o => o.PredictionId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(o => o.EvaluationTime).First());
 
         // Find neutral predictions that aren't in directional outcomes
         var neutralPredIds = predictions
