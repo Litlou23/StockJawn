@@ -191,7 +191,7 @@ portfolio_challenges → portfolio_positions (open → closed)
 |---|---|---|
 | `congress_trades` | Parsed congressional trade filings | Designed, not created |
 
-> **Note:** `research_signals` was previously listed here but is now documented above with full schema. The backend code (`ResearchSignalRepository`) is ready; the Supabase migration to create the table has not yet been run. See [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md).
+> **Note:** `research_signals` was previously listed here but is now documented above with full schema. Both `research_signals` and `research_scoring_weights` were created by hand before migration tracking existed; migration `024_research_signals.sql` codifies them (applied 2026-07-26) and adds the unique constraints the PostgREST upserts depend on — `(ticker, signal_type, event_timestamp)` and `(signal_name)`. See [research-signal-architecture-proposal.md](research-signal-architecture-proposal.md).
 
 ---
 

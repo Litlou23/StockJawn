@@ -158,7 +158,7 @@ The pluggable signal framework that feeds the prediction and scoring engines.
 | **Auto-seeding weights** | Active — `ResearchSignalService.SeedNewWeightsAsync` auto-creates scoring weights for new signal types |
 | **Learning integration** | Active — `CategorizeSignal` handles `research_` prefix |
 
-**Remaining work:** Create `research_signals` Supabase table (migration), add second signal provider (insider trades or analyst ratings).
+**Remaining work:** Add second signal provider (insider trades or analyst ratings) to reach the ≥3 provider target in PRODUCT_VISION.
 
 **Future vision:** Insider trading clusters, SEC filing analysis, analyst upgrades, options flow, short interest — each as a pluggable signal provider feeding the same scoring engine.
 
