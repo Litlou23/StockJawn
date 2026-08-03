@@ -770,6 +770,13 @@ public class PortfolioLifecycleService
             {
                 result.PositionsChecked++;
 
+                // ── Skip options: we fetch STOCK quotes, not option quotes.
+                // Comparing a $55 stock price against a $1.05 option premium
+                // produces absurd P&L (5,000%+) and triggers instant take-profit.
+                // Options need their own pricing path (not yet implemented).
+                if (pos.AssetType == PositionAssetType.option)
+                    continue;
+
                 var currentPrice = quoteMap.GetValueOrDefault(pos.Ticker, 0);
                 if (currentPrice <= 0) continue; // no quote available
 
