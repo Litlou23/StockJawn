@@ -18,6 +18,17 @@ public enum PortfolioMode { swing_trading, day_trading, options_only, stock_only
 public enum RiskProfile { conservative, moderate, aggressive }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
+public enum TradingMode
+{
+    /// <summary>Paper trading only — positions tracked in Supabase, no broker orders.</summary>
+    paper,
+    /// <summary>Broker paper — orders sent to broker's paper endpoint + tracked in Supabase.</summary>
+    broker_paper,
+    /// <summary>Live trading — real money orders sent to broker + tracked in Supabase.</summary>
+    live
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum PositionAssetType { stock, option }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -42,6 +53,7 @@ public record PortfolioChallenge
     public double WinRate { get; init; }
     public ChallengeStatus Status { get; init; } = ChallengeStatus.active;
     public PortfolioMode PortfolioMode { get; init; } = PortfolioMode.swing_trading;
+    public TradingMode TradingMode { get; init; } = TradingMode.paper;
     public RiskProfile RiskProfile { get; init; } = RiskProfile.moderate;
     public string? Notes { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
@@ -68,6 +80,10 @@ public record PortfolioPosition
     public string? ReasonExited { get; init; }
     public PositionStatus Status { get; init; } = PositionStatus.open;
     public double? HighWaterMark { get; init; }
+    /// <summary>Broker order ID for the entry order (null for paper-only positions).</summary>
+    public string? BrokerEntryOrderId { get; init; }
+    /// <summary>Broker order ID for the exit order (null for paper-only positions).</summary>
+    public string? BrokerExitOrderId { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

@@ -82,7 +82,8 @@ public class PortfolioLifecycleService
             VolMinFactor: weights.GetValueOrDefault("sizing_vol_min_factor", 0.25),
             VolMaxFactor: weights.GetValueOrDefault("sizing_vol_max_factor", 2.0),
             KellyFraction: weights.GetValueOrDefault("sizing_kelly_fraction", 0.25),
-            KellyMinSampleSize: weights.GetValueOrDefault("sizing_kelly_min_samples", 30)
+            KellyMinSampleSize: weights.GetValueOrDefault("sizing_kelly_min_samples", 30),
+            OptionMinFraction: weights.GetValueOrDefault("sizing_option_min_fraction", 0.30)
         );
 
     /// <summary>
@@ -110,6 +111,10 @@ public class PortfolioLifecycleService
         var minEvPercent = weights.GetValueOrDefault("min_ev_threshold", 0.5);
         var minEntryPrice = weights.GetValueOrDefault("min_entry_price", 2.0);
         var regimeGateEnabled = weights.GetValueOrDefault("regime_gate_enabled", 1.0) >= 1.0;
+        var minTargetMovePct = weights.GetValueOrDefault("min_target_move_pct", 3.0);
+        var skipWeakQuality = weights.GetValueOrDefault("skip_weak_quality", 1.0) >= 1.0;
+        var minBearishConfidence = (int)weights.GetValueOrDefault("min_bearish_confidence", 55);
+        var bearishAllowed = weights.GetValueOrDefault("bearish_portfolio_allowed", 0.0) >= 1.0;
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
@@ -156,9 +161,84 @@ public class PortfolioLifecycleService
                 && c.Status == PaperStockStatus.open
                 && c.EntryPrice is > 0
                 && (double)c.EntryPrice.Value >= minEntryPrice // Penny stock filter — skip sub-$2 stocks
-                && c.Timeframe != StockTimeframe.one_day // 1-day predictions are 15% accurate — pure noise
+                && c.Timeframe != StockTimeframe.one_day // 1-day predictions are 34% accurate — pure noise
+                && c.Timeframe != StockTimeframe.one_month // 1-month predictions are 12.5% accurate — catastrophic
                 && PredictionCategoryHelper.IsDirectional(c.PredictionType)
                 && c.ConfidenceScore >= minConfidence) // EXP-005: filter low-confidence noise
+            .ToList();
+
+        // ── Bearish filter ─────────────────────────────────────────────
+        // Data shows bearish predictions underperform (45.1% overall, catastrophic
+        // in 1-month). When losers hit, they're 10-16% adverse on average.
+        // Either block entirely (bearish_portfolio_allowed=0) or require much
+        // higher confidence than bullish trades.
+        {
+            var beforeBearish = eligible.Count;
+            eligible = eligible
+                .Where(c =>
+                {
+                    if (!PredictionCategoryHelper.IsBullish(c.PredictionType))
+                    {
+                        // This is a bearish candidate
+                        if (!bearishAllowed) return false;
+                        if (c.ConfidenceScore < minBearishConfidence) return false;
+                    }
+                    return true;
+                })
+                .ToList();
+
+            var filteredBearish = beforeBearish - eligible.Count;
+            if (filteredBearish > 0)
+                _logger.LogInformation(
+                    "[portfolio] Filtered out {Count} bearish candidates (allowed={Allowed}, minConf={Min})",
+                    filteredBearish, bearishAllowed, minBearishConfidence);
+        }
+
+        // ── Minimum target move filter ──────────────────────────────────
+        // A real trader doesn't enter a trade for 0.5% upside. Skip any
+        // candidate whose target price is less than minTargetMovePct from entry.
+        var beforeTargetFilter = eligible.Count;
+        if (minTargetMovePct > 0)
+        {
+            eligible = eligible
+                .Where(c =>
+                {
+                    if (c.TargetPrice is not > 0 || c.EntryPrice is not > 0) return true; // no target data → don't block
+                    var movePct = Math.Abs(c.TargetPrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
+                    return movePct >= minTargetMovePct;
+                })
+                .ToList();
+
+            var filteredByTarget = beforeTargetFilter - eligible.Count;
+            if (filteredByTarget > 0)
+                _logger.LogInformation(
+                    "[portfolio] Filtered out {Count} candidates with target move < {Min}%",
+                    filteredByTarget, minTargetMovePct);
+        }
+
+        // ── Quality filter — skip "weak" candidates ─────────────────────
+        // Data shows weak-quality trades are noise. A trader who cares about
+        // P&L only takes setups where the edge is clear.
+        if (skipWeakQuality)
+        {
+            var beforeQuality = eligible.Count;
+            eligible = eligible
+                .Where(c => c.QualityTier != QualityTier.weak && c.QualityTier != QualityTier.very_weak)
+                .ToList();
+
+            var filteredByQuality = beforeQuality - eligible.Count;
+            if (filteredByQuality > 0)
+                _logger.LogInformation(
+                    "[portfolio] Filtered out {Count} weak/very_weak quality candidates — only trading strong setups",
+                    filteredByQuality);
+        }
+
+        // ── Sort by profit potential — best EV first ────────────────────
+        // A trader who cares about P&L opens the highest-edge trades first,
+        // not whatever happens to be at the top of the list.
+        eligible = eligible
+            .OrderByDescending(c => ComputeEvPercent(c))
+            .ThenByDescending(c => c.ConfidenceScore)
             .ToList();
 
         var filteredByConfidence = actionableCandidates.Count(c => c.IsActionable
@@ -742,8 +822,13 @@ public class PortfolioLifecycleService
                     var hwmGainFromEntry = (hwm - pos.EntryPrice) / pos.EntryPrice;
                     if (hwmGainFromEntry >= limits.TrailActivate)
                     {
-                        // Trail floor = high-water mark minus trail percent
-                        var trailFloor = hwm * (1 - limits.TrailPercent);
+                        // Trail floor = high-water mark minus trail percent.
+                        // Guard: never let trail floor drop below entry price — if
+                        // trail_pct is misconfigured wider than trail_activate, the raw
+                        // floor could be below entry, turning a "locked-in gain" into a loss.
+                        var trailFloor = Math.Max(
+                            hwm * (1 - limits.TrailPercent),
+                            pos.EntryPrice * 1.001); // guarantee at least +0.1% gain
                         if (currentPrice <= trailFloor)
                         {
                             var reason = $"TRAILING-STOP ({tier}): {pos.Ticker} fell to ${currentPrice:F2} " +
@@ -816,6 +901,20 @@ public class PortfolioLifecycleService
         StockTimeframe.six_month,
         StockTimeframe.one_year,
     ];
+
+    /// <summary>
+    /// Pre-compute EV% from a stock candidate's target/stop/entry/confidence
+    /// so we can sort candidates by profit potential.
+    /// </summary>
+    private static double ComputeEvPercent(PaperStockCandidate c)
+    {
+        if (c.TargetPrice is not > 0 || c.StopPrice is not > 0 || c.EntryPrice is not > 0)
+            return 0;
+        var winProb = c.ConfidenceScore / 100.0;
+        var gainPct = Math.Abs(c.TargetPrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
+        var lossPct = Math.Abs(c.EntryPrice.Value - c.StopPrice.Value) / c.EntryPrice.Value * 100;
+        return (winProb * gainPct) - ((1 - winProb) * lossPct);
+    }
 
     /// <summary>
     /// Determines whether a candidate is allowed in the given challenge

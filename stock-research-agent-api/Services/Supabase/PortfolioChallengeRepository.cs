@@ -70,6 +70,7 @@ public class PortfolioChallengeRepository
                 win_rate = 0.0,
                 status = c.Status.ToString(),
                 portfolio_mode = c.PortfolioMode.ToString(),
+                trading_mode = c.TradingMode.ToString(),
                 risk_profile = c.RiskProfile.ToString(),
                 notes = c.Notes,
             }
@@ -150,23 +151,24 @@ public class PortfolioChallengeRepository
 
     public async Task<PortfolioPosition?> OpenPositionAsync(PortfolioPosition p)
     {
-        var rows = await _db.InsertAsync("portfolio_positions", new[]
+        var data = new Dictionary<string, object?>
         {
-            new
-            {
-                portfolio_id = p.PortfolioId,
-                prediction_id = p.PredictionId,
-                ticker = p.Ticker,
-                asset_type = p.AssetType.ToString(),
-                entry_date = p.EntryDate.ToString("o"),
-                entry_price = p.EntryPrice,
-                quantity = p.Quantity,
-                dollars_invested = p.DollarsInvested,
-                high_water_mark = p.EntryPrice,
-                reason_entered = p.ReasonEntered,
-                status = "open",
-            }
-        });
+            ["portfolio_id"] = p.PortfolioId,
+            ["prediction_id"] = p.PredictionId,
+            ["ticker"] = p.Ticker,
+            ["asset_type"] = p.AssetType.ToString(),
+            ["entry_date"] = p.EntryDate.ToString("o"),
+            ["entry_price"] = p.EntryPrice,
+            ["quantity"] = p.Quantity,
+            ["dollars_invested"] = p.DollarsInvested,
+            ["high_water_mark"] = p.EntryPrice,
+            ["reason_entered"] = p.ReasonEntered,
+            ["status"] = "open",
+        };
+        if (p.BrokerEntryOrderId is not null)
+            data["broker_entry_order_id"] = p.BrokerEntryOrderId;
+
+        var rows = await _db.InsertAsync("portfolio_positions", new[] { data });
 
         if (rows.Count == 0)
         {
@@ -213,17 +215,31 @@ public class PortfolioChallengeRepository
         double dollarsReturned,
         double profitLoss,
         double percentGain,
-        string? reasonExited)
+        string? reasonExited,
+        string? brokerExitOrderId = null)
+    {
+        var data = new Dictionary<string, object?>
+        {
+            ["exit_date"] = DateTimeOffset.UtcNow.ToString("o"),
+            ["exit_price"] = exitPrice,
+            ["dollars_returned"] = dollarsReturned,
+            ["profit_loss"] = profitLoss,
+            ["percent_gain"] = percentGain,
+            ["reason_exited"] = reasonExited,
+            ["status"] = "closed",
+            ["updated_at"] = DateTimeOffset.UtcNow.ToString("o"),
+        };
+        if (brokerExitOrderId is not null)
+            data["broker_exit_order_id"] = brokerExitOrderId;
+
+        return await _db.UpdateAsync("portfolio_positions", $"id=eq.{positionId}", data);
+    }
+
+    public async Task<bool> UpdateBrokerEntryOrderIdAsync(string positionId, string brokerOrderId)
     {
         return await _db.UpdateAsync("portfolio_positions", $"id=eq.{positionId}", new
         {
-            exit_date = DateTimeOffset.UtcNow.ToString("o"),
-            exit_price = exitPrice,
-            dollars_returned = dollarsReturned,
-            profit_loss = profitLoss,
-            percent_gain = percentGain,
-            reason_exited = reasonExited,
-            status = "closed",
+            broker_entry_order_id = brokerOrderId,
             updated_at = DateTimeOffset.UtcNow.ToString("o"),
         });
     }
@@ -347,6 +363,7 @@ public class PortfolioChallengeRepository
         WinRate = GetDouble(r, "win_rate"),
         Status = Enum.TryParse<ChallengeStatus>(r["status"]?.ToString(), out var s) ? s : ChallengeStatus.active,
         PortfolioMode = Enum.TryParse<PortfolioMode>(r["portfolio_mode"]?.ToString(), out var pm) ? pm : PortfolioMode.swing_trading,
+        TradingMode = Enum.TryParse<TradingMode>(r["trading_mode"]?.ToString(), out var tm) ? tm : TradingMode.paper,
         RiskProfile = Enum.TryParse<RiskProfile>(r["risk_profile"]?.ToString(), out var rp) ? rp : RiskProfile.moderate,
         Notes = r["notes"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
@@ -373,6 +390,8 @@ public class PortfolioChallengeRepository
         ReasonExited = r["reason_exited"]?.ToString(),
         Status = Enum.TryParse<PositionStatus>(r["status"]?.ToString(), out var ps) ? ps : PositionStatus.open,
         HighWaterMark = GetNullableDouble(r, "high_water_mark"),
+        BrokerEntryOrderId = r["broker_entry_order_id"]?.ToString(),
+        BrokerExitOrderId = r["broker_exit_order_id"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
         UpdatedAt = GetDateTimeOffset(r, "updated_at"),
     };

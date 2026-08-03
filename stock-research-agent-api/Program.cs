@@ -16,6 +16,7 @@ using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.ResearchSignals.Providers;
 using StockResearchAgent.Api.Services.TradeDecision;
 using StockResearchAgent.Api.Services.TradeDecision.Filters;
+using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.MarketRegime;
 using StockResearchAgent.Api.Services.AdaptiveLearning;
@@ -237,6 +238,14 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<MarketStressDetector>();
 
     builder.Services.AddSingleton<PortfolioChallengeRepository>();
+
+    // Broker adapter — connects to Alpaca for real/paper trading.
+    // Defaults to paper mode; set ALPACA_PAPER=false for live.
+    // If ALPACA_API_KEY is not set, adapter reports IsConfigured=false
+    // and all broker calls are skipped (pure Supabase paper trading).
+    builder.Services.AddSingleton<IBrokerAdapter, AlpacaBrokerAdapter>();
+    builder.Services.AddSingleton<BrokerSyncService>();
+
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 
     // Pre-warm the portfolio dashboard cache on startup so the first

@@ -1,4 +1,5 @@
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.Portfolio;
@@ -12,17 +13,23 @@ namespace StockResearchAgent.Api.Services.Portfolio;
 /// This service is intentionally separate from the Prediction Engine.
 /// The Prediction Engine finds opportunities; Portfolio AI decides
 /// whether and how much to invest.
+///
+/// When a challenge has TradingMode = broker_paper or live, opens/closes
+/// are also routed through IBrokerAdapter to place real broker orders.
 /// </summary>
 public class PortfolioBalanceEngine
 {
     private readonly PortfolioChallengeRepository _repo;
+    private readonly IBrokerAdapter _broker;
     private readonly ILogger<PortfolioBalanceEngine> _logger;
 
     public PortfolioBalanceEngine(
         PortfolioChallengeRepository repo,
+        IBrokerAdapter broker,
         ILogger<PortfolioBalanceEngine> logger)
     {
         _repo = repo;
+        _broker = broker;
         _logger = logger;
     }
 
@@ -51,7 +58,10 @@ public class PortfolioBalanceEngine
         // Fractional Kelly criterion: use real win rate + avg win/loss to compute
         // mathematically optimal position size, then scale down for safety.
         double KellyFraction = 0.25,     // quarter-Kelly — industry standard conservative fraction
-        double KellyMinSampleSize = 30   // need at least 30 outcomes for Kelly to kick in
+        double KellyMinSampleSize = 30,  // need at least 30 outcomes for Kelly to kick in
+        // Options get a higher minimum fraction — a $500 options account should
+        // be willing to put $100-200 into a single position, like a real trader would.
+        double OptionMinFraction = 0.30  // 30% floor for options — $150 on a $500 account
     );
 
     // Risk profile sets the absolute ceiling on any single position.
@@ -105,8 +115,14 @@ public class PortfolioBalanceEngine
 
         var profileCap = ProfileCap(riskProfile, config);
 
+        // Options get a higher minimum fraction — a real trader with $500 would put
+        // $100-200 into a single option position, not $75.
+        var baseMin = assetType == PositionAssetType.option
+            ? Math.Max(config.MinFraction, config.OptionMinFraction)
+            : config.MinFraction;
+
         // Ensure minFraction doesn't exceed profileCap (could happen via config override)
-        var effectiveMin = Math.Min(config.MinFraction, profileCap);
+        var effectiveMin = Math.Min(baseMin, profileCap);
 
         double fraction;
         string sizingMethod;
@@ -283,6 +299,59 @@ public class PortfolioBalanceEngine
             return null;
         }
 
+        // ── Broker execution FIRST (broker_paper or live mode) ──────
+        // Place broker order before persisting to Supabase so we never
+        // record a position that doesn't exist at the broker.
+        // Options are not supported in broker mode — only stocks.
+        string? brokerEntryOrderId = null;
+        var isBrokerMode = challenge.TradingMode != TradingMode.paper && _broker.IsConfigured;
+
+        if (isBrokerMode)
+        {
+            if (assetType == PositionAssetType.option)
+            {
+                _logger.LogWarning(
+                    "[balance-engine] Broker mode does not support options — skipping {Ticker}",
+                    request.Ticker);
+                return null;
+            }
+
+            try
+            {
+                var brokerResult = await _broker.PlaceMarketOrderAsync(new BrokerOrderRequest
+                {
+                    Ticker = request.Ticker,
+                    Quantity = request.Quantity,
+                    Side = BrokerOrderSide.buy,
+                    TimeInForce = BrokerTimeInForce.day,
+                    ClientOrderId = $"sj-{Guid.NewGuid():N}"[..36], // unique client ID for idempotency
+                });
+
+                if (brokerResult.Success && brokerResult.BrokerOrderId is not null)
+                {
+                    brokerEntryOrderId = brokerResult.BrokerOrderId;
+                    _logger.LogInformation(
+                        "[balance-engine] Broker BUY order placed for {Ticker}: orderId={OrderId}, status={Status}",
+                        request.Ticker, brokerResult.BrokerOrderId, brokerResult.Status);
+                }
+                else
+                {
+                    _logger.LogError(
+                        "[balance-engine] Broker BUY order FAILED for {Ticker}: {Error}. " +
+                        "Aborting position open — no Supabase record created.",
+                        request.Ticker, brokerResult.ErrorMessage);
+                    return null; // Don't create a phantom position
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "[balance-engine] Broker order exception for {Ticker}. " +
+                    "Aborting position open.", request.Ticker);
+                return null; // Don't create a phantom position
+            }
+        }
+
         var position = new PortfolioPosition
         {
             PortfolioId = request.PortfolioId,
@@ -293,6 +362,7 @@ public class PortfolioBalanceEngine
             Quantity = request.Quantity,
             DollarsInvested = Math.Round(dollarsInvested, 2),
             ReasonEntered = request.ReasonEntered,
+            BrokerEntryOrderId = brokerEntryOrderId,
         };
 
         var saved = await _repo.OpenPositionAsync(position);
@@ -359,6 +429,58 @@ public class PortfolioBalanceEngine
             ? Math.Round((profitLoss / position.DollarsInvested) * 100, 2)
             : 0;
 
+        // ── Broker close FIRST (broker_paper or live mode) ───────────
+        // Close at broker before updating Supabase. If broker close fails,
+        // abort — never record a sale that didn't happen.
+        string? brokerExitOrderId = null;
+        var isBrokerMode = challenge.TradingMode != TradingMode.paper && _broker.IsConfigured;
+
+        if (isBrokerMode)
+        {
+            try
+            {
+                // Don't pass quantity — close the full position at broker.
+                // This is more reliable when broker qty drifts from ours.
+                var brokerResult = await _broker.ClosePositionAsync(position.Ticker);
+
+                if (brokerResult.Success)
+                {
+                    brokerExitOrderId = brokerResult.BrokerOrderId;
+                    _logger.LogInformation(
+                        "[balance-engine] Broker SELL order placed for {Ticker}: orderId={OrderId}",
+                        position.Ticker, brokerResult.BrokerOrderId);
+                }
+                else
+                {
+                    // Check if position simply doesn't exist at broker (already closed)
+                    var brokerPos = await _broker.GetPositionAsync(position.Ticker);
+                    if (brokerPos is null)
+                    {
+                        _logger.LogWarning(
+                            "[balance-engine] Broker position for {Ticker} already gone — " +
+                            "proceeding with Supabase close",
+                            position.Ticker);
+                        // Position was already closed at broker — safe to close in Supabase
+                    }
+                    else
+                    {
+                        _logger.LogError(
+                            "[balance-engine] Broker SELL FAILED for {Ticker}: {Error}. " +
+                            "Aborting Supabase close — position remains open.",
+                            position.Ticker, brokerResult.ErrorMessage);
+                        return null; // Don't record phantom P&L
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "[balance-engine] Broker close exception for {Ticker}. " +
+                    "Aborting Supabase close.", position.Ticker);
+                return null; // Don't record phantom P&L
+            }
+        }
+
         // Close the position in the database
         var closed = await _repo.ClosePositionAsync(
             request.PositionId,
@@ -366,7 +488,8 @@ public class PortfolioBalanceEngine
             dollarsReturned,
             profitLoss,
             percentGain,
-            request.ReasonExited);
+            request.ReasonExited,
+            brokerExitOrderId);
 
         if (!closed) return null;
 

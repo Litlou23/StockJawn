@@ -45,9 +45,13 @@ public class OptionCandidateService
             _logger.LogInformation("[option-candidate] Portfolio budget caps contracts at ${Budget:F2}", maxContractCost);
 
         // Select top candidates for option generation, applying per-run and per-ticker caps.
+        // Prefer stocks likely to have liquid options (mid-price $15-200 range).
+        // Micro-caps (<$10) almost never have listed options, and mega-caps (>$300)
+        // have options too expensive for small accounts.
         var optionAttempts = stockBuilds
             .Where(b => b.SavedCandidate is not null && b.SavedCandidate.QualifiesForOptions)
-            .OrderByDescending(b => b.SavedCandidate!.ScorePercentileInRun)
+            .OrderByDescending(b => OptionLiquidityScore(b.SavedCandidate!.EntryPrice))
+            .ThenByDescending(b => b.SavedCandidate!.ScorePercentileInRun)
             .ThenByDescending(b => b.Prediction.ConfidenceScore)
             .ThenBy(b => b.Prediction.RiskScore)
             .ThenByDescending(b => b.SavedCandidate!.DataAvailability == "real")
@@ -175,6 +179,29 @@ public class OptionCandidateService
     public async Task<List<CandidateGenerationAuditEntry>> GetAuditsByRunAsync(string runId)
     {
         return await _auditRepo.GetByRunAsync(runId);
+    }
+
+    /// <summary>
+    /// Scores a stock's likelihood of having liquid, affordable options.
+    /// Stocks in the $15-200 range get the highest scores — they're most
+    /// likely to have active option chains with contracts a small account
+    /// can afford. Micro-caps (&lt;$10) rarely have options. Mega-caps (&gt;$300)
+    /// have options but they cost too much for a $500 account.
+    /// </summary>
+    private static int OptionLiquidityScore(double? entryPrice)
+    {
+        if (entryPrice is null or <= 0) return 0;
+        var p = entryPrice.Value;
+        return p switch
+        {
+            < 10 => 0,   // micro-cap — almost never has listed options
+            < 15 => 1,   // small-cap — might have thin options
+            < 50 => 3,   // sweet spot for small accounts ($50-150 contracts)
+            < 100 => 3,  // good range — $100-300 contracts
+            < 200 => 2,  // pricier contracts but still tradeable
+            < 300 => 1,  // expensive — $300+ per contract
+            _ => 0,      // mega-cap — contracts too expensive for $500 account
+        };
     }
 }
 

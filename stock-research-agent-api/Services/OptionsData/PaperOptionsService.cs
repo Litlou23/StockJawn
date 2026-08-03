@@ -184,11 +184,11 @@ public class PaperOptionsService
                 MaxDte = filter.MaxDte,
                 MinStrike = filter.MinStrike,
                 MaxStrike = filter.MaxStrike,
-                MinOpenInterest = 10,         // was 100
-                MinVolume = 1,                // was 10
-                MaxBidAskSpreadPercent = 40,  // was 20
-                MinDelta = 0.20,              // was 0.30
-                MaxDelta = 0.70,              // was 0.60
+                MinOpenInterest = 1,          // was 10 — accept any listed contract
+                MinVolume = 0,                // was 1 — some valid contracts have 0 volume intraday
+                MaxBidAskSpreadPercent = 50,  // was 40 — wider tolerance for less-liquid names
+                MinDelta = 0.15,              // was 0.20 — allow slightly OTM for cheaper contracts
+                MaxDelta = 0.75,              // was 0.70 — allow slightly ITM
             };
 
             var relaxedPass = _filterService.Filter(chain.Contracts, relaxedFilter)

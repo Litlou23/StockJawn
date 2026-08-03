@@ -123,18 +123,30 @@ public class StockCandidateService
 
         if (entry is double e && e > 0)
         {
-            // Simple deterministic target/stop bands based on prediction direction.
-            // Bullish: +2%/+5% targets, -2% stop. Bearish: mirror.
-            switch (pred.PredictionType)
+            // Prefer the prediction's ATR-based target/stop — they reflect actual
+            // stock volatility and produce real EV spread.  The old hardcoded 3%/2%
+            // bands gave every candidate identical risk/reward and capped EV at ~0.9%,
+            // making EV-based filtering impossible.
+            // Fall back to fixed bands only when PredictionGenerator had no ATR data.
+            if (pred.TargetPrice is > 0 && pred.StopPrice is > 0)
             {
-                case PredictionType.bullish:
-                    target = Math.Round(e * 1.03, 2);
-                    stop = Math.Round(e * 0.98, 2);
-                    break;
-                case PredictionType.bearish:
-                    target = Math.Round(e * 0.97, 2);
-                    stop = Math.Round(e * 1.02, 2);
-                    break;
+                target = pred.TargetPrice.Value;
+                stop = pred.StopPrice.Value;
+            }
+            else
+            {
+                // Fallback: fixed 3%/2% bands when ATR data is missing
+                switch (pred.PredictionType)
+                {
+                    case PredictionType.bullish:
+                        target = Math.Round(e * 1.03, 2);
+                        stop = Math.Round(e * 0.98, 2);
+                        break;
+                    case PredictionType.bearish:
+                        target = Math.Round(e * 0.97, 2);
+                        stop = Math.Round(e * 1.02, 2);
+                        break;
+                }
             }
         }
 

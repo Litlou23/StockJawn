@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.ResearchEngine;
@@ -38,6 +39,8 @@ public class PortfolioChallengeController : ControllerBase
     private readonly PortfolioLifecycleService _lifecycle;
     private readonly OutcomeEvaluator _outcomeEvaluator;
     private readonly MarketDataService _marketData;
+    private readonly IBrokerAdapter _broker;
+    private readonly BrokerSyncService _brokerSync;
     private readonly ILogger<PortfolioChallengeController> _logger;
 
     public PortfolioChallengeController(
@@ -46,6 +49,8 @@ public class PortfolioChallengeController : ControllerBase
         PortfolioLifecycleService lifecycle,
         OutcomeEvaluator outcomeEvaluator,
         MarketDataService marketData,
+        IBrokerAdapter broker,
+        BrokerSyncService brokerSync,
         ILogger<PortfolioChallengeController> logger)
     {
         _engine = engine;
@@ -53,6 +58,8 @@ public class PortfolioChallengeController : ControllerBase
         _lifecycle = lifecycle;
         _outcomeEvaluator = outcomeEvaluator;
         _marketData = marketData;
+        _broker = broker;
+        _brokerSync = brokerSync;
         _logger = logger;
     }
 
@@ -97,7 +104,9 @@ public class PortfolioChallengeController : ControllerBase
     }
 
     [HttpPost("challenges")]
-    public async Task<IActionResult> CreateChallenge([FromBody] PortfolioChallenge request)
+    public async Task<IActionResult> CreateChallenge(
+        [FromBody] PortfolioChallenge request,
+        [FromServices] IConfiguration config)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(new { error = "Name is required" });
@@ -105,6 +114,19 @@ public class PortfolioChallengeController : ControllerBase
             return BadRequest(new { error = "Starting balance must be positive" });
         if (request.TargetBalance <= request.StartingBalance)
             return BadRequest(new { error = "Target balance must exceed starting balance" });
+
+        // ── Live trading safeguard ──────────────────────────────────
+        // Require explicit opt-in via ENABLE_LIVE_TRADING=true config.
+        // Without this, live mode cannot be activated even accidentally.
+        if (request.TradingMode == TradingMode.live)
+        {
+            var liveTradingEnabled = config["ENABLE_LIVE_TRADING"]?.ToLowerInvariant() == "true";
+            if (!liveTradingEnabled)
+                return BadRequest(new { error = "Live trading is not enabled. Set ENABLE_LIVE_TRADING=true in configuration to allow real-money trading." });
+
+            _logger.LogWarning("[portfolio] LIVE TRADING challenge created: {Name}, starting=${Balance:F2}",
+                request.Name, request.StartingBalance);
+        }
 
         var created = await _repo.CreateChallengeAsync(request);
         if (created is null)
@@ -645,6 +667,68 @@ public class PortfolioChallengeController : ControllerBase
             return BadRequest(new { error = "Failed to close position. Check position exists and is open." });
 
         return Ok(position);
+    }
+
+    // -----------------------------------------------------------------------
+    // Broker integration endpoints
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Get broker connection status and account info.
+    /// </summary>
+    [HttpGet("broker/status")]
+    public async Task<IActionResult> GetBrokerStatus()
+    {
+        if (!_broker.IsConfigured)
+            return Ok(new
+            {
+                configured = false,
+                message = "Broker not configured. Set ALPACA_API_KEY and ALPACA_API_SECRET.",
+            });
+
+        var account = await _broker.GetAccountAsync();
+        return Ok(new
+        {
+            configured = true,
+            isPaper = _broker.IsPaperTrading,
+            account,
+        });
+    }
+
+    /// <summary>
+    /// Get all positions currently held at the broker.
+    /// </summary>
+    [HttpGet("broker/positions")]
+    public async Task<IActionResult> GetBrokerPositions()
+    {
+        if (!_broker.IsConfigured)
+            return BadRequest(new { error = "Broker not configured" });
+
+        var positions = await _broker.GetPositionsAsync();
+        return Ok(positions);
+    }
+
+    /// <summary>
+    /// Get all open orders at the broker.
+    /// </summary>
+    [HttpGet("broker/orders")]
+    public async Task<IActionResult> GetBrokerOrders()
+    {
+        if (!_broker.IsConfigured)
+            return BadRequest(new { error = "Broker not configured" });
+
+        var orders = await _broker.GetOpenOrdersAsync();
+        return Ok(orders);
+    }
+
+    /// <summary>
+    /// Run a broker sync — reconcile broker state with Supabase records.
+    /// </summary>
+    [HttpPost("broker/sync")]
+    public async Task<IActionResult> RunBrokerSync()
+    {
+        var result = await _brokerSync.SyncAsync();
+        return Ok(result);
     }
 }
 
