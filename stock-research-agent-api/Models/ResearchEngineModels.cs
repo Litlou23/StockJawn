@@ -297,6 +297,7 @@ public record ScoringBreakdown
     public double CalibrationFactor { get; init; }
     public double OppositionPenalty { get; init; }
     public double RegimePenalty { get; init; } = 1.0;
+    public double LiquidityPenalty { get; init; } = 1.0;
     public double DecisionMargin { get; init; }
     public bool ClearDirection { get; init; }
     // Legacy net scores (bullish - bearish) for backward compat

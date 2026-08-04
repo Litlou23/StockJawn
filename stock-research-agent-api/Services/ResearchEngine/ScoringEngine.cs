@@ -226,6 +226,7 @@ public class ScoringEngine : IScoringEngine
                 CalibrationFactor = Math.Round(confidence.CalibrationFactor, 3),
                 OppositionPenalty = Math.Round(confidence.OppositionPenalty, 3),
                 RegimePenalty = Math.Round(confidence.RegimePenalty, 3),
+                LiquidityPenalty = Math.Round(confidence.LiquidityPenalty, 3),
                 DecisionMargin = Math.Round(confidence.DecisionMargin, 3),
                 ClearDirection = confidence.ClearDirection,
                 TrendScore = Math.Round(trend.BullishContribution - trend.BearishContribution, 2),

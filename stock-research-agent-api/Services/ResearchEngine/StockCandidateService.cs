@@ -20,8 +20,8 @@ public class StockCandidateService
     public const int LearningMaxRiskForOptions = 90;
     public const int ActionableShadowMinConfidence = 40;
     public const int ActionableShadowMaxRisk = 75;
-    public const int LiveEligibleMinConfidence = 60;
-    public const int LiveEligibleMaxRisk = 65;
+    public const int LiveEligibleMinConfidence = 50;
+    public const int LiveEligibleMaxRisk = 70;
     public const string ThresholdPolicyVersion = "learning_options_v1";
 
     // -----------------------------------------------------------------------

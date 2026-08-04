@@ -306,6 +306,86 @@ public class ConfidenceEngine : IConfidenceEngine
             }
         }
 
+        // ── Liquidity / coverage penalty ─────────────────────────────
+        // Stocks with thin data, no analyst coverage, low volume, or
+        // micro-cap status should not receive high confidence. The FABP
+        // problem: trend technicals on a $50M OTC bank with 500 shares/day
+        // volume produced confidence 64. That's fake signal.
+        double liquidityPenalty = 1.0;
+        {
+            var snapshot = context.Snapshot;
+            int liquidityFlags = 0;
+
+            // 1. No fundamentals data at all = no analyst coverage
+            if (snapshot.Fundamentals is null)
+                liquidityFlags += 2;
+
+            // 2. Micro/nano-cap: market cap under $500M
+            if (snapshot.Fundamentals?.MarketCap is long mktCap)
+            {
+                if (mktCap < 50_000_000)       // nano-cap < $50M
+                    liquidityFlags += 3;
+                else if (mktCap < 300_000_000)  // micro-cap < $300M
+                    liquidityFlags += 2;
+                else if (mktCap < 500_000_000)  // small-cap < $500M
+                    liquidityFlags += 1;
+            }
+
+            // 3. Low average volume across recent bars
+            if (snapshot.RecentBars.Count > 0)
+            {
+                var avgVol = snapshot.RecentBars.Average(b => b.Volume);
+                if (avgVol < 50_000)        // extremely thin
+                    liquidityFlags += 3;
+                else if (avgVol < 200_000)  // low liquidity
+                    liquidityFlags += 1;
+            }
+            else
+            {
+                liquidityFlags += 2; // no bars at all
+            }
+
+            // 4. No news coverage
+            if (snapshot.NewsContext.Count == 0)
+                liquidityFlags += 1;
+
+            // 5. Market data unavailable on this run
+            if (!snapshot.DataAvailability.MarketDataAvailable)
+                liquidityFlags += 2;
+
+            // Apply graduated penalty based on flag count
+            if (liquidityFlags >= 6)
+            {
+                liquidityPenalty = 0.65; // severe: OTC micro-cap with no data
+                rawConfidence *= liquidityPenalty;
+                debugSignals.Add($"Confidence: liquidity penalty {liquidityPenalty:F2} — thin stock ({liquidityFlags} flags)");
+            }
+            else if (liquidityFlags >= 4)
+            {
+                liquidityPenalty = 0.78;
+                rawConfidence *= liquidityPenalty;
+                debugSignals.Add($"Confidence: liquidity penalty {liquidityPenalty:F2} — low coverage ({liquidityFlags} flags)");
+            }
+            else if (liquidityFlags >= 2)
+            {
+                liquidityPenalty = 0.90;
+                rawConfidence *= liquidityPenalty;
+                debugSignals.Add($"Confidence: liquidity drag {liquidityPenalty:F2} — limited data ({liquidityFlags} flags)");
+            }
+
+            // Hard cap for truly thin stocks regardless of other signals
+            if (liquidityFlags >= 6 && rawConfidence > 40)
+            {
+                rawConfidence = 40;
+                capReason = $"Liquidity cap: thin/illiquid stock ({liquidityFlags} coverage flags)";
+            }
+            else if (liquidityFlags >= 4 && rawConfidence > 50)
+            {
+                rawConfidence = 50;
+                capReason = $"Liquidity cap: low coverage stock ({liquidityFlags} coverage flags)";
+            }
+        }
+
         var maxCap = weights.GetValueOrDefault("max_confidence_cap", 85.0);
         int confidence = (int)Math.Round(Math.Clamp(rawConfidence, 0, maxCap));
 
@@ -376,6 +456,7 @@ public class ConfidenceEngine : IConfidenceEngine
             CalibrationFactor = calFactor,
             OppositionPenalty = oppositionPenalty,
             RegimePenalty = regimePenalty * overconfidencePenalty,
+            LiquidityPenalty = liquidityPenalty,
             DecisionMargin = decisionMargin,
             ClearDirection = clearDirection,
             ConfidenceCap = capReason,

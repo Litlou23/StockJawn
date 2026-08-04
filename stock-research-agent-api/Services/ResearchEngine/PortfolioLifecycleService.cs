@@ -158,6 +158,7 @@ public class PortfolioLifecycleService
 
         var eligible = actionableCandidates
             .Where(c => c.IsActionable
+                && c.CandidateMode == CandidateMode.live_eligible // Only trade live-eligible, not shadow/learning
                 && c.Status == PaperStockStatus.open
                 && c.EntryPrice is > 0
                 && (double)c.EntryPrice.Value >= minEntryPrice // Penny stock filter — skip sub-$2 stocks
@@ -932,7 +933,9 @@ public class PortfolioLifecycleService
         // Exclude tickers that were just closed by risk management this cycle —
         // re-entering a ticker that just hit a stop-loss is chasing a loser.
         var actionable = openCandidates
-            .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)
+            .Where(c => c.IsActionable
+                && c.CandidateMode == CandidateMode.live_eligible
+                && c.Status == PaperStockStatus.open)
             .Where(c => closedTickers is null || !closedTickers.Contains(c.Ticker))
             .ToList();
 
