@@ -702,6 +702,10 @@ public class PortfolioLifecycleService
         var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
         var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
 
+        // Partial profit-taking config
+        var partialTpEnabled = weights.GetValueOrDefault("partial_tp_enabled", 1.0) >= 1.0;
+        var partialTpFraction = Math.Clamp(weights.GetValueOrDefault("partial_tp_fraction", 0.5), 0.1, 0.9);
+
         // Market stress: widen stop-losses during volatile conditions
         // so temporary drops don't trigger premature exits
         var stopMultiplier = 1.0;
@@ -799,6 +803,7 @@ public class PortfolioLifecycleService
                                  $"(limit -{limits.StopLoss:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}";
                     await CloseWithReason(pos, currentPrice, reason);
                     result.StopLossClosed++;
+                    result.ClosedTickers.Add(pos.Ticker);
                     _logger.LogWarning("[risk] {Reason}", reason);
                     continue;
                 }
@@ -806,11 +811,39 @@ public class PortfolioLifecycleService
                 // ── Take-profit check (day/swing only) ──
                 if (limits.TakeProfit > 0 && pnlPercent >= limits.TakeProfit)
                 {
-                    var reason = $"TAKE-PROFIT ({tier}): {pos.Ticker} up {pnlPercent:P1} " +
-                                 $"(limit +{limits.TakeProfit:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}";
-                    await CloseWithReason(pos, currentPrice, reason);
+                    // Partial profit-taking: first TP hit closes a fraction, remainder runs on trail.
+                    // Second TP hit (or if partial is disabled) does full close.
+                    if (partialTpEnabled && !pos.PartialProfitTaken)
+                    {
+                        var reason = $"PARTIAL-TP ({tier}): {pos.Ticker} up {pnlPercent:P1} " +
+                                     $"— closing {partialTpFraction:P0} at ${currentPrice:F2}. " +
+                                     $"Entry ${pos.EntryPrice:F2}, remainder runs on trailing stop.";
+                        try
+                        {
+                            await _portfolio.PartialClosePositionAsync(
+                                pos, currentPrice, partialTpFraction, reason);
+                            result.PartialProfitsTaken++;
+                            _logger.LogInformation("[risk] {Reason}", reason);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "[risk] Partial TP failed for {Ticker}, falling back to full close",
+                                pos.Ticker);
+                            await CloseWithReason(pos, currentPrice,
+                                $"TAKE-PROFIT ({tier}): {pos.Ticker} up {pnlPercent:P1} (partial failed, full close)");
+                            result.TakeProfitClosed++;
+                            result.ClosedTickers.Add(pos.Ticker);
+                        }
+                        continue;
+                    }
+
+                    var fullReason = $"TAKE-PROFIT ({tier}): {pos.Ticker} up {pnlPercent:P1} " +
+                                 $"(limit +{limits.TakeProfit:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}" +
+                                 (pos.PartialProfitTaken ? " [2nd TP — partial already taken]" : "");
+                    await CloseWithReason(pos, currentPrice, fullReason);
                     result.TakeProfitClosed++;
-                    _logger.LogInformation("[risk] {Reason}", reason);
+                    result.ClosedTickers.Add(pos.Ticker);
+                    _logger.LogInformation("[risk] {Reason}", fullReason);
                     continue;
                 }
 
@@ -843,6 +876,7 @@ public class PortfolioLifecycleService
                                          $"Locked in {pnlPercent:P1} gain from entry ${pos.EntryPrice:F2}";
                             await CloseWithReason(pos, currentPrice, reason);
                             result.TrailingStopClosed++;
+                            result.ClosedTickers.Add(pos.Ticker);
                             _logger.LogInformation("[risk] {Reason}", reason);
                             continue;
                         }
@@ -851,16 +885,80 @@ public class PortfolioLifecycleService
             }
         }
 
-        if (result.TotalClosed > 0)
+        if (result.TotalClosed > 0 || result.PartialProfitsTaken > 0)
             _logger.LogWarning("[risk] Risk check complete: {Checked} positions checked, " +
-                "{SL} stop-loss, {TP} take-profit, {TS} trailing-stop closures, {HWM} high-water marks updated",
+                "{SL} stop-loss, {TP} take-profit, {TS} trailing-stop closures, " +
+                "{Partial} partial profits taken, {HWM} high-water marks updated",
                 result.PositionsChecked, result.StopLossClosed, result.TakeProfitClosed,
-                result.TrailingStopClosed, result.HighWaterMarksUpdated);
+                result.TrailingStopClosed, result.PartialProfitsTaken, result.HighWaterMarksUpdated);
         else
             _logger.LogInformation("[risk] Risk check complete: {Checked} positions checked, no triggers hit",
                 result.PositionsChecked);
 
         return result;
+    }
+
+    /// <summary>
+    /// After risk management closes positions (stop-loss, take-profit, trailing stop),
+    /// redeploy freed capital by opening new positions from available candidates.
+    /// This prevents capital from sitting idle until the next morning scan.
+    /// Gated by <c>intraday_reopen_enabled</c> config flag.
+    /// </summary>
+    public async Task<int> ReopenAfterScalpCloseAsync(int positionsClosed, HashSet<string>? closedTickers = null)
+    {
+        if (positionsClosed <= 0)
+            return 0;
+
+        // Check config flag
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var intradayReopenEnabled = weights.GetValueOrDefault("intraday_reopen_enabled", 1.0) >= 1.0;
+
+        if (!intradayReopenEnabled)
+        {
+            _logger.LogDebug("[portfolio-reopen] Intraday reopening disabled via config");
+            return 0;
+        }
+
+        // Fetch all open paper stock candidates (from today's morning scan)
+        var openCandidates = await _candidateRepo.GetOpenCandidatesAsync();
+        if (openCandidates.Count == 0)
+        {
+            _logger.LogInformation("[portfolio-reopen] No open candidates available for intraday reopening");
+            return 0;
+        }
+
+        // Filter to actionable, directional candidates only.
+        // Exclude tickers that were just closed by risk management this cycle —
+        // re-entering a ticker that just hit a stop-loss is chasing a loser.
+        var actionable = openCandidates
+            .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)
+            .Where(c => closedTickers is null || !closedTickers.Contains(c.Ticker))
+            .ToList();
+
+        if (actionable.Count == 0)
+        {
+            _logger.LogInformation("[portfolio-reopen] {Total} open candidates but none actionable", openCandidates.Count);
+            return 0;
+        }
+
+        _logger.LogInformation(
+            "[portfolio-reopen] {Closed} positions closed by risk mgmt — attempting reopen from {Available} actionable candidates",
+            positionsClosed, actionable.Count);
+
+        var errors = new List<string>();
+        var opened = await OpenPositionsForCandidatesAsync(actionable, errors);
+
+        if (errors.Count > 0)
+            _logger.LogWarning("[portfolio-reopen] {Count} errors during reopen: {Errors}",
+                errors.Count, string.Join("; ", errors.Take(5)));
+
+        if (opened > 0)
+            _logger.LogInformation("[portfolio-reopen] Opened {Count} new positions to redeploy capital", opened);
+        else
+            _logger.LogInformation("[portfolio-reopen] No new positions opened (all candidates filtered by guardrails)");
+
+        return opened;
     }
 
     /// <summary>Fetch quotes for multiple tickers in parallel (capped at 8 concurrent).</summary>
@@ -989,5 +1087,8 @@ public record RiskCheckResult
     public int TakeProfitClosed { get; set; }
     public int TrailingStopClosed { get; set; }
     public int HighWaterMarksUpdated { get; set; }
+    public int PartialProfitsTaken { get; set; }
     public int TotalClosed => StopLossClosed + TakeProfitClosed + TrailingStopClosed;
+    /// <summary>Tickers closed this cycle — used to prevent immediate same-ticker reentry.</summary>
+    public HashSet<string> ClosedTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

@@ -549,6 +549,91 @@ public class PortfolioBalanceEngine
     }
 
     /// <summary>
+    /// Close a fraction of a position (e.g. 50% at first take-profit).
+    /// Returns the partial P&L cash to the challenge, reduces position quantity/dollars,
+    /// and marks partial_profit_taken = true. Position stays open for the remainder.
+    /// </summary>
+    public async Task<double> PartialClosePositionAsync(
+        PortfolioPosition position, double exitPrice, double fraction, string reason)
+    {
+        if (fraction <= 0 || fraction >= 1.0)
+            throw new ArgumentOutOfRangeException(nameof(fraction), "Fraction must be between 0 and 1 (exclusive)");
+
+        var challenge = await _repo.GetChallengeAsync(position.PortfolioId);
+        if (challenge is null)
+        {
+            _logger.LogWarning("[balance-engine] Challenge {Id} not found for partial close", position.PortfolioId);
+            return 0;
+        }
+
+        // Calculate how much we're closing
+        var closeQuantity = position.Quantity * fraction;
+        var remainingQuantity = position.Quantity - closeQuantity;
+        var closeDollarsInvested = position.DollarsInvested * fraction;
+        var remainingDollarsInvested = position.DollarsInvested - closeDollarsInvested;
+
+        // Calculate P&L on the closed portion
+        var closeMultiplier = position.AssetType == PositionAssetType.option ? 100.0 : 1.0;
+        var dollarsReturned = Math.Round(exitPrice * closeQuantity * closeMultiplier, 2);
+        var partialPnL = Math.Round(dollarsReturned - closeDollarsInvested, 2);
+
+        // ── Broker partial close (broker_paper or live mode) ──
+        var isBrokerMode = challenge.TradingMode != TradingMode.paper && _broker.IsConfigured;
+        if (isBrokerMode)
+        {
+            _logger.LogWarning(
+                "[balance-engine] Partial close not supported for broker mode yet — " +
+                "skipping broker sell for {Ticker} ({Fraction:P0})",
+                position.Ticker, fraction);
+            // For now, skip broker partial — will need fractional share selling support
+            // Position stays fully open at broker but partially closed in Supabase
+        }
+
+        // Update position: reduce quantity and dollars_invested, mark partial taken
+        await _repo.UpdatePartialCloseAsync(
+            position.Id,
+            Math.Round(remainingQuantity, 6),
+            Math.Round(remainingDollarsInvested, 2));
+
+        // Return cash to challenge
+        var newCash = Math.Round(challenge.CurrentCash + dollarsReturned, 2);
+        var newRealizedProfit = Math.Round(challenge.RealizedProfit + partialPnL, 2);
+
+        // Recalculate balance
+        var openPositions = await _repo.GetOpenPositionsAsync(challenge.Id);
+        var openPositionValue = openPositions.Sum(p => p.DollarsInvested);
+        var newBalance = Math.Round(newCash + openPositionValue, 2);
+        var newTotalReturn = Math.Round(newBalance - challenge.StartingBalance, 2);
+        var newPercentReturn = challenge.StartingBalance > 0
+            ? Math.Round((newTotalReturn / challenge.StartingBalance) * 100, 2)
+            : 0;
+
+        // Don't count partial close as a "trade" — that happens on full close
+        await _repo.UpdateChallengeBalanceAsync(
+            challenge.Id,
+            currentBalance: newBalance,
+            currentCash: newCash,
+            buyingPower: newCash,
+            realizedProfit: newRealizedProfit,
+            unrealizedProfit: 0,
+            totalReturn: newTotalReturn,
+            percentReturn: newPercentReturn,
+            numberOfTrades: challenge.NumberOfTrades, // unchanged
+            winningTrades: challenge.WinningTrades,
+            losingTrades: challenge.LosingTrades,
+            winRate: challenge.WinRate,
+            status: null);
+
+        _logger.LogInformation(
+            "[balance-engine] PARTIAL CLOSE {Ticker}: {Fraction:P0} at ${Price:F2}. " +
+            "Partial P&L ${PnL:F2}. Remaining {RemQty:F2} shares (${RemDollars:F2}). Cash: ${Cash:F2}",
+            position.Ticker, fraction, exitPrice, partialPnL,
+            remainingQuantity, remainingDollarsInvested, newCash);
+
+        return partialPnL;
+    }
+
+    /// <summary>
     /// Build a dashboard summary for a challenge.
     /// </summary>
     public async Task<PortfolioChallengeSummary?> GetSummaryAsync(string? challengeId = null)

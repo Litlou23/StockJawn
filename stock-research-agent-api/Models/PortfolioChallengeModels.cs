@@ -80,6 +80,8 @@ public record PortfolioPosition
     public string? ReasonExited { get; init; }
     public PositionStatus Status { get; init; } = PositionStatus.open;
     public double? HighWaterMark { get; init; }
+    /// <summary>Whether a partial take-profit has already been executed on this position.</summary>
+    public bool PartialProfitTaken { get; init; }
     /// <summary>Broker order ID for the entry order (null for paper-only positions).</summary>
     public string? BrokerEntryOrderId { get; init; }
     /// <summary>Broker order ID for the exit order (null for paper-only positions).</summary>

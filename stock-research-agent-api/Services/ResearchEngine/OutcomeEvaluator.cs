@@ -327,6 +327,14 @@ public class OutcomeEvaluator
 
         _logger.LogInformation("[outcome-evaluator] Found {Count} open predictions to evaluate", openPredictions.Count);
 
+        // ── Load adaptive hold config from scoring_weight_overrides ──
+        var overrides = await _repo.GetActiveWeightOverridesAsync();
+        var cfgWeights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var adaptiveHoldEnabled = cfgWeights.GetValueOrDefault("adaptive_hold_enabled", 1.0) >= 1.0;
+        var adaptiveHoldMinConfidence = cfgWeights.GetValueOrDefault("adaptive_hold_min_confidence", 50.0);
+        var adaptiveHoldExtensionMultiplier = cfgWeights.GetValueOrDefault("adaptive_hold_extension_multiplier", 1.5);
+        var adaptiveHoldMinMovePct = cfgWeights.GetValueOrDefault("adaptive_hold_min_move_pct", 0.5);
+
         var now = DateTimeOffset.UtcNow;
         foreach (var prediction in openPredictions)
         {
@@ -383,6 +391,59 @@ public class OutcomeEvaluator
                 await _repo.UpdatePredictionStatusAsync(prediction.Id, "expired");
                 skipped.Add($"{prediction.Ticker}: expired ({ageHours:F0}h old)");
                 continue;
+            }
+
+            // ── Adaptive hold: defer evaluation when prediction is winning ──
+            // If a prediction is moving in the right direction but hasn't hit
+            // target, extend the evaluation window to let it run. This prevents
+            // closing out winners too early — scalp the gains, don't cut them.
+            // Only applies when confidence was high enough (real conviction)
+            // and we haven't exceeded the max extension window.
+            if (adaptiveHoldEnabled
+                && prediction.ConfidenceScore >= adaptiveHoldMinConfidence
+                && ageHours < minHours * adaptiveHoldExtensionMultiplier
+                && prediction.EntryReferencePrice is double holdEntry and > 0)
+            {
+                try
+                {
+                    var holdQuote = await _marketData.GetQuoteWithFallbackAsync(prediction.Ticker);
+                    if (holdQuote is not null)
+                    {
+                        var currentMove = ((holdQuote.Price - holdEntry) / holdEntry) * 100;
+                        var isWinning = prediction.PredictionType == PredictionType.bullish
+                            ? currentMove >= adaptiveHoldMinMovePct
+                            : currentMove <= -adaptiveHoldMinMovePct;
+
+                        // Don't hold if target already hit — let risk check close it
+                        var targetAlreadyHit = false;
+                        if (prediction.TargetPrice is double tp and > 0)
+                        {
+                            targetAlreadyHit = prediction.PredictionType == PredictionType.bullish
+                                ? holdQuote.Price >= tp
+                                : holdQuote.Price <= tp;
+                        }
+
+                        if (isWinning && !targetAlreadyHit)
+                        {
+                            var maxExtHours = minHours * adaptiveHoldExtensionMultiplier;
+                            _logger.LogInformation(
+                                "[outcome-evaluator] {Ticker}: adaptive hold — winning {Move:+0.0;-0.0}%, " +
+                                "conf={Conf}, extending to {MaxH:F0}h (age={Age:F0}h, window={TW})",
+                                prediction.Ticker, currentMove, prediction.ConfidenceScore,
+                                maxExtHours, ageHours, prediction.TimeWindow);
+                            skipped.Add($"{prediction.Ticker}: adaptive hold — winning {currentMove:+0.0;-0.0}%, " +
+                                $"conf={prediction.ConfidenceScore}, extending to {maxExtHours:F0}h " +
+                                $"(age={ageHours:F0}h, window={prediction.TimeWindow})");
+                            continue;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "[outcome-evaluator] {Ticker}: adaptive hold quote check failed, proceeding to evaluate",
+                        prediction.Ticker);
+                }
             }
 
             try

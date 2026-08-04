@@ -504,7 +504,7 @@ public class PredictionGenerator
 
         var entryPrice = snapshot.Quote?.Price;
         var priceCalc = ComputeAtrPriceForecast(
-            entryPrice, predType, timeWindow, snapshot, confidence, risk, scoring.Breakdown, researchUniverse);
+            entryPrice, predType, timeWindow, snapshot, confidence, risk, scoring.Breakdown, researchUniverse, weights);
 
         // Second-pass finalization: apply R/R-aware caps + actionability tier
         // now that we know the risk/reward ratio.
@@ -1207,7 +1207,8 @@ public class PredictionGenerator
         double? entryPrice, string predType, string timeWindow,
         MarketSnapshot snapshot, int confidence, int risk,
         ScoringBreakdown? breakdown = null,
-        ResearchUniverseContext? researchUniverse = null)
+        ResearchUniverseContext? researchUniverse = null,
+        Dictionary<string, double>? configWeights = null)
     {
         var result = new AtrPriceForecast();
         if (entryPrice is not double ep || ep == 0) return result;
@@ -1292,6 +1293,25 @@ public class PredictionGenerator
 
         // --- Expected move ---
         var expectedMove = atr14 * tfMultiplier * modifier;
+
+        // ── Scalp target dampener: reduce target AND stop distance for short timeframes ──
+        // Scalping wants tighter, more reachable targets. Apply dampener (0.0-1.0)
+        // to shrink the expected move on short-term predictions so targets get hit
+        // faster and profits get booked. Also tightens stops proportionally so R:R
+        // stays reasonable and EV calculations don't reject valid scalp candidates.
+        // Default 1.0 = no change.
+        double effectiveScalpDampener = 1.0;
+        if (configWeights is not null)
+        {
+            var scalpDampener = configWeights.GetValueOrDefault("scalp_target_dampener", 1.0);
+            if (scalpDampener < 1.0 && scalpDampener > 0
+                && (timeWindow is "intraday" or "1_day" or "3_day" or "1_week"))
+            {
+                effectiveScalpDampener = scalpDampener;
+                expectedMove *= effectiveScalpDampener;
+            }
+        }
+
         result.ExpectedMoveDollar = Math.Round(expectedMove, 2);
         result.ExpectedMovePercent = Math.Round((expectedMove / ep) * 100, 2);
 
@@ -1316,8 +1336,11 @@ public class PredictionGenerator
             var rawTarget = ep + expectedMove;
             result.TargetPrice = Math.Round(rawTarget, 2);
 
-            var atrStop = ep - atr14;
-            var supportStop = support - 0.25 * atr14;
+            // Tighten stop proportionally when scalp dampener is active so R:R
+            // stays balanced and EV doesn't go negative on valid scalp candidates.
+            var stopAtr = atr14 * effectiveScalpDampener;
+            var atrStop = ep - stopAtr;
+            var supportStop = support - 0.25 * stopAtr;
             result.StopPrice = Math.Round(Math.Max(atrStop, supportStop), 2);
 
             result.InvalidationPrice = Math.Round(ep - 1.5 * atr14, 2);
@@ -1333,8 +1356,9 @@ public class PredictionGenerator
             var rawTarget = ep - expectedMove;
             result.TargetPrice = Math.Round(rawTarget, 2);
 
-            var atrStop = ep + atr14;
-            var resistanceStop = resistance + 0.25 * atr14;
+            var stopAtr = atr14 * effectiveScalpDampener;
+            var atrStop = ep + stopAtr;
+            var resistanceStop = resistance + 0.25 * stopAtr;
             result.StopPrice = Math.Round(Math.Min(atrStop, resistanceStop), 2);
 
             result.InvalidationPrice = Math.Round(ep + 1.5 * atr14, 2);

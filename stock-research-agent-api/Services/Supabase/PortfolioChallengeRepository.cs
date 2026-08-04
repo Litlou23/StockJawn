@@ -285,6 +285,22 @@ public class PortfolioChallengeRepository
         });
     }
 
+    /// <summary>
+    /// Update a position after partial profit-taking: reduce quantity and dollars_invested,
+    /// mark partial_profit_taken = true. Position stays open with the remaining shares.
+    /// </summary>
+    public async Task<bool> UpdatePartialCloseAsync(
+        string positionId, double newQuantity, double newDollarsInvested)
+    {
+        return await _db.UpdateAsync("portfolio_positions", $"id=eq.{positionId}", new
+        {
+            quantity = newQuantity,
+            dollars_invested = newDollarsInvested,
+            partial_profit_taken = true,
+            updated_at = DateTimeOffset.UtcNow.ToString("o"),
+        });
+    }
+
     public Task<int> CountPositionsAsync(string portfolioId, string? statusFilter = null)
     {
         var filter = $"portfolio_id=eq.{portfolioId}";
@@ -390,6 +406,7 @@ public class PortfolioChallengeRepository
         ReasonExited = r["reason_exited"]?.ToString(),
         Status = Enum.TryParse<PositionStatus>(r["status"]?.ToString(), out var ps) ? ps : PositionStatus.open,
         HighWaterMark = GetNullableDouble(r, "high_water_mark"),
+        PartialProfitTaken = r["partial_profit_taken"]?.GetValue<bool>() ?? false,
         BrokerEntryOrderId = r["broker_entry_order_id"]?.ToString(),
         BrokerExitOrderId = r["broker_exit_order_id"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),

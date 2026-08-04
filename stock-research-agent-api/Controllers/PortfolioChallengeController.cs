@@ -265,6 +265,20 @@ public class PortfolioChallengeController : ControllerBase
             _logger.LogError(ex, "[dashboard-refresh] Prediction risk check failed");
         }
 
+        // ── Intraday reopen: redeploy capital after scalp closes ──
+        int intradayReopened = 0;
+        if (riskResult is not null && riskResult.TotalClosed > 0)
+        {
+            try
+            {
+                intradayReopened = await _lifecycle.ReopenAfterScalpCloseAsync(riskResult.TotalClosed, riskResult.ClosedTickers);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[dashboard-refresh] Intraday reopen failed");
+            }
+        }
+
         // ── Then refresh cached dashboard data ──
         var challenges = await _repo.GetAllChallengesAsync();
         var active = challenges.Where(c => c.Status == ChallengeStatus.active).ToList();
@@ -301,8 +315,10 @@ public class PortfolioChallengeController : ControllerBase
                 riskResult.TakeProfitClosed,
                 riskResult.TrailingStopClosed,
                 riskResult.HighWaterMarksUpdated,
+                riskResult.PartialProfitsTaken,
                 riskResult.TotalClosed,
             } : null,
+            intradayReopened,
             predictionRiskCheck = predictionRiskResult is not null ? new
             {
                 predictionRiskResult.PredictionsChecked,
@@ -352,6 +368,20 @@ public class PortfolioChallengeController : ControllerBase
         else
             _logger.LogInformation("[intraday-risk] No exits triggered");
 
+        // ── Intraday reopen: redeploy freed capital immediately ──
+        int intradayReopened = 0;
+        if (riskResult is not null && riskResult.TotalClosed > 0)
+        {
+            try
+            {
+                intradayReopened = await _lifecycle.ReopenAfterScalpCloseAsync(riskResult.TotalClosed, riskResult.ClosedTickers);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[intraday-risk] Intraday reopen failed");
+            }
+        }
+
         return Ok(new
         {
             portfolioRisk = riskResult is not null ? new
@@ -361,8 +391,10 @@ public class PortfolioChallengeController : ControllerBase
                 riskResult.TakeProfitClosed,
                 riskResult.TrailingStopClosed,
                 riskResult.HighWaterMarksUpdated,
+                riskResult.PartialProfitsTaken,
                 riskResult.TotalClosed,
             } : null,
+            intradayReopened,
             predictionRisk = predictionRiskResult is not null ? new
             {
                 predictionRiskResult.PredictionsChecked,
