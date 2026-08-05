@@ -1,3 +1,5 @@
+'use client';
+
 import AppShell from '@/components/AppShell';
 import JobTriggerButtons from '@/components/dashboard/JobTriggerButtons';
 import DynamicSummaryCards from '@/components/dashboard/DynamicSummaryCards';
@@ -13,8 +15,7 @@ const SignalPerformanceChart = dynamic_import(() => import('@/components/charts/
 const AccuracyOverTimeChart = dynamic_import(() => import('@/components/charts/AccuracyOverTimeChart'), { ssr: false });
 const WinLossCalendar = dynamic_import(() => import('@/components/charts/WinLossCalendar'), { ssr: false });
 
-// Force dynamic rendering — never serve a cached page
-export const dynamic = 'force-dynamic';
+// Client component — always renders dynamically
 
 // ---------------------------------------------------------------------------
 // Types matching GET /api/dashboard/summary response

@@ -1,10 +1,12 @@
+'use client';
+
 import AppShell from '@/components/AppShell';
 import dynamic_import from 'next/dynamic';
 
 const SignalPerformanceChart = dynamic_import(() => import('@/components/charts/SignalPerformanceChart'), { ssr: false });
 const CalibrationChart = dynamic_import(() => import('@/components/charts/CalibrationChart'), { ssr: false });
 
-export const dynamic = 'force-dynamic';
+// Client component — always renders dynamically
 
 interface SignalPerf {
   signalName: string;
