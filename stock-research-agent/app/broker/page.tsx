@@ -105,6 +105,8 @@ export default function BrokerPage() {
   const [orders, setOrders] = useState<BrokerOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [forcing, setForcing] = useState(false);
+  const [forceResult, setForceResult] = useState<string | null>(null);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
 
   const fetchAll = useCallback(async () => {
@@ -138,6 +140,22 @@ export default function BrokerPage() {
     }
   };
 
+  const handleForceTrade = async () => {
+    setForcing(true);
+    setForceResult(null);
+    try {
+      const res = await fetch('/api/broker/force-trade', { method: 'POST' });
+      const data = await res.json();
+      setForceResult(data.message ?? 'Force trade triggered — check job status.');
+      // Poll for completion then refresh
+      setTimeout(() => fetchAll(), 10000);
+    } catch {
+      setForceResult('Failed to trigger force trade.');
+    } finally {
+      setForcing(false);
+    }
+  };
+
   // Compute totals from positions
   const totalMarketValue = positions.reduce((s, p) => s + p.marketValue, 0);
   const totalUnrealizedPnL = positions.reduce((s, p) => s + p.unrealizedPnL, 0);
@@ -159,6 +177,14 @@ export default function BrokerPage() {
           </div>
           <div className="flex gap-2">
             <button
+              onClick={handleForceTrade}
+              disabled={forcing}
+              className="rounded-lg border border-amber-700 bg-amber-900/30 px-3 py-1.5 text-sm text-amber-300 hover:bg-amber-800/40 disabled:opacity-50"
+              title="Force today's predictions through the broker pipeline"
+            >
+              {forcing ? 'Forcing...' : 'Force Trade'}
+            </button>
+            <button
               onClick={handleSync}
               disabled={syncing}
               className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 disabled:opacity-50"
@@ -174,6 +200,12 @@ export default function BrokerPage() {
             </button>
           </div>
         </div>
+
+        {forceResult && (
+          <div className="rounded-lg border border-amber-700/50 bg-amber-900/20 px-4 py-3 text-sm text-amber-200">
+            {forceResult}
+          </div>
+        )}
 
         {loading && !status ? (
           <div className="flex items-center justify-center py-20">

@@ -819,6 +819,173 @@ public class PortfolioChallengeController : ControllerBase
         var result = await _brokerSync.SyncAsync();
         return Ok(result);
     }
+
+    /// <summary>
+    /// Manual override: force today's champion predictions through the broker
+    /// trading pipeline. Use when the automated morning scan failed to produce
+    /// candidates (e.g. DB constraint error, cron miss, etc.).
+    ///
+    /// 1. Fetches today's champion predictions
+    /// 2. Builds paper_stock_candidates for any that don't already have one
+    /// 3. Saves them to DB
+    /// 4. Runs OpenPositionsForCandidatesAsync with bypassTimeGate=true
+    ///
+    /// Fire-and-forget: returns 202 immediately.
+    /// </summary>
+    [HttpPost("force-trade")]
+    public IActionResult ForceTrade()
+    {
+        const string jobName = "force-trade";
+        _logger.LogInformation("[force-trade] Manual override triggered — running in background");
+        _jobStatus.MarkStarted(jobName);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var researchRepo = scope.ServiceProvider.GetRequiredService<ResearchRepository>();
+                var candidateRepo = scope.ServiceProvider.GetRequiredService<PaperStockCandidateRepository>();
+                var candidateService = scope.ServiceProvider.GetRequiredService<StockCandidateService>();
+                var lifecycle = scope.ServiceProvider.GetRequiredService<PortfolioLifecycleService>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<PortfolioChallengeController>>();
+
+                // 1. Get today's champion predictions
+                var championId = await researchRepo.GetChampionProfileIdAsync();
+                if (championId is null)
+                {
+                    logger.LogWarning("[force-trade] No champion profile found");
+                    _jobStatus.MarkFailed(jobName, "No champion profile found");
+                    return;
+                }
+
+                var todayStart = DateTimeOffset.UtcNow.Date;
+                var todayEnd = todayStart.AddDays(1);
+                var predictions = await researchRepo.GetPredictionsByDateRangeAsync(
+                    new DateTimeOffset(todayStart, TimeSpan.Zero),
+                    new DateTimeOffset(todayEnd, TimeSpan.Zero),
+                    profileId: championId);
+
+                if (predictions.Count == 0)
+                {
+                    logger.LogWarning("[force-trade] No champion predictions found for today");
+                    _jobStatus.MarkCompleted(jobName, "No champion predictions found for today — nothing to trade.");
+                    return;
+                }
+
+                logger.LogInformation("[force-trade] Found {Count} champion predictions for today", predictions.Count);
+
+                // 2. Check which predictions already have candidates
+                var existingCandidates = await candidateRepo.GetOpenCandidatesAsync();
+                var existingPredictionIds = new HashSet<string>(
+                    existingCandidates
+                        .Where(c => !string.IsNullOrEmpty(c.PredictionId))
+                        .Select(c => c.PredictionId!),
+                    StringComparer.OrdinalIgnoreCase);
+
+                var needsCandidates = predictions
+                    .Where(p => !existingPredictionIds.Contains(p.Id))
+                    .ToList();
+
+                logger.LogInformation(
+                    "[force-trade] {Total} predictions, {Existing} already have candidates, {New} need candidates",
+                    predictions.Count, predictions.Count - needsCandidates.Count, needsCandidates.Count);
+
+                // 3. Build candidates from predictions that don't have them yet
+                var runId = Guid.NewGuid().ToString();
+                var directionalRankings = StockCandidateService.BuildDirectionalRankings(needsCandidates);
+                var builtCandidates = new List<PaperStockCandidate>();
+
+                foreach (var pred in needsCandidates)
+                {
+                    try
+                    {
+                        directionalRankings.TryGetValue(pred.Id, out var ranking);
+                        var candidate = await candidateService.BuildStockCandidateFromPredictionAsync(
+                            pred, runId,
+                            ranking?.Percentile ?? 0,
+                            ranking?.IsTopQuartile ?? false);
+                        builtCandidates.Add(candidate);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "[force-trade] Failed to build candidate for {Ticker}", pred.Ticker);
+                    }
+                }
+
+                // 4. Save candidates to DB
+                List<PaperStockCandidate> savedCandidates;
+                if (builtCandidates.Count > 0)
+                {
+                    try
+                    {
+                        savedCandidates = await candidateRepo.SaveCandidatesBatchAsync(builtCandidates);
+                        logger.LogInformation("[force-trade] Saved {Count} new candidates", savedCandidates.Count);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "[force-trade] Failed to save candidates");
+                        _jobStatus.MarkFailed(jobName, $"Failed to save candidates: {ex.Message}");
+                        return;
+                    }
+                }
+                else
+                {
+                    savedCandidates = [];
+                }
+
+                // 5. Combine newly saved + already existing open candidates for trading
+                // If we built new candidates, trade those.
+                // If all predictions already had candidates, trade those existing ones
+                // (filtered to today's predictions only — don't trade stale candidates from prior days).
+                List<PaperStockCandidate> allTradeable;
+                if (savedCandidates.Count > 0)
+                {
+                    allTradeable = savedCandidates;
+                }
+                else
+                {
+                    var todayPredictionIds = new HashSet<string>(
+                        predictions.Select(p => p.Id), StringComparer.OrdinalIgnoreCase);
+                    allTradeable = existingCandidates
+                        .Where(c => !string.IsNullOrEmpty(c.PredictionId) && todayPredictionIds.Contains(c.PredictionId))
+                        .ToList();
+                }
+
+                if (allTradeable.Count == 0)
+                {
+                    logger.LogWarning("[force-trade] No tradeable candidates available");
+                    _jobStatus.MarkCompleted(jobName, "No tradeable candidates available.");
+                    return;
+                }
+
+                // 6. Open positions via the standard portfolio pipeline (bypasses time gate)
+                var errors = new List<string>();
+                var opened = await lifecycle.OpenPositionsForCandidatesAsync(
+                    allTradeable, errors, bypassTimeGate: true);
+
+                var msg = $"Forced {predictions.Count} predictions → {builtCandidates.Count} new candidates → {opened} positions opened.";
+                if (errors.Count > 0)
+                    msg += $" Errors: {string.Join("; ", errors)}";
+
+                logger.LogInformation("[force-trade] {Summary}", msg);
+                _jobStatus.MarkCompleted(jobName, msg);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[force-trade] Background job failed");
+                _jobStatus.MarkFailed(jobName, ex.Message);
+            }
+        });
+
+        return Accepted(new
+        {
+            status = "started",
+            jobName,
+            message = "Force trade is running in the background. Poll /api/jobs/status for progress.",
+            startedAt = DateTimeOffset.UtcNow,
+        });
+    }
 }
 
 public record UpdateStatusRequest
