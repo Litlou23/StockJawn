@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
@@ -41,6 +42,9 @@ public class PortfolioChallengeController : ControllerBase
     private readonly MarketDataService _marketData;
     private readonly IBrokerAdapter _broker;
     private readonly BrokerSyncService _brokerSync;
+    private readonly JobStatusTracker _jobStatus;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<PortfolioChallengeController> _logger;
 
     public PortfolioChallengeController(
@@ -51,6 +55,9 @@ public class PortfolioChallengeController : ControllerBase
         MarketDataService marketData,
         IBrokerAdapter broker,
         BrokerSyncService brokerSync,
+        JobStatusTracker jobStatus,
+        IServiceScopeFactory scopeFactory,
+        IConfiguration configuration,
         ILogger<PortfolioChallengeController> logger)
     {
         _engine = engine;
@@ -60,6 +67,9 @@ public class PortfolioChallengeController : ControllerBase
         _marketData = marketData;
         _broker = broker;
         _brokerSync = brokerSync;
+        _jobStatus = jobStatus;
+        _scopeFactory = scopeFactory;
+        _configuration = configuration;
         _logger = logger;
     }
 
@@ -239,95 +249,85 @@ public class PortfolioChallengeController : ControllerBase
     /// Force-refresh the dashboard cache for all active challenges.
     /// Also runs risk management checks (stop-loss, take-profit, trailing stop).
     /// Called by a scheduled cron ~4× during trading hours.
+    /// Fire-and-forget: returns 202 immediately, runs in background to avoid
+    /// Edge Function 150s timeout (116+ unique ticker quotes to fetch).
     /// </summary>
     [HttpPost("dashboard/refresh")]
-    public async Task<IActionResult> RefreshDashboardCache()
+    public IActionResult RefreshDashboardCache()
     {
-        // ── Run risk management checks first (may close positions) ──
-        RiskCheckResult? riskResult = null;
-        try
-        {
-            riskResult = await _lifecycle.EvaluateRiskLimitsAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[dashboard-refresh] Portfolio risk check failed");
-        }
+        const string jobName = "portfolio-dashboard-refresh";
+        _logger.LogInformation("[dashboard-refresh] Triggered — running in background");
+        _jobStatus.MarkStarted(jobName);
 
-        // ── Run prediction pool risk checks (stop/target/invalidation on all open predictions) ──
-        OutcomeEvaluator.PredictionRiskCheckResult? predictionRiskResult = null;
-        try
-        {
-            predictionRiskResult = await _outcomeEvaluator.EvaluatePredictionRiskLimitsAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[dashboard-refresh] Prediction risk check failed");
-        }
-
-        // ── Intraday reopen: redeploy capital after scalp closes ──
-        int intradayReopened = 0;
-        if (riskResult is not null && riskResult.TotalClosed > 0)
+        _ = Task.Run(async () =>
         {
             try
             {
-                intradayReopened = await _lifecycle.ReopenAfterScalpCloseAsync(riskResult.TotalClosed, riskResult.ClosedTickers);
+                using var scope = _scopeFactory.CreateScope();
+                var lifecycle = scope.ServiceProvider.GetRequiredService<PortfolioLifecycleService>();
+                var outcomeEval = scope.ServiceProvider.GetRequiredService<OutcomeEvaluator>();
+                var engine = scope.ServiceProvider.GetRequiredService<PortfolioBalanceEngine>();
+                var repo = scope.ServiceProvider.GetRequiredService<PortfolioChallengeRepository>();
+                var marketData = scope.ServiceProvider.GetRequiredService<MarketDataService>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<PortfolioChallengeController>>();
+
+                // ── Run risk management checks first (may close positions) ──
+                RiskCheckResult? riskResult = null;
+                try { riskResult = await lifecycle.EvaluateRiskLimitsAsync(); }
+                catch (Exception ex) { logger.LogError(ex, "[dashboard-refresh] Portfolio risk check failed"); }
+
+                // ── Run prediction pool risk checks ──
+                OutcomeEvaluator.PredictionRiskCheckResult? predictionRiskResult = null;
+                try { predictionRiskResult = await outcomeEval.EvaluatePredictionRiskLimitsAsync(); }
+                catch (Exception ex) { logger.LogError(ex, "[dashboard-refresh] Prediction risk check failed"); }
+
+                // ── Intraday reopen: redeploy capital after scalp closes ──
+                int intradayReopened = 0;
+                if (riskResult is not null && riskResult.TotalClosed > 0)
+                {
+                    try { intradayReopened = await lifecycle.ReopenAfterScalpCloseAsync(riskResult.TotalClosed, riskResult.ClosedTickers); }
+                    catch (Exception ex) { logger.LogError(ex, "[dashboard-refresh] Intraday reopen failed"); }
+                }
+
+                // ── Then refresh cached dashboard data ──
+                var challenges = await repo.GetAllChallengesAsync();
+                var active = challenges.Where(c => c.Status == ChallengeStatus.active).ToList();
+                var refreshed = 0;
+
+                foreach (var challenge in active)
+                {
+                    try
+                    {
+                        var summary = await engine.GetSummaryAsync(challenge.Id);
+                        if (summary is null) continue;
+                        var dashboard = await BuildDashboardCoreAsync(engine, repo, marketData, logger, summary);
+                        if (dashboard is null) continue;
+                        DashboardCache[challenge.Id] = (dashboard, DateTimeOffset.UtcNow);
+                        refreshed++;
+                    }
+                    catch (Exception ex) { logger.LogWarning(ex, "[dashboard-refresh] Failed for challenge {Id}", challenge.Id); }
+                }
+
+                var msg = $"Refreshed {refreshed}/{active.Count} challenges. " +
+                    $"Risk: {riskResult?.TotalClosed ?? 0} closed, {riskResult?.PartialProfitsTaken ?? 0} partials. " +
+                    $"Predictions: {predictionRiskResult?.TotalEarlyEvaluated ?? 0} early-eval. " +
+                    $"Reopened: {intradayReopened}.";
+                logger.LogInformation("[dashboard-refresh] {Summary}", msg);
+                _jobStatus.MarkCompleted(jobName, msg);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[dashboard-refresh] Intraday reopen failed");
+                _logger.LogError(ex, "[dashboard-refresh] Background job failed");
+                _jobStatus.MarkFailed(jobName, ex.Message);
             }
-        }
+        });
 
-        // ── Then refresh cached dashboard data ──
-        var challenges = await _repo.GetAllChallengesAsync();
-        var active = challenges.Where(c => c.Status == ChallengeStatus.active).ToList();
-        var refreshed = 0;
-
-        foreach (var challenge in active)
+        return Accepted(new
         {
-            try
-            {
-                var summary = await _engine.GetSummaryAsync(challenge.Id);
-                if (summary is null) continue;
-
-                var dashboard = await BuildDashboardAsync(summary);
-                if (dashboard is null) continue;
-
-                DashboardCache[challenge.Id] = (dashboard, DateTimeOffset.UtcNow);
-                refreshed++;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[dashboard-refresh] Failed for challenge {Id}", challenge.Id);
-            }
-        }
-
-        _logger.LogInformation("[dashboard-refresh] Refreshed {Count}/{Total} active challenges", refreshed, active.Count);
-        return Ok(new
-        {
-            refreshed,
-            total = active.Count,
-            riskCheck = riskResult is not null ? new
-            {
-                riskResult.PositionsChecked,
-                riskResult.StopLossClosed,
-                riskResult.TakeProfitClosed,
-                riskResult.TrailingStopClosed,
-                riskResult.HighWaterMarksUpdated,
-                riskResult.PartialProfitsTaken,
-                riskResult.TotalClosed,
-            } : null,
-            intradayReopened,
-            predictionRiskCheck = predictionRiskResult is not null ? new
-            {
-                predictionRiskResult.PredictionsChecked,
-                predictionRiskResult.StopLossEvaluated,
-                predictionRiskResult.TargetHitEvaluated,
-                predictionRiskResult.InvalidationEvaluated,
-                predictionRiskResult.TotalEarlyEvaluated,
-                predictionRiskResult.QuotesFailed,
-            } : null,
+            status = "started",
+            jobName,
+            message = "Dashboard refresh is running in the background. Poll /api/jobs/status for progress.",
+            startedAt = DateTimeOffset.UtcNow,
         });
     }
 
@@ -336,75 +336,68 @@ public class PortfolioChallengeController : ControllerBase
     /// checks on all open portfolio positions and prediction pool.
     /// No dashboard rebuild, no snapshot capture — just risk management.
     /// Designed to be called every 30 minutes during market hours via pg_cron.
+    /// Fire-and-forget: returns 202 immediately to avoid Edge Function timeout.
     /// </summary>
     [HttpPost("intraday-risk-check")]
-    public async Task<IActionResult> IntradayRiskCheck()
+    public IActionResult IntradayRiskCheck()
     {
-        // ── Portfolio position risk checks ──
-        RiskCheckResult? riskResult = null;
-        try
-        {
-            riskResult = await _lifecycle.EvaluateRiskLimitsAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[intraday-risk] Portfolio risk check failed");
-        }
+        const string jobName = "intraday-risk-check";
+        _logger.LogInformation("[intraday-risk] Triggered — running in background");
+        _jobStatus.MarkStarted(jobName);
 
-        // ── Prediction pool risk checks ──
-        OutcomeEvaluator.PredictionRiskCheckResult? predictionRiskResult = null;
-        try
-        {
-            predictionRiskResult = await _outcomeEvaluator.EvaluatePredictionRiskLimitsAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[intraday-risk] Prediction risk check failed");
-        }
-
-        var totalClosed = (riskResult?.TotalClosed ?? 0) + (predictionRiskResult?.TotalEarlyEvaluated ?? 0);
-        if (totalClosed > 0)
-            _logger.LogWarning("[intraday-risk] Closed {Total} positions/predictions during intraday check", totalClosed);
-        else
-            _logger.LogInformation("[intraday-risk] No exits triggered");
-
-        // ── Intraday reopen: redeploy freed capital immediately ──
-        int intradayReopened = 0;
-        if (riskResult is not null && riskResult.TotalClosed > 0)
+        _ = Task.Run(async () =>
         {
             try
             {
-                intradayReopened = await _lifecycle.ReopenAfterScalpCloseAsync(riskResult.TotalClosed, riskResult.ClosedTickers);
+                using var scope = _scopeFactory.CreateScope();
+                var lifecycle = scope.ServiceProvider.GetRequiredService<PortfolioLifecycleService>();
+                var outcomeEval = scope.ServiceProvider.GetRequiredService<OutcomeEvaluator>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<PortfolioChallengeController>>();
+
+                // ── Portfolio position risk checks ──
+                RiskCheckResult? riskResult = null;
+                try { riskResult = await lifecycle.EvaluateRiskLimitsAsync(); }
+                catch (Exception ex) { logger.LogError(ex, "[intraday-risk] Portfolio risk check failed"); }
+
+                // ── Prediction pool risk checks ──
+                OutcomeEvaluator.PredictionRiskCheckResult? predictionRiskResult = null;
+                try { predictionRiskResult = await outcomeEval.EvaluatePredictionRiskLimitsAsync(); }
+                catch (Exception ex) { logger.LogError(ex, "[intraday-risk] Prediction risk check failed"); }
+
+                var totalClosed = (riskResult?.TotalClosed ?? 0) + (predictionRiskResult?.TotalEarlyEvaluated ?? 0);
+
+                // ── Intraday reopen: redeploy freed capital immediately ──
+                int intradayReopened = 0;
+                if (riskResult is not null && riskResult.TotalClosed > 0)
+                {
+                    try { intradayReopened = await lifecycle.ReopenAfterScalpCloseAsync(riskResult.TotalClosed, riskResult.ClosedTickers); }
+                    catch (Exception ex) { logger.LogError(ex, "[intraday-risk] Intraday reopen failed"); }
+                }
+
+                var msg = $"Checked {riskResult?.PositionsChecked ?? 0} positions, " +
+                    $"{predictionRiskResult?.PredictionsChecked ?? 0} predictions. " +
+                    $"Closed: {totalClosed}. Reopened: {intradayReopened}.";
+
+                if (totalClosed > 0)
+                    logger.LogWarning("[intraday-risk] {Summary}", msg);
+                else
+                    logger.LogInformation("[intraday-risk] {Summary}", msg);
+
+                _jobStatus.MarkCompleted(jobName, msg);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[intraday-risk] Intraday reopen failed");
+                _logger.LogError(ex, "[intraday-risk] Background job failed");
+                _jobStatus.MarkFailed(jobName, ex.Message);
             }
-        }
+        });
 
-        return Ok(new
+        return Accepted(new
         {
-            portfolioRisk = riskResult is not null ? new
-            {
-                riskResult.PositionsChecked,
-                riskResult.StopLossClosed,
-                riskResult.TakeProfitClosed,
-                riskResult.TrailingStopClosed,
-                riskResult.HighWaterMarksUpdated,
-                riskResult.PartialProfitsTaken,
-                riskResult.TotalClosed,
-            } : null,
-            intradayReopened,
-            predictionRisk = predictionRiskResult is not null ? new
-            {
-                predictionRiskResult.PredictionsChecked,
-                predictionRiskResult.StopLossEvaluated,
-                predictionRiskResult.TargetHitEvaluated,
-                predictionRiskResult.InvalidationEvaluated,
-                predictionRiskResult.TotalEarlyEvaluated,
-                predictionRiskResult.QuotesFailed,
-            } : null,
-            totalClosed,
+            status = "started",
+            jobName,
+            message = "Intraday risk check is running in the background. Poll /api/jobs/status for progress.",
+            startedAt = DateTimeOffset.UtcNow,
         });
     }
 
@@ -413,57 +406,75 @@ public class PortfolioChallengeController : ControllerBase
     /// Picks up positions that were deferred by the morning open gate (9:30-10:00 AM),
     /// or that couldn't be opened because slots were full.
     /// Designed to run once in the afternoon via pg_cron (~2 PM ET / 18:00 UTC).
+    /// Fire-and-forget: returns 202 immediately to avoid Edge Function timeout.
     /// </summary>
     [HttpPost("afternoon-scan")]
-    public async Task<IActionResult> AfternoonOpportunityScan()
+    public IActionResult AfternoonOpportunityScan()
     {
-        int opened = 0;
-        try
-        {
-            opened = await _lifecycle.AfternoonOpportunityScanAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[afternoon-scan] Failed");
-            return StatusCode(500, new { error = ex.Message });
-        }
+        const string jobName = "afternoon-opportunity-scan";
+        _logger.LogInformation("[afternoon-scan] Triggered — running in background");
+        _jobStatus.MarkStarted(jobName);
 
-        // Also run risk management while we're here
-        RiskCheckResult? riskResult = null;
-        try
+        _ = Task.Run(async () =>
         {
-            riskResult = await _lifecycle.EvaluateRiskLimitsAsync();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "[afternoon-scan] Risk check failed");
-        }
-
-        return Ok(new
-        {
-            positionsOpened = opened,
-            riskCheck = riskResult is not null ? new
+            try
             {
-                riskResult.PositionsChecked,
-                riskResult.StopLossClosed,
-                riskResult.TakeProfitClosed,
-                riskResult.TrailingStopClosed,
-                riskResult.PartialProfitsTaken,
-                riskResult.TotalClosed,
-            } : null,
+                using var scope = _scopeFactory.CreateScope();
+                var lifecycle = scope.ServiceProvider.GetRequiredService<PortfolioLifecycleService>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<PortfolioChallengeController>>();
+
+                int opened = 0;
+                try { opened = await lifecycle.AfternoonOpportunityScanAsync(); }
+                catch (Exception ex) { logger.LogError(ex, "[afternoon-scan] Scan failed"); }
+
+                // Also run risk management while we're here
+                RiskCheckResult? riskResult = null;
+                try { riskResult = await lifecycle.EvaluateRiskLimitsAsync(); }
+                catch (Exception ex) { logger.LogError(ex, "[afternoon-scan] Risk check failed"); }
+
+                var msg = $"Opened {opened} positions. Risk: {riskResult?.TotalClosed ?? 0} closed, " +
+                    $"{riskResult?.PartialProfitsTaken ?? 0} partials.";
+                logger.LogInformation("[afternoon-scan] {Summary}", msg);
+                _jobStatus.MarkCompleted(jobName, msg);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[afternoon-scan] Background job failed");
+                _jobStatus.MarkFailed(jobName, ex.Message);
+            }
+        });
+
+        return Accepted(new
+        {
+            status = "started",
+            jobName,
+            message = "Afternoon scan is running in the background. Poll /api/jobs/status for progress.",
+            startedAt = DateTimeOffset.UtcNow,
         });
     }
 
     /// <summary>
     /// Builds a full dashboard snapshot: parallel quote fetch, equity curve, stats.
+    /// Instance wrapper for request-scoped calls (GET /dashboard).
     /// </summary>
     private async Task<PortfolioDashboard?> BuildDashboardAsync(PortfolioChallengeSummary summary)
+        => await BuildDashboardCoreAsync(_engine, _repo, _marketData, _logger, summary);
+
+    /// <summary>
+    /// Static core: can be called from background tasks with a fresh DI scope.
+    /// </summary>
+    private static async Task<PortfolioDashboard?> BuildDashboardCoreAsync(
+        PortfolioBalanceEngine engine,
+        PortfolioChallengeRepository repo,
+        MarketDataService marketData,
+        ILogger logger,
+        PortfolioChallengeSummary summary)
     {
-        var challenge = await _repo.GetChallengeAsync(summary.ChallengeId);
+        var challenge = await repo.GetChallengeAsync(summary.ChallengeId);
         if (challenge is null) return null;
 
         // ── Fetch quotes for all unique tickers in parallel (capped at 8) ──
-        var openPositions = await _repo.GetOpenPositionsAsync(challenge.Id);
+        var openPositions = await repo.GetOpenPositionsAsync(challenge.Id);
         var uniqueTickers = openPositions.Select(p => p.Ticker).Distinct().ToList();
 
         var quoteMap = new Dictionary<string, double>();
@@ -473,12 +484,12 @@ public class PortfolioChallengeController : ControllerBase
             await semaphore.WaitAsync();
             try
             {
-                var quote = await _marketData.GetQuoteAsync(ticker);
+                var quote = await marketData.GetQuoteAsync(ticker);
                 lock (quoteMap) { quoteMap[ticker] = quote?.Price ?? 0; }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "[dashboard] Failed to fetch quote for {Ticker}", ticker);
+                logger.LogWarning(ex, "[dashboard] Failed to fetch quote for {Ticker}", ticker);
                 lock (quoteMap) { quoteMap[ticker] = 0; }
             }
             finally { semaphore.Release(); }
@@ -519,7 +530,7 @@ public class PortfolioChallengeController : ControllerBase
         }
 
         // ── Build equity curve from closed trades ──
-        var allClosed = await _repo.GetClosedPositionsAsync(challenge.Id, limit: 200);
+        var allClosed = await repo.GetClosedPositionsAsync(challenge.Id, limit: 200);
         var sortedClosed = allClosed.OrderBy(p => p.ExitDate ?? p.CreatedAt).ToList();
 
         var equityCurve = new List<EquityPoint>
@@ -556,15 +567,15 @@ public class PortfolioChallengeController : ControllerBase
                 OpenPositionCount = enrichedPositions.Count,
                 RealizedPnlCumulative = Math.Round(challenge.RealizedProfit, 2),
             };
-            await _repo.UpsertSnapshotAsync(snapshot);
+            await repo.UpsertSnapshotAsync(snapshot);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[dashboard] Failed to save portfolio snapshot for {Id}", challenge.Id);
+            logger.LogWarning(ex, "[dashboard] Failed to save portfolio snapshot for {Id}", challenge.Id);
         }
 
         // ── Build equity curve from snapshots + trade events ──
-        var snapshots = await _repo.GetSnapshotsAsync(challenge.Id);
+        var snapshots = await repo.GetSnapshotsAsync(challenge.Id);
         if (snapshots.Count > 0)
         {
             // Use daily snapshots as the primary curve (smooth, daily resolution)
