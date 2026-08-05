@@ -104,7 +104,10 @@ export const navEntries: NavEntry[] = [
   {
     label: 'Portfolio',
     icon: PortfolioIcon,
-    href: '/portfolio',
+    children: [
+      { href: '/portfolio', label: 'Portfolio' },
+      { href: '/broker', label: 'Broker' },
+    ],
   },
   {
     label: 'Profiles',
