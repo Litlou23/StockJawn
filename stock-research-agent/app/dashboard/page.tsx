@@ -1,5 +1,3 @@
-'use client';
-
 import AppShell from '@/components/AppShell';
 import JobTriggerButtons from '@/components/dashboard/JobTriggerButtons';
 import DynamicSummaryCards from '@/components/dashboard/DynamicSummaryCards';
@@ -11,11 +9,14 @@ import PredictionCard from '@/components/predictions/PredictionCard';
 import Link from 'next/link';
 import dynamic_import from 'next/dynamic';
 
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 const SignalPerformanceChart = dynamic_import(() => import('@/components/charts/SignalPerformanceChart'), { ssr: false });
 const AccuracyOverTimeChart = dynamic_import(() => import('@/components/charts/AccuracyOverTimeChart'), { ssr: false });
 const WinLossCalendar = dynamic_import(() => import('@/components/charts/WinLossCalendar'), { ssr: false });
 
-// Client component — always renders dynamically
+// Server component — fetches data server-side where env vars are available
 
 // ---------------------------------------------------------------------------
 // Types matching GET /api/dashboard/summary response
