@@ -49,6 +49,7 @@ public class PredictionGenerator
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
+    private string? _cachedLearningContext;
 
     public PredictionGenerator(
         MarketDataService marketData,
@@ -471,6 +472,38 @@ public class PredictionGenerator
         if (explanation is not null)
             dataSources.Add("openai-analysis");
 
+        // ── Apply AI confidence adjustment ──
+        // The AI can adjust confidence by -15 to +10 based on learning context,
+        // regime awareness, and pattern recognition the scoring engine can't do.
+        if (explanation?.ConfidenceAdjustment is int aiAdj and not 0)
+        {
+            var clampedAdj = Math.Clamp(aiAdj, -15, 10);
+            var prevConf = confidence;
+            confidence = Math.Clamp(confidence + clampedAdj, 5, 100);
+            allSignals.Add($"AI confidence adjustment: {clampedAdj:+0;-0} ({explanation.AiAdjustmentReason ?? "no reason"})");
+            _logger.LogInformation(
+                "[prediction] {Ticker}: AI adjusted confidence {Prev}→{New} ({Adj:+0;-0}): {Reason}",
+                ticker, prevConf, confidence, clampedAdj, explanation.AiAdjustmentReason ?? "n/a");
+        }
+
+        // ── Apply AI trade flag ──
+        // "avoid" demotes to watch_only — the AI thinks this trade shouldn't be taken.
+        // "caution" docks 5 additional confidence points as a warning.
+        if (explanation?.AiFlag is "avoid" && predType is "bullish" or "bearish")
+        {
+            predType = "watch_only";
+            confidence = Math.Min(confidence, 30);
+            var avoidReason = $"AI flagged AVOID: {explanation.AiAdjustmentReason ?? "conflicting signals"}";
+            missingWarnings.Add(avoidReason);
+            _logger.LogInformation("[prediction] {Ticker}: AI vetoed trade → watch_only: {Reason}",
+                ticker, explanation.AiAdjustmentReason ?? "n/a");
+        }
+        else if (explanation?.AiFlag is "caution")
+        {
+            confidence = Math.Max(5, confidence - 5);
+            allSignals.Add($"AI caution flag: {explanation.AiAdjustmentReason ?? "borderline trade"}");
+        }
+
         // Fall back to signal-derived explanation if AI unavailable
         var bullishCase = explanation?.BullishCase
             ?? string.Join("; ", allSignals.Where(s => !s.Contains("bearish") && !s.Contains("negative") && !s.Contains("below")));
@@ -819,9 +852,10 @@ public class PredictionGenerator
 
         try
         {
+            var learningContext = await GetLearningContextAsync();
             var systemPrompt = BuildExplanationSystemPrompt();
             var userPrompt = BuildExplanationUserPrompt(
-                ticker, snapshot, direction, totalScore, confidence, risk, signals, weights, lessons);
+                ticker, snapshot, direction, totalScore, confidence, risk, signals, weights, lessons, learningContext);
 
             var messages = new List<ChatMessage>
             {
@@ -873,7 +907,10 @@ public class PredictionGenerator
               "invalidation_rule": "<specific price level or condition that would invalidate this prediction>",
               "key_levels": { "support": <price or null>, "resistance": <price or null> },
               "predicted_price": <number or null — your best estimate of where this stock will close at the end of the time window>,
-              "predicted_move_percent": <number or null — expected % move from current price, positive for up, negative for down>
+              "predicted_move_percent": <number or null — expected % move from current price, positive for up, negative for down>,
+              "confidence_adjustment": <integer from -15 to +10 — YOUR adjustment to the scoring engine's confidence>,
+              "ai_flag": "<'proceed' | 'caution' | 'avoid'> — your overall trade recommendation",
+              "ai_adjustment_reason": "<one-line reason for your confidence_adjustment and ai_flag>"
             }
 
             Rules:
@@ -884,6 +921,27 @@ public class PredictionGenerator
             - Invalidation rule should reference specific price levels when possible.
             - predicted_price must be a realistic price based on the current price, signals, and key levels.
             - predicted_move_percent should match the direction (positive for bullish, negative for bearish).
+
+            confidence_adjustment and ai_flag rules:
+            - You have real influence on trade decisions. Use it responsibly.
+            - confidence_adjustment: integer from -15 to +10. Use 0 if you agree with the score.
+              Dock confidence (-5 to -15) when:
+                * Learning context shows this ticker or pattern has been failing
+                * Bearish call in a strong bull regime (or vice versa)
+                * Signals are thin or contradictory despite high computed score
+                * Market context conflicts with the direction
+                * The stock is thinly traded or has no catalyst
+              Boost confidence (+1 to +10) when:
+                * Strong catalyst alignment (earnings beat + technical breakout)
+                * Learning shows this pattern has been consistently winning
+                * Multiple confirming signals with no opposing ones
+            - ai_flag: "proceed" (normal), "caution" (marginal trade, borderline),
+              "avoid" (this trade should NOT be taken — demotes to watch_only).
+              Use "avoid" when the prediction contradicts obvious context (e.g.,
+              bearish on a stock that just had a massive earnings beat in a bull market,
+              or bullish on a stock with deteriorating fundamentals in a bear regime).
+            - ai_adjustment_reason: one line explaining your adjustment. Be specific.
+              Example: "Bearish call on COF contradicts +22% EPS beat and bull regime (-10)"
 
             Risk management principles — apply these when writing explanations:
             - A high-confidence call with a poor risk/reward ratio is NOT a good trade.
@@ -912,7 +970,8 @@ public class PredictionGenerator
         int risk,
         List<string> signals,
         Dictionary<string, double> weights,
-        List<string> lessons)
+        List<string> lessons,
+        string? learningContext = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"## Explain this prediction for {ticker}");
@@ -993,7 +1052,72 @@ public class PredictionGenerator
                 sb.AppendLine($"  - {lesson}");
         }
 
+        if (!string.IsNullOrEmpty(learningContext))
+        {
+            sb.AppendLine();
+            sb.AppendLine("### System learning context (from yesterday's analysis):");
+            sb.AppendLine(learningContext);
+            sb.AppendLine();
+            sb.AppendLine("Use this context to inform your confidence_adjustment and ai_flag. If this ticker or pattern has been failing, dock confidence. If the market regime conflicts with the direction, flag it.");
+        }
+
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Fetches the latest learning report and builds a compact context string
+    /// for the AI prediction prompt. Cached per prediction run to avoid repeated DB calls.
+    /// </summary>
+    private async Task<string?> GetLearningContextAsync()
+    {
+        if (_cachedLearningContext is not null) return _cachedLearningContext;
+
+        try
+        {
+            var report = await _repo.GetLatestLearningReportAsync();
+            if (report is null) return null;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"- Overall accuracy: {report.OverallAccuracy:P1} | Bullish: {report.BullAccuracy:P1} | Bearish: {report.BearAccuracy:P1}");
+            if (report.MarketRegime is not null)
+                sb.AppendLine($"- Market regime: {report.MarketRegime}");
+
+            if (report.TopSignals.Count > 0)
+            {
+                sb.Append("- Strong signals: ");
+                sb.AppendLine(string.Join(", ", report.TopSignals.Take(3).Select(s => $"{s.SignalName}({s.Accuracy:P0})")));
+            }
+            if (report.WeakSignals.Count > 0)
+            {
+                sb.Append("- Weak signals: ");
+                sb.AppendLine(string.Join(", ", report.WeakSignals.Take(3).Select(s => $"{s.SignalName}({s.Accuracy:P0})")));
+            }
+
+            // Include key lines from AI summary — the most actionable part
+            if (!string.IsNullOrEmpty(report.AiSummary))
+            {
+                // Extract first 500 chars of AI summary (the most relevant findings)
+                var summarySnippet = report.AiSummary.Length > 500
+                    ? report.AiSummary[..500] + "..."
+                    : report.AiSummary;
+                sb.AppendLine($"- AI analysis: {summarySnippet}");
+            }
+
+            if (report.WeightChanges.Count > 0)
+            {
+                sb.Append("- Recent weight changes: ");
+                sb.AppendLine(string.Join(", ", report.WeightChanges.Select(
+                    w => $"{w.SignalName} {w.ChangePercent:+0.0;-0.0}%")));
+            }
+
+            _cachedLearningContext = sb.ToString();
+            return _cachedLearningContext;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[prediction] Failed to load learning context for AI prompt");
+            return null;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1136,11 +1260,10 @@ public class PredictionGenerator
 
         return velocity switch
         {
-            >= 65 => PredictionTimeWindows.OneDay,      // High: major catalyst + momentum spike
-            >= 40 => PredictionTimeWindows.ThreeDay,     // Fast: strong momentum/catalyst
-            >= 20 => PredictionTimeWindows.OneWeek,      // Normal: trend-driven
-            >= 10 => PredictionTimeWindows.OneMonth,     // Slow: research/fundamental
-            _     => PredictionTimeWindows.OneWeek,      // Default
+            >= 50 => PredictionTimeWindows.OneDay,      // High: catalyst + momentum spike → scalp
+            >= 30 => PredictionTimeWindows.ThreeDay,     // Fast: strong momentum/catalyst
+            _     => PredictionTimeWindows.OneWeek,      // Everything else: trend-driven
+            // 1_month eliminated: 32% accuracy, 8.8% avg adverse — not worth generating
         };
     }
 
@@ -1427,6 +1550,15 @@ internal class AiExplanationResponse
     public AiKeyLevels? KeyLevels { get; set; }
     public double? PredictedPrice { get; set; }
     public double? PredictedMovePercent { get; set; }
+
+    /// <summary>AI confidence adjustment: -15 to +10. Applied on top of scoring engine confidence.</summary>
+    public int? ConfidenceAdjustment { get; set; }
+
+    /// <summary>AI trade flag: "proceed", "caution", or "avoid". Avoid demotes to watch_only.</summary>
+    public string? AiFlag { get; set; }
+
+    /// <summary>One-line reason for the confidence adjustment or flag.</summary>
+    public string? AiAdjustmentReason { get; set; }
 }
 
 internal class AiKeyLevels

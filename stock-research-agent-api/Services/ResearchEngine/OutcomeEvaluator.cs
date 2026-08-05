@@ -134,16 +134,38 @@ public class OutcomeEvaluator
         // A prediction is "direction correct" if ANY of these are true:
         //   1. Close price moved in the predicted direction
         //   2. Target was hit intraday (even if close pulled back)
-        //   3. Significant favorable intraday move (≥1%) in predicted direction
-        // This aligns with how a real trader would trade: take profit at target,
-        // not hold blindly to close. Old logic only checked (1), which penalized
-        // picks that hit target then reversed — destroying measured accuracy.
+        //   3. Significant favorable intraday move that dominated adverse move
+        // Clause 3 guards against noise: a 1% dip on a stock that closed +4%
+        // against your bearish call is NOT "direction correct."
         bool? directionCorrect = prediction.PredictionType switch
         {
-            PredictionType.bullish => percentMove > 0 || targetHit == true || maxFavorable >= 1.0,
-            PredictionType.bearish => percentMove < 0 || targetHit == true || maxFavorable >= 1.0,
+            PredictionType.bullish => percentMove > 0
+                || targetHit == true
+                || (maxFavorable >= 2.0 && maxFavorable > maxAdverse),
+            PredictionType.bearish => percentMove < 0
+                || targetHit == true
+                || (maxFavorable >= 2.0 && maxFavorable > maxAdverse),
             _ => null,
         };
+
+        // ── Reversal detection: moved in our favor then reversed past entry ──
+        // If the prediction had a meaningful favorable move (≥1.5%) but closed
+        // in the WRONG direction, that's a reversal — the trade should have been
+        // exited when the favorable move started fading. Penalize outcome score
+        // and flag in the lesson so the system learns to exit earlier.
+        bool isReversal = false;
+        double reversalSeverity = 0;
+        if (maxFavorable >= 1.5)
+        {
+            bool closedWrong = prediction.PredictionType == PredictionType.bullish
+                ? percentMove < 0
+                : percentMove > 0;
+            if (closedWrong)
+            {
+                isReversal = true;
+                reversalSeverity = maxFavorable + Math.Abs(percentMove); // how far it swung
+            }
+        }
 
         var invalidationHit = (prediction.PredictionType == PredictionType.bullish && percentMove < -2)
             || (prediction.PredictionType == PredictionType.bearish && percentMove > 2);
@@ -183,11 +205,14 @@ public class OutcomeEvaluator
         if (targetHit == true) outcomeScore += 5;
         if (stopHit == true) outcomeScore -= 10;
         if (invalidationHit || invalidationHitCheck == true) outcomeScore -= 10;
+        // Reversal penalty: had favorable move then reversed past entry
+        if (isReversal)
+            outcomeScore -= Math.Min(reversalSeverity * 5, 20);
         outcomeScore = Math.Clamp(outcomeScore, 0, 100);
 
         var lesson = GenerateLesson(prediction, percentMove, directionCorrect, invalidationHit,
             targetHit, stopHit, Math.Round(maxFavorable, 2), Math.Round(maxAdverse, 2),
-            prediction.RiskRewardRatio);
+            prediction.RiskRewardRatio, isReversal, reversalSeverity);
 
         var summaryParts = new List<string>
         {
@@ -204,6 +229,8 @@ public class OutcomeEvaluator
         if (prediction.StopPrice is double stp)
             summaryParts.Add($"Stop ${stp:F2} {(stopHit == true ? "TRIGGERED" : "held")}.");
         summaryParts.Add($"Max favorable: {maxFavorable:F2}%, max adverse: {maxAdverse:F2}%.");
+        if (isReversal)
+            summaryParts.Add($"REVERSAL: moved {maxFavorable:F2}% favorable then reversed to {(percentMove > 0 ? "+" : "")}{percentMove:F2}% — should have exited earlier.");
         if (relativePerformance is not null)
             summaryParts.Add($"vs SPY: {(relativePerformance > 0 ? "+" : "")}{relativePerformance}%.");
 
@@ -548,10 +575,12 @@ public class OutcomeEvaluator
             : ((quote.High - startPrice) / startPrice) * 100;
 
         // Was the original lean correct? (uses intraday extremes, not just close)
+        // Requires meaningful favorable move that dominated adverse — a 1% dip
+        // on a stock that closed up 4% against your bearish lean is NOT correct.
         bool? directionWouldHaveBeenCorrect = originalDirection switch
         {
-            "bullish" => percentMove > 0 || maxFavorable >= 1.0,
-            "bearish" => percentMove < 0 || maxFavorable >= 1.0,
+            "bullish" => percentMove > 0 || (maxFavorable >= 2.0 && maxFavorable > maxAdverse),
+            "bearish" => percentMove < 0 || (maxFavorable >= 2.0 && maxFavorable > maxAdverse),
             _ => null,
         };
 
@@ -702,7 +731,7 @@ public class OutcomeEvaluator
     private static string GenerateLesson(
         PredictionCandidate prediction, double percentMove, bool? directionCorrect, bool invalidationHit,
         bool? targetHit, bool? stopHit, double maxFavorable, double maxAdverse,
-        double? riskRewardRatio)
+        double? riskRewardRatio, bool isReversal = false, double reversalSeverity = 0)
     {
         var parts = new List<string>();
         var sign = percentMove > 0 ? "+" : "";
@@ -846,6 +875,13 @@ public class OutcomeEvaluator
             parts.Add($"Risk was scored only {prediction.RiskScore} but move was {absMove:F1}% adverse — risk model underestimated.");
         if (prediction.RiskScore >= 60 && prediction.ConfidenceScore >= 70)
             parts.Add($"Contradictory: confidence {prediction.ConfidenceScore} with risk {prediction.RiskScore} — these should be inversely related.");
+
+        // Reversal analysis: moved in our favor then reversed past entry
+        if (isReversal)
+        {
+            parts.Add($"REVERSAL: price moved {maxFavorable:F1}% in our favor then reversed to close {absMove:F1}% against us (total swing {reversalSeverity:F1}%).");
+            parts.Add("Exit earlier when favorable move starts fading — don't wait for close or next day. Trailing stop should have locked in gains.");
+        }
 
         return string.Join(" ", parts);
     }
