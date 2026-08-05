@@ -7,14 +7,12 @@ import SortableSignalTable from '@/components/dashboard/SortableSignalTable';
 import { InfoBanner } from '@/components/InfoTip';
 import PredictionCard from '@/components/predictions/PredictionCard';
 import Link from 'next/link';
-import dynamic_import from 'next/dynamic';
+import SignalPerformanceChart from '@/components/charts/SignalPerformanceChart';
+import AccuracyOverTimeChart from '@/components/charts/AccuracyOverTimeChart';
+import WinLossCalendar from '@/components/charts/WinLossCalendar';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-
-const SignalPerformanceChart = dynamic_import(() => import('@/components/charts/SignalPerformanceChart'), { ssr: false });
-const AccuracyOverTimeChart = dynamic_import(() => import('@/components/charts/AccuracyOverTimeChart'), { ssr: false });
-const WinLossCalendar = dynamic_import(() => import('@/components/charts/WinLossCalendar'), { ssr: false });
 
 // Server component — fetches data server-side where env vars are available
 
