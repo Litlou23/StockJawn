@@ -324,7 +324,7 @@ public class PortfolioBalanceEngine
                     Quantity = request.Quantity,
                     Side = BrokerOrderSide.buy,
                     TimeInForce = BrokerTimeInForce.day,
-                    ClientOrderId = $"sj-{Guid.NewGuid():N}"[..36], // unique client ID for idempotency
+                    ClientOrderId = $"sj-{Guid.NewGuid():N}", // 35 chars, within Alpaca's 48-char limit
                 });
 
                 if (brokerResult.Success && brokerResult.BrokerOrderId is not null)
