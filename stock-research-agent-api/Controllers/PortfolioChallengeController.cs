@@ -409,6 +409,52 @@ public class PortfolioChallengeController : ControllerBase
     }
 
     /// <summary>
+    /// Afternoon opportunity scan — second pass at today's open candidates.
+    /// Picks up positions that were deferred by the morning open gate (9:30-10:00 AM),
+    /// or that couldn't be opened because slots were full.
+    /// Designed to run once in the afternoon via pg_cron (~2 PM ET / 18:00 UTC).
+    /// </summary>
+    [HttpPost("afternoon-scan")]
+    public async Task<IActionResult> AfternoonOpportunityScan()
+    {
+        int opened = 0;
+        try
+        {
+            opened = await _lifecycle.AfternoonOpportunityScanAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[afternoon-scan] Failed");
+            return StatusCode(500, new { error = ex.Message });
+        }
+
+        // Also run risk management while we're here
+        RiskCheckResult? riskResult = null;
+        try
+        {
+            riskResult = await _lifecycle.EvaluateRiskLimitsAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[afternoon-scan] Risk check failed");
+        }
+
+        return Ok(new
+        {
+            positionsOpened = opened,
+            riskCheck = riskResult is not null ? new
+            {
+                riskResult.PositionsChecked,
+                riskResult.StopLossClosed,
+                riskResult.TakeProfitClosed,
+                riskResult.TrailingStopClosed,
+                riskResult.PartialProfitsTaken,
+                riskResult.TotalClosed,
+            } : null,
+        });
+    }
+
+    /// <summary>
     /// Builds a full dashboard snapshot: parallel quote fetch, equity curve, stats.
     /// </summary>
     private async Task<PortfolioDashboard?> BuildDashboardAsync(PortfolioChallengeSummary summary)

@@ -20,8 +20,8 @@ public class StockCandidateService
     public const int LearningMaxRiskForOptions = 90;
     public const int ActionableShadowMinConfidence = 40;
     public const int ActionableShadowMaxRisk = 75;
-    public const int LiveEligibleMinConfidence = 50;
-    public const int LiveEligibleMaxRisk = 70;
+    public const int LiveEligibleMinConfidence = 45;
+    public const int LiveEligibleMaxRisk = 75;
     public const string ThresholdPolicyVersion = "learning_options_v1";
 
     // -----------------------------------------------------------------------
@@ -36,6 +36,7 @@ public class StockCandidateService
     {
         [StockTimeframe.one_day] = 24,     // full trading day close-to-close
         [StockTimeframe.two_day] = 30,
+        [StockTimeframe.three_day] = 48,   // 2-3 trading days
         [StockTimeframe.one_week] = 120,      // 5 trading days
         [StockTimeframe.one_month] = 504,      // 21 trading days
         [StockTimeframe.three_month] = 1512,   // 63 trading days
@@ -50,6 +51,7 @@ public class StockCandidateService
     {
         [StockTimeframe.one_day] = 48,
         [StockTimeframe.two_day] = 96,
+        [StockTimeframe.three_day] = 120,  // 3-5 trading days max
         [StockTimeframe.one_week] = 240,
         [StockTimeframe.one_month] = 1008,
         [StockTimeframe.three_month] = 3024,
@@ -188,6 +190,7 @@ public class StockCandidateService
         {
             "1_day" => StockTimeframe.one_day,
             "2_day" => StockTimeframe.two_day,
+            "3_day" => StockTimeframe.three_day,
             "1_week" => StockTimeframe.one_week,
             "1_month" => StockTimeframe.one_month,
             "3_month" => StockTimeframe.three_month,
@@ -851,6 +854,7 @@ public class StockCandidateService
         {
             StockTimeframe.one_day => DurationPreference.one_week,     // 3-12 DTE: minimal theta waste
             StockTimeframe.two_day => DurationPreference.one_week,     // 3-12 DTE: move should happen fast
+            StockTimeframe.three_day => DurationPreference.one_week,   // 3-12 DTE: 2-3 day thesis
             StockTimeframe.one_week => DurationPreference.two_week,    // 10-25 DTE: buffer for 5-7 day thesis
             _ => DurationPreference.two_week,                          // default to 2-week for longer holds
         };

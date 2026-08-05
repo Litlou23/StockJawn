@@ -93,12 +93,41 @@ public class PortfolioLifecycleService
     /// </summary>
     public async Task<int> OpenPositionsForCandidatesAsync(
         List<PaperStockCandidate> actionableCandidates,
-        List<string> errors)
+        List<string> errors,
+        bool bypassTimeGate = false)
     {
         var portfolioPositionsOpened = 0;
         var activeChallenges = await _portfolioRepo.GetActiveChallengesAsync();
         if (activeChallenges.Count == 0)
             return 0;
+
+        // ── Time-of-day gate ──
+        // A real trader avoids the first 30 min after market open (9:30-10:00 AM ET).
+        // The open is chaotic: wide spreads, gap fills, fake breakouts.
+        // Afternoon scans bypass this gate since the open volatility has settled.
+        if (!bypassTimeGate)
+        {
+            var eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+            var nowEt = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, eastern);
+            var marketOpen = new TimeSpan(9, 30, 0);
+            var safeEntry = new TimeSpan(10, 0, 0);
+            var marketClose = new TimeSpan(16, 0, 0);
+
+            if (nowEt.TimeOfDay >= marketOpen && nowEt.TimeOfDay < safeEntry)
+            {
+                _logger.LogInformation(
+                    "[portfolio] Time-of-day gate: {Time} ET is within first 30 min of open — deferring {Count} candidates to afternoon scan",
+                    nowEt.ToString("HH:mm"), actionableCandidates.Count);
+                return 0;
+            }
+
+            // Also skip entries after market close — no point opening positions after hours
+            if (nowEt.TimeOfDay >= marketClose || nowEt.TimeOfDay < marketOpen)
+            {
+                // Weekend/after-hours: let it through — the morning scan runs pre-market
+                // and positions will fill at next open. Only block the chaotic open window.
+            }
+        }
 
         // ── Load configurable guardrails from scoring_weight_overrides ──
         var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
@@ -158,7 +187,8 @@ public class PortfolioLifecycleService
 
         var eligible = actionableCandidates
             .Where(c => c.IsActionable
-                && c.CandidateMode == CandidateMode.live_eligible // Only trade live-eligible, not shadow/learning
+                && (c.CandidateMode == CandidateMode.live_eligible
+                    || c.CandidateMode == CandidateMode.actionable_shadow) // Trade both live-eligible and shadow candidates
                 && c.Status == PaperStockStatus.open
                 && c.EntryPrice is > 0
                 && (double)c.EntryPrice.Value >= minEntryPrice // Penny stock filter — skip sub-$2 stocks
@@ -237,8 +267,11 @@ public class PortfolioLifecycleService
         // ── Sort by profit potential — best EV first ────────────────────
         // A trader who cares about P&L opens the highest-edge trades first,
         // not whatever happens to be at the top of the list.
+        // Prioritize 3_day timeframe (86.7% win rate at high confidence) over longer holds.
+        // Within each tier, sort by EV then confidence.
         eligible = eligible
-            .OrderByDescending(c => ComputeEvPercent(c))
+            .OrderByDescending(c => c.Timeframe == StockTimeframe.three_day ? 1 : 0) // 3_day first
+            .ThenByDescending(c => ComputeEvPercent(c))
             .ThenByDescending(c => c.ConfidenceScore)
             .ToList();
 
@@ -374,6 +407,18 @@ public class PortfolioLifecycleService
                         var currentQuote = await _marketData.GetQuoteAsync(c.Ticker);
                         if (currentQuote is not null)
                         {
+                            // ── Liquidity gate — skip illiquid micro-caps ──
+                            // A real trader doesn't enter positions in stocks with
+                            // no volume — you can't exit when you need to.
+                            // Minimum 50K shares traded today (or avg daily volume).
+                            if (currentQuote.Volume < 50_000)
+                            {
+                                _logger.LogInformation(
+                                    "[portfolio] Skipping {Ticker} — volume {Vol:N0} < 50K minimum",
+                                    c.Ticker, currentQuote.Volume);
+                                continue;
+                            }
+
                             var movePercent = (currentQuote.Price - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
                             var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
 
@@ -685,6 +730,7 @@ public class PortfolioLifecycleService
     {
         StockTimeframe.one_day => RiskTier.Day,
         StockTimeframe.two_day => RiskTier.Swing,
+        StockTimeframe.three_day => RiskTier.Swing,
         StockTimeframe.one_week => RiskTier.Swing,
         _ => RiskTier.LongTerm, // one_month, three_month, six_month, one_year
     };
@@ -810,11 +856,13 @@ public class PortfolioLifecycleService
                 }
 
                 // ── Take-profit check (day/swing only) ──
-                if (limits.TakeProfit > 0 && pnlPercent >= limits.TakeProfit)
+                // After partial TP has been taken, skip fixed TP entirely — the
+                // remainder rides on the trailing stop to capture max profit.
+                // A real trader takes some off the table then lets the rest run.
+                if (limits.TakeProfit > 0 && pnlPercent >= limits.TakeProfit
+                    && !pos.PartialProfitTaken) // Don't full-close after partial — let trailing stop manage it
                 {
-                    // Partial profit-taking: first TP hit closes a fraction, remainder runs on trail.
-                    // Second TP hit (or if partial is disabled) does full close.
-                    if (partialTpEnabled && !pos.PartialProfitTaken)
+                    if (partialTpEnabled)
                     {
                         var reason = $"PARTIAL-TP ({tier}): {pos.Ticker} up {pnlPercent:P1} " +
                                      $"— closing {partialTpFraction:P0} at ${currentPrice:F2}. " +
@@ -838,9 +886,9 @@ public class PortfolioLifecycleService
                         continue;
                     }
 
+                    // Partial TP disabled — full close at TP level
                     var fullReason = $"TAKE-PROFIT ({tier}): {pos.Ticker} up {pnlPercent:P1} " +
-                                 $"(limit +{limits.TakeProfit:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}" +
-                                 (pos.PartialProfitTaken ? " [2nd TP — partial already taken]" : "");
+                                 $"(limit +{limits.TakeProfit:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}";
                     await CloseWithReason(pos, currentPrice, fullReason);
                     result.TakeProfitClosed++;
                     result.ClosedTickers.Add(pos.Ticker);
@@ -859,22 +907,30 @@ public class PortfolioLifecycleService
                         result.HighWaterMarksUpdated++;
                     }
 
+                    // After partial TP, activate trailing stop immediately (already in profit)
+                    // and tighten the trail — we've banked half, now protect the rest.
+                    var effectiveActivate = pos.PartialProfitTaken ? 0.0 : limits.TrailActivate;
+                    var effectiveTrail = pos.PartialProfitTaken
+                        ? limits.TrailPercent * 0.6 // 40% tighter trail after partial TP
+                        : limits.TrailPercent;
+
                     // Check if trailing stop has been activated (price rose above activation threshold)
                     var hwmGainFromEntry = (hwm - pos.EntryPrice) / pos.EntryPrice;
-                    if (hwmGainFromEntry >= limits.TrailActivate)
+                    if (hwmGainFromEntry >= effectiveActivate)
                     {
                         // Trail floor = high-water mark minus trail percent.
                         // Guard: never let trail floor drop below entry price — if
                         // trail_pct is misconfigured wider than trail_activate, the raw
                         // floor could be below entry, turning a "locked-in gain" into a loss.
                         var trailFloor = Math.Max(
-                            hwm * (1 - limits.TrailPercent),
+                            hwm * (1 - effectiveTrail),
                             pos.EntryPrice * 1.001); // guarantee at least +0.1% gain
                         if (currentPrice <= trailFloor)
                         {
+                            var suffix = pos.PartialProfitTaken ? " [post-partial, tightened trail]" : "";
                             var reason = $"TRAILING-STOP ({tier}): {pos.Ticker} fell to ${currentPrice:F2} " +
-                                         $"below trail floor ${trailFloor:F2} (peak ${hwm:F2}, trail {limits.TrailPercent:P0}). " +
-                                         $"Locked in {pnlPercent:P1} gain from entry ${pos.EntryPrice:F2}";
+                                         $"below trail floor ${trailFloor:F2} (peak ${hwm:F2}, trail {effectiveTrail:P1}). " +
+                                         $"Locked in {pnlPercent:P1} gain from entry ${pos.EntryPrice:F2}{suffix}";
                             await CloseWithReason(pos, currentPrice, reason);
                             result.TrailingStopClosed++;
                             result.ClosedTickers.Add(pos.Ticker);
@@ -934,7 +990,8 @@ public class PortfolioLifecycleService
         // re-entering a ticker that just hit a stop-loss is chasing a loser.
         var actionable = openCandidates
             .Where(c => c.IsActionable
-                && c.CandidateMode == CandidateMode.live_eligible
+                && (c.CandidateMode == CandidateMode.live_eligible
+                    || c.CandidateMode == CandidateMode.actionable_shadow)
                 && c.Status == PaperStockStatus.open)
             .Where(c => closedTickers is null || !closedTickers.Contains(c.Ticker))
             .ToList();
@@ -961,6 +1018,51 @@ public class PortfolioLifecycleService
         else
             _logger.LogInformation("[portfolio-reopen] No new positions opened (all candidates filtered by guardrails)");
 
+        return opened;
+    }
+
+    /// <summary>
+    /// Afternoon opportunity scan — second pass at today's open candidates.
+    /// Catches positions that were deferred by the morning open gate, or that
+    /// weren't opened because slots were full (positions may have closed since).
+    /// Called via pg_cron in the afternoon (~2 PM ET / 18:00 UTC).
+    /// Bypasses the time-of-day gate since the chaotic open is long past.
+    /// </summary>
+    public async Task<int> AfternoonOpportunityScanAsync()
+    {
+        var openCandidates = await _candidateRepo.GetOpenCandidatesAsync();
+        if (openCandidates.Count == 0)
+        {
+            _logger.LogInformation("[afternoon-scan] No open candidates available");
+            return 0;
+        }
+
+        // Filter to actionable candidates (same criteria as reopen)
+        var actionable = openCandidates
+            .Where(c => c.IsActionable
+                && (c.CandidateMode == CandidateMode.live_eligible
+                    || c.CandidateMode == CandidateMode.actionable_shadow)
+                && c.Status == PaperStockStatus.open)
+            .ToList();
+
+        if (actionable.Count == 0)
+        {
+            _logger.LogInformation("[afternoon-scan] {Total} open candidates but none actionable", openCandidates.Count);
+            return 0;
+        }
+
+        _logger.LogInformation(
+            "[afternoon-scan] Found {Actionable} actionable candidates from {Total} open — attempting to open positions",
+            actionable.Count, openCandidates.Count);
+
+        var errors = new List<string>();
+        var opened = await OpenPositionsForCandidatesAsync(actionable, errors, bypassTimeGate: true);
+
+        if (errors.Count > 0)
+            _logger.LogWarning("[afternoon-scan] {Count} errors: {Errors}",
+                errors.Count, string.Join("; ", errors.Take(5)));
+
+        _logger.LogInformation("[afternoon-scan] Opened {Count} new positions in afternoon pass", opened);
         return opened;
     }
 
@@ -1004,6 +1106,7 @@ public class PortfolioLifecycleService
     [
         StockTimeframe.one_week,
         StockTimeframe.two_day,
+        StockTimeframe.three_day,
         StockTimeframe.one_month,
         StockTimeframe.three_month,
         StockTimeframe.six_month,

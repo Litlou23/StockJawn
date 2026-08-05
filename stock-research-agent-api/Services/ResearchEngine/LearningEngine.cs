@@ -2844,7 +2844,7 @@ public class LearningEngine
                 var tier = timeframe switch
                 {
                     StockTimeframe.one_day => "day",
-                    StockTimeframe.two_day or StockTimeframe.one_week => "swing",
+                    StockTimeframe.two_day or StockTimeframe.three_day or StockTimeframe.one_week => "swing",
                     _ => "longterm",
                 };
 
@@ -2944,7 +2944,7 @@ public class LearningEngine
             var tier = timeframe switch
             {
                 StockTimeframe.one_day => "day",
-                StockTimeframe.two_day or StockTimeframe.one_week => "swing",
+                StockTimeframe.two_day or StockTimeframe.three_day or StockTimeframe.one_week => "swing",
                 _ => "longterm",
             };
             var pnlPct = ((pos.ExitPrice ?? pos.EntryPrice) - pos.EntryPrice) / pos.EntryPrice;

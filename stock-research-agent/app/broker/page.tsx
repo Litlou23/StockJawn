@@ -33,18 +33,18 @@ interface BrokerPosition {
   marketValue: number;
   unrealizedPnL: number;
   unrealizedPnLPercent: number;
-  side: string;
+  side: number | string;
 }
 
 interface BrokerOrder {
   brokerOrderId: string;
   clientOrderId: string | null;
   ticker: string;
-  side: string;
+  side: number | string;
   requestedQuantity: number;
   filledQuantity: number;
   filledAvgPrice: number | null;
-  status: string;
+  status: number | string;
   filledAt: string | null;
   createdAt: string;
 }
@@ -62,7 +62,26 @@ const pct = (n: number) =>
 const pnlColor = (n: number) =>
   n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-400';
 
-const statusBadge = (s: string) => {
+const sideLabel = (s: number | string) => {
+  if (typeof s === 'string') return s.toUpperCase();
+  return s === 0 ? 'BUY' : 'SELL';
+};
+
+const isBuySide = (s: number | string) =>
+  s === 0 || s === 'buy';
+
+const orderStateNames: Record<number, string> = {
+  0: 'pending_new', 1: 'accepted', 2: 'new_order', 3: 'partially_filled',
+  4: 'filled', 5: 'canceled', 6: 'rejected', 7: 'expired', 8: 'unknown',
+};
+
+const statusLabel = (s: number | string) => {
+  const name = typeof s === 'number' ? (orderStateNames[s] ?? 'unknown') : s;
+  return name.replace(/_/g, ' ');
+};
+
+const statusBadge = (s: number | string) => {
+  const name = typeof s === 'number' ? (orderStateNames[s] ?? 'unknown') : s;
   const colors: Record<string, string> = {
     filled: 'bg-emerald-500/20 text-emerald-300',
     new_order: 'bg-blue-500/20 text-blue-300',
@@ -73,7 +92,7 @@ const statusBadge = (s: string) => {
     rejected: 'bg-red-500/20 text-red-300',
     expired: 'bg-zinc-500/20 text-zinc-400',
   };
-  return colors[s] ?? 'bg-zinc-500/20 text-zinc-400';
+  return colors[name] ?? 'bg-zinc-500/20 text-zinc-400';
 };
 
 // ---------------------------------------------------------------------------
@@ -225,7 +244,7 @@ export default function BrokerPage() {
                         <tr key={p.ticker} className="border-b border-zinc-800/50 bg-zinc-900 hover:bg-zinc-800/50">
                           <td className="px-4 py-3 font-medium text-zinc-100">
                             {p.ticker}
-                            {p.side === 'sell' && (
+                            {!isBuySide(p.side) && (
                               <span className="ml-1.5 text-[10px] uppercase text-red-400">SHORT</span>
                             )}
                           </td>
@@ -275,8 +294,8 @@ export default function BrokerPage() {
                         <tr key={o.brokerOrderId} className="border-b border-zinc-800/50 bg-zinc-900 hover:bg-zinc-800/50">
                           <td className="px-4 py-3 font-medium text-zinc-100">{o.ticker}</td>
                           <td className="px-4 py-3">
-                            <span className={o.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}>
-                              {o.side.toUpperCase()}
+                            <span className={isBuySide(o.side) ? 'text-emerald-400' : 'text-red-400'}>
+                              {sideLabel(o.side)}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-right text-zinc-300">{o.requestedQuantity}</td>
@@ -286,7 +305,7 @@ export default function BrokerPage() {
                           </td>
                           <td className="px-4 py-3">
                             <span className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${statusBadge(o.status)}`}>
-                              {o.status.replace('_', ' ')}
+                              {statusLabel(o.status)}
                             </span>
                           </td>
                           <td className="px-4 py-3 text-zinc-500">

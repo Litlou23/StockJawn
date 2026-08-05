@@ -338,6 +338,7 @@ builder.Services.AddSingleton<OptionsDataService>();
         new("POST", "/api/portfolio/positions/close", "Close a position (records P&L, updates balance).", false, "Next.js app, browser", "This server"),
         new("POST", "/api/portfolio/dashboard/refresh", "Force-refresh dashboard cache + run risk management checks.", false, "Scheduled (pg_cron -> Edge Function, ~4× trading day)", "This server"),
         new("POST", "/api/portfolio/intraday-risk-check", "Lightweight risk check: evaluates stop-loss/take-profit/trailing-stop on all open positions. No dashboard rebuild.", false, "Scheduled (pg_cron -> Edge Function, every 30 min trading hours)", "This server"),
+        new("POST", "/api/portfolio/afternoon-scan", "Afternoon opportunity scan: second pass at today's open candidates. Catches positions deferred by morning open gate + freed slots.", false, "Scheduled (pg_cron -> Edge Function, 2 PM ET weekdays)", "This server"),
     };
 
     var frontendAppEndpoints = new List<EndpointInfo>
