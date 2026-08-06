@@ -130,6 +130,19 @@ public class OutcomeEvaluator
                 : periodHigh >= sp;
         }
 
+        // ── Enforce stop-loss on outcome: cap at stop price ──
+        // If the stop was hit, a managed position would have exited at the stop.
+        // Use the stop price as the effective close so the learning engine sees
+        // realistic P&L, not the uncapped drawdown.
+        if (stopHit == true && prediction.StopPrice is double stopPrice and > 0)
+        {
+            _logger.LogInformation(
+                "[outcome-evaluator] {Ticker}: stop hit — capping outcome at stop ${Stop:F2} instead of close ${Close:F2}",
+                prediction.Ticker, stopPrice, closePrice);
+            closePrice = stopPrice;
+            percentMove = ((closePrice - startPrice) / startPrice) * 100;
+        }
+
         // ── Direction scoring: use intraday extremes, not just close ──
         // A prediction is "direction correct" if ANY of these are true:
         //   1. Close price moved in the predicted direction
