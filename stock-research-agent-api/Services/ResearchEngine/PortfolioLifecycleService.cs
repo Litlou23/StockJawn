@@ -142,6 +142,10 @@ public class PortfolioLifecycleService
         var regimeGateEnabled = weights.GetValueOrDefault("regime_gate_enabled", 1.0) >= 1.0;
         var minTargetMovePct = weights.GetValueOrDefault("min_target_move_pct", 3.0);
         var skipWeakQuality = weights.GetValueOrDefault("skip_weak_quality", 1.0) >= 1.0;
+        var dailyLossLimitPct = weights.GetValueOrDefault("daily_loss_limit_pct", 0.03);
+        var dailyLossLimitEnabled = weights.GetValueOrDefault("daily_loss_limit_enabled", 1.0) >= 1.0;
+        var maxSpreadPct = weights.GetValueOrDefault("max_spread_pct", 0.5);
+        var roundTripCostPct = weights.GetValueOrDefault("round_trip_cost_pct", 0.15);
         var minBearishConfidence = (int)weights.GetValueOrDefault("min_bearish_confidence", 55);
         var bearishAllowed = weights.GetValueOrDefault("bearish_portfolio_allowed", 0.0) >= 1.0;
 
@@ -306,6 +310,31 @@ public class PortfolioLifecycleService
                 }
             }
 
+            // ── Daily loss limit — stop trading on bad days ──
+            // Real scalpers cap daily losses at 2-3% of account equity.
+            // If today's realized losses exceed the limit, stop opening new positions
+            // for the rest of the day — don't compound losses.
+            if (dailyLossLimitEnabled && dailyLossLimitPct > 0)
+            {
+                var todayStart = DateTime.UtcNow.Date;
+                var closedToday = await _portfolioRepo.GetClosedPositionsAsync(challenge.Id, limit: 100);
+                var todaysClosedLosses = closedToday
+                    .Where(p => p.ExitDate.HasValue && p.ExitDate.Value.UtcDateTime.Date == todayStart)
+                    .Where(p => p.ProfitLoss is < 0)
+                    .Sum(p => p.ProfitLoss ?? 0);
+
+                var dailyLossLimit = challenge.CurrentBalance * dailyLossLimitPct;
+                if (Math.Abs(todaysClosedLosses) >= dailyLossLimit)
+                {
+                    _logger.LogWarning(
+                        "[portfolio] DAILY LOSS LIMIT: challenge {Name} lost ${Loss:F2} today " +
+                        "(limit ${Limit:F2} = {Pct:P0} of ${Balance:F2}). No new trades until tomorrow.",
+                        challenge.Name, Math.Abs(todaysClosedLosses), dailyLossLimit,
+                        dailyLossLimitPct, challenge.CurrentBalance);
+                    continue;
+                }
+            }
+
             // ── Max open positions check ──
             var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
             var currentOpenCount = openPositions.Count;
@@ -400,6 +429,8 @@ public class PortfolioLifecycleService
                 // If the stock already moved significantly in the predicted direction
                 // since the prediction was generated, we'd be buying high (or selling low).
                 // Compare current price to the prediction's entry price snapshot.
+                // Also captures the live price for broker limit orders (see below).
+                double? livePrice = null;
                 if (maxChasePercent > 0 && c.EntryPrice is > 0)
                 {
                     try
@@ -407,6 +438,7 @@ public class PortfolioLifecycleService
                         var currentQuote = await _marketData.GetQuoteAsync(c.Ticker);
                         if (currentQuote is not null)
                         {
+                            livePrice = currentQuote.Price > 0 ? currentQuote.Price : null;
                             // ── Liquidity gate — skip illiquid micro-caps ──
                             // A real trader doesn't enter positions in stocks with
                             // no volume — you can't exit when you need to.
@@ -417,6 +449,28 @@ public class PortfolioLifecycleService
                                     "[portfolio] Skipping {Ticker} — volume {Vol:N0} < 50K minimum",
                                     c.Ticker, currentQuote.Volume);
                                 continue;
+                            }
+
+                            // ── Spread estimate filter — skip wide-spread stocks ──
+                            // Without L2 data, estimate spread from price and volume.
+                            // Empirical formula: tighter spreads for higher-priced, higher-volume stocks.
+                            // A stock with a 1% spread on a 2% target eats half the edge.
+                            if (maxSpreadPct > 0 && currentQuote.Price > 0 && currentQuote.Volume > 0)
+                            {
+                                // Rough spread estimate: $0.01 base + inverse of sqrt(volume) scaled by price
+                                // For a $50 stock with 1M volume: ~0.03% spread (tight)
+                                // For a $10 stock with 50K volume: ~0.50% spread (wide)
+                                var estSpreadDollars = 0.01 + (currentQuote.Price / Math.Sqrt(currentQuote.Volume) * 0.5);
+                                var estSpreadPct = estSpreadDollars / currentQuote.Price * 100;
+
+                                if (estSpreadPct > maxSpreadPct)
+                                {
+                                    _logger.LogInformation(
+                                        "[portfolio] Skipping {Ticker} — estimated spread {Spread:F2}% > {Max}% limit " +
+                                        "(price ${Price:F2}, vol {Vol:N0})",
+                                        c.Ticker, estSpreadPct, maxSpreadPct, currentQuote.Price, currentQuote.Volume);
+                                    continue;
+                                }
                             }
 
                             var movePercent = (currentQuote.Price - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
@@ -446,12 +500,19 @@ public class PortfolioLifecycleService
                 {
                     // Compute EV% from target/stop/entry if available
                     // Uses Math.Abs so the formula works for both bullish (target>entry) and bearish (target<entry)
+                    // Subtracts estimated round-trip trading costs (spread + slippage buffer)
+                    // from the gain side — a trade that looks +0.5% EV before costs might be
+                    // -0.1% EV after costs. Real scalpers always factor in friction.
                     double? evPercent = null;
                     if (c.TargetPrice is > 0 && c.StopPrice is > 0 && c.EntryPrice is > 0)
                     {
                         var winProb = c.ConfidenceScore / 100.0;
                         var gainPct = Math.Abs(c.TargetPrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
                         var lossPct = Math.Abs(c.EntryPrice.Value - c.StopPrice.Value) / c.EntryPrice.Value * 100;
+                        // Deduct round-trip costs from gain (costs eat into profit on wins,
+                        // and add to losses on losses — net effect is subtracting from EV)
+                        gainPct = Math.Max(0, gainPct - roundTripCostPct);
+                        lossPct += roundTripCostPct;
                         evPercent = (winProb * gainPct) - ((1 - winProb) * lossPct);
                     }
 
@@ -528,7 +589,8 @@ public class PortfolioLifecycleService
                         winRate: tradeStats.IsReal ? tradeStats.WinRate : null,
                         avgWinPercent: tradeStats.IsReal ? tradeStats.AverageWinPercent : null,
                         avgLossPercent: tradeStats.IsReal ? tradeStats.AverageLossPercent : null,
-                        statsSampleSize: tradeStats.SampleSize);
+                        statsSampleSize: tradeStats.SampleSize,
+                        currentMarketPrice: livePrice);
 
                     if (pos is not null)
                     {
@@ -780,6 +842,8 @@ public class PortfolioLifecycleService
                 TakeProfit = weights.GetValueOrDefault("risk_tp_day", 0.08),
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_day", 0.04),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_day", 0.025),
+                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_day", 6),
+                TimeStopMinMove = weights.GetValueOrDefault("risk_time_stop_min_move_day", 0.005),
             },
             [RiskTier.Swing] = new()
             {
@@ -787,6 +851,8 @@ public class PortfolioLifecycleService
                 TakeProfit = weights.GetValueOrDefault("risk_tp_swing", 0.15),
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_swing", 0.10),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_swing", 0.05),
+                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_swing", 72),
+                TimeStopMinMove = weights.GetValueOrDefault("risk_time_stop_min_move_swing", 0.008),
             },
             [RiskTier.LongTerm] = new()
             {
@@ -794,6 +860,8 @@ public class PortfolioLifecycleService
                 TakeProfit = 0, // no fixed take-profit for long-term — trailing stop handles it
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_longterm", 0.20),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_longterm", 0.10),
+                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_longterm", 168),
+                TimeStopMinMove = weights.GetValueOrDefault("risk_time_stop_min_move_longterm", 0.01),
             },
         };
 
@@ -939,15 +1007,39 @@ public class PortfolioLifecycleService
                         }
                     }
                 }
+
+                // ── Time stop — kill stale positions that aren't moving ──
+                // Real scalpers don't let capital sit in dead trades. If a position
+                // hasn't moved meaningfully after its expected hold period, close it
+                // at market and redeploy the capital into better opportunities.
+                if (limits.TimeStopHours > 0)
+                {
+                    var hoursHeld = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+                    if (hoursHeld >= limits.TimeStopHours)
+                    {
+                        var absMove = Math.Abs(pnlPercent);
+                        if (absMove < limits.TimeStopMinMove)
+                        {
+                            var reason = $"TIME-STOP ({tier}): {pos.Ticker} held {hoursHeld:F0}h (limit {limits.TimeStopHours}h) " +
+                                         $"with only {pnlPercent:P1} move (min {limits.TimeStopMinMove:P1} required). " +
+                                         $"Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}. Capital redeployed.";
+                            await CloseWithReason(pos, currentPrice, reason);
+                            result.TimeStopClosed++;
+                            result.ClosedTickers.Add(pos.Ticker);
+                            _logger.LogInformation("[risk] {Reason}", reason);
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
         if (result.TotalClosed > 0 || result.PartialProfitsTaken > 0)
             _logger.LogWarning("[risk] Risk check complete: {Checked} positions checked, " +
-                "{SL} stop-loss, {TP} take-profit, {TS} trailing-stop closures, " +
+                "{SL} stop-loss, {TP} take-profit, {TS} trailing-stop, {TmS} time-stop closures, " +
                 "{Partial} partial profits taken, {HWM} high-water marks updated",
                 result.PositionsChecked, result.StopLossClosed, result.TakeProfitClosed,
-                result.TrailingStopClosed, result.PartialProfitsTaken, result.HighWaterMarksUpdated);
+                result.TrailingStopClosed, result.TimeStopClosed, result.PartialProfitsTaken, result.HighWaterMarksUpdated);
         else
             _logger.LogInformation("[risk] Risk check complete: {Checked} positions checked, no triggers hit",
                 result.PositionsChecked);
@@ -1184,6 +1276,11 @@ public record RiskThresholds
     public double TrailActivate { get; init; }
     /// <summary>Trail percent below peak price (e.g. 0.05 = 5% below peak).</summary>
     public double TrailPercent { get; init; }
+    /// <summary>Max hours to hold a position before time-stop kicks in. 0 = disabled.</summary>
+    public double TimeStopHours { get; init; }
+    /// <summary>Minimum absolute move (as fraction, e.g. 0.005 = 0.5%) required to avoid time-stop.
+    /// If position hasn't moved at least this much in either direction after TimeStopHours, close it.</summary>
+    public double TimeStopMinMove { get; init; }
 }
 
 public record RiskCheckResult
@@ -1192,9 +1289,10 @@ public record RiskCheckResult
     public int StopLossClosed { get; set; }
     public int TakeProfitClosed { get; set; }
     public int TrailingStopClosed { get; set; }
+    public int TimeStopClosed { get; set; }
     public int HighWaterMarksUpdated { get; set; }
     public int PartialProfitsTaken { get; set; }
-    public int TotalClosed => StopLossClosed + TakeProfitClosed + TrailingStopClosed;
+    public int TotalClosed => StopLossClosed + TakeProfitClosed + TrailingStopClosed + TimeStopClosed;
     /// <summary>Tickers closed this cycle — used to prevent immediate same-ticker reentry.</summary>
     public HashSet<string> ClosedTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

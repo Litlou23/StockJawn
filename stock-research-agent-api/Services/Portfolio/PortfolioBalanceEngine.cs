@@ -235,7 +235,8 @@ public class PortfolioBalanceEngine
         double? winRate = null,
         double? avgWinPercent = null,
         double? avgLossPercent = null,
-        int statsSampleSize = 0)
+        int statsSampleSize = 0,
+        double? currentMarketPrice = null)
     {
         var challenge = await _repo.GetChallengeAsync(portfolioId);
         if (challenge is null || challenge.Status != ChallengeStatus.active) return null;
@@ -262,6 +263,7 @@ public class PortfolioBalanceEngine
             EntryPrice = entryPrice,
             Quantity = quantity,
             ReasonEntered = reason,
+            CurrentMarketPrice = currentMarketPrice,
         });
     }
 
@@ -318,12 +320,21 @@ public class PortfolioBalanceEngine
 
             try
             {
-                var brokerResult = await _broker.PlaceMarketOrderAsync(new BrokerOrderRequest
+                // ── Marketable limit order — eliminates slippage ──
+                // Use the CURRENT market price (not the stale prediction entry
+                // price) so the limit sits just above the live ask. If the stock
+                // moved since prediction, the old entry price is below the ask
+                // and the order would never fill. 0.1% buffer above current
+                // price ensures the order fills in normal conditions.
+                var priceForLimit = request.CurrentMarketPrice ?? request.EntryPrice;
+                var limitPrice = Math.Round(priceForLimit * 1.001, 2);
+                var brokerResult = await _broker.PlaceLimitOrderAsync(new BrokerOrderRequest
                 {
                     Ticker = request.Ticker,
                     Quantity = request.Quantity,
                     Side = BrokerOrderSide.buy,
                     TimeInForce = BrokerTimeInForce.day,
+                    LimitPrice = limitPrice,
                     ClientOrderId = $"sj-{Guid.NewGuid():N}", // 35 chars, within Alpaca's 48-char limit
                 });
 

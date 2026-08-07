@@ -129,6 +129,13 @@ public record OpenPositionRequest
     public double EntryPrice { get; init; }
     public double Quantity { get; init; }
     public string? ReasonEntered { get; init; }
+    /// <summary>
+    /// Current market price at time of order placement. Broker limit orders
+    /// use this (+ 0.1% buffer) so the limit reflects the live ask, not the
+    /// stale prediction entry price from hours ago. Falls back to EntryPrice
+    /// when null (paper-only mode).
+    /// </summary>
+    public double? CurrentMarketPrice { get; init; }
 }
 
 public record ClosePositionRequest
