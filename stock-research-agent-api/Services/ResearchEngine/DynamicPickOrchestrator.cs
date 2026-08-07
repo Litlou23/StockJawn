@@ -69,13 +69,13 @@ public class DynamicPickOrchestrator
     // 1. Morning picks: stocks + linked options, fully automatic
     // -----------------------------------------------------------------------
 
-    public async Task<DynamicMorningResult> RunDynamicMorningPicksAsync()
+    public async Task<DynamicMorningResult> RunDynamicMorningPicksAsync(CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("[dynamic] Starting dynamic morning picks...");
         var errors = new List<string>();
 
         // 1. Existing morning scan generates predictions
-        var scan = await _dailyService.RunMorningScanAsync();
+        var scan = await _dailyService.RunMorningScanAsync(cancellationToken: cancellationToken);
         errors.AddRange(scan.Errors);
 
         if (string.IsNullOrEmpty(scan.RunId))

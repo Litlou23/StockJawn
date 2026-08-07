@@ -72,6 +72,22 @@ public class ResearchJobsController : ControllerBase
         string runType, string label, string? traceId,
         Func<string, Task<(string Report, string? SummaryDetail)>> work)
     {
+        // Clean up any runs stuck in 'started' for >2 hours BEFORE checking
+        // for running jobs. Without this, a stuck run permanently blocks future
+        // jobs because the guard below returns Conflict, and the cleanup code
+        // inside DailyResearchRunService never gets a chance to run.
+        try
+        {
+            var cleaned = await _repo.CleanupStuckRunsAsync(TimeSpan.FromMinutes(120));
+            if (cleaned > 0)
+                _logger.LogWarning("[jobs] Cleaned up {Count} stuck {RunType} run(s) before guard check",
+                    cleaned, runType);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[jobs] Stuck-run cleanup failed (non-blocking)");
+        }
+
         // Reject if a job of this type is already running
         var existing = await _repo.GetRunningJobAsync(runType);
         if (existing is not null)
@@ -161,11 +177,14 @@ public class ResearchJobsController : ControllerBase
 
         _ = Task.Run(async () =>
         {
+            // 2-hour hard timeout prevents stuck runs that block future scans.
+            // Normal scans take 60–90 minutes. If we hit 2 hours, something hung.
+            using var cts = new CancellationTokenSource(TimeSpan.FromHours(2));
             try
             {
                 using var scope = _scopeFactory.CreateScope();
                 var orchestrator = scope.ServiceProvider.GetRequiredService<DynamicPickOrchestrator>();
-                var result = await orchestrator.RunDynamicMorningPicksAsync();
+                var result = await orchestrator.RunDynamicMorningPicksAsync(cts.Token);
 
                 if (result.Errors.Count > 0)
                     _tracker.MarkFailed("morning_scan", string.Join("; ", result.Errors.Take(5)));
@@ -173,6 +192,11 @@ public class ResearchJobsController : ControllerBase
                     _tracker.MarkCompleted("morning_scan", result.Report);
 
                 _logger.LogInformation("[jobs] Morning scan completed via orchestrator traceId={TraceId}", traceId ?? "(none)");
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                _logger.LogError("[jobs] Morning scan timed out after 2 hours traceId={TraceId}", traceId ?? "(none)");
+                _tracker.MarkFailed("morning_scan", "Timed out after 2 hours");
             }
             catch (Exception ex)
             {

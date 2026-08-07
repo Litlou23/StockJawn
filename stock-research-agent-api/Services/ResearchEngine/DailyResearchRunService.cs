@@ -56,7 +56,7 @@ public class DailyResearchRunService
     /// Run the morning scan. If <paramref name="existingRunId"/> is provided, uses that
     /// already-created research_runs row instead of creating a new one (background-job pattern).
     /// </summary>
-    public async Task<MorningScanResult> RunMorningScanAsync(string? existingRunId = null)
+    public async Task<MorningScanResult> RunMorningScanAsync(string? existingRunId = null, CancellationToken cancellationToken = default)
     {
         _logger.LogInformation("[research-engine] Starting morning scan...");
         var errors = new List<string>();
@@ -115,7 +115,7 @@ public class DailyResearchRunService
             var throttle = new SemaphoreSlim(maxConcurrency);
             var snapshotTasks = tickers.Select(async t =>
             {
-                await throttle.WaitAsync();
+                await throttle.WaitAsync(cancellationToken);
                 try
                 {
                     return await _predGen.BuildMarketSnapshotAsync(t, run.Id);
