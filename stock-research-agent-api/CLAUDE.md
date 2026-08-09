@@ -10,7 +10,7 @@
 ## Supabase Database Tables (actual column names from ResearchRepository.cs)
 
 ### research_runs
-`id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`
+`id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `errors` (text[] array, NOT jsonb), `predictions_generated`, `predictions_evaluated`
 
 ### prediction_candidates
 `id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `expected_value_percent`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `score_debug_json`, `bullish_score`, `bearish_score`, `winning_direction`, `direction_confidence`, `created_at`
@@ -58,10 +58,46 @@
 `id`, `paper_candidate_id`, `evaluation_time`, `current_underlying_price`, `current_bid`, `current_ask`, `current_mid`, `current_iv`, `current_delta`, `current_open_interest`, `current_volume`, `paper_pnl_per_contract`, `paper_pnl_percent`, `underlying_move_percent`, `iv_change`, `outcome_summary`, `created_at`
 
 ### portfolio_challenges
-`id`, `name`, `starting_balance`, `current_balance`, `target_balance`, `current_cash`, `buying_power`, `realized_profit`, `unrealized_profit`, `total_return`, `percent_return`, `number_of_trades`, `winning_trades`, `losing_trades`, `win_rate`, `status` (active/completed/paused/abandoned), `portfolio_mode` (swing_trading/day_trading/options_only/stock_only/mixed), `risk_profile` (conservative/moderate/aggressive), `notes`, `created_at`, `updated_at`
+`id`, `name`, `starting_balance`, `current_balance`, `target_balance`, `current_cash`, `buying_power`, `realized_profit`, `unrealized_profit`, `total_return`, `percent_return`, `number_of_trades`, `winning_trades`, `losing_trades`, `win_rate`, `status` (active/completed/paused/abandoned), `portfolio_mode` (swing_trading/day_trading/options_only/stock_only/mixed), `trading_mode` (paper/broker_paper/live), `risk_profile` (conservative/moderate/aggressive), `notes`, `created_at`, `updated_at`
 
 ### portfolio_positions
-`id`, `portfolio_id` (FK → portfolio_challenges.id), `prediction_id`, `ticker`, `asset_type` (stock/option), `entry_date`, `exit_date`, `entry_price`, `exit_price`, `quantity`, `dollars_invested`, `dollars_returned`, `profit_loss`, `percent_gain`, `reason_entered`, `reason_exited`, `status` (open/closed/cancelled), `created_at`, `updated_at`
+`id`, `portfolio_id` (FK → portfolio_challenges.id), `prediction_id`, `ticker`, `asset_type` (stock/option), `entry_date`, `exit_date`, `entry_price`, `exit_price`, `quantity`, `dollars_invested`, `dollars_returned`, `profit_loss`, `percent_gain`, `reason_entered`, `reason_exited`, `status` (open/closed/cancelled), `high_water_mark`, `partial_profit_taken` (bool), `broker_entry_order_id`, `broker_exit_order_id`, `created_at`, `updated_at`
+
+### prediction_profiles
+`id`, `profile_name`, `description`, `role` (champion/challenger), `experiment_status` (active/testing/draft/archived), `is_enabled` (bool), `hypothesis`, `learning_enabled` (bool), `created_at`, `updated_at`
+
+Only one profile can have `role=champion` at a time. The champion profile is used for portfolio trading (paper_stock_candidates, portfolio_positions). Challengers generate predictions for comparison only. Use `GetChampionProfileAsync()` / `role=eq.champion` to resolve.
+
+### scoring_weight_overrides
+`id`, `signal_name` (UNIQUE), `effective_weight`, `created_at`, `updated_at`
+
+**Runtime config table — all tunable parameters live here.** No redeploy needed. Key entries:
+- `openai_model` — AI model selector (0=gpt-4.1-mini, 1=gpt-4.1, 2=gpt-4o, 3=gpt-4o-mini, 4=gpt-5.6-luna, 5=gpt-5.6-terra, 6=gpt-5.6-sol). Default 4 (Luna).
+- `skip_weak_quality` — 1=filter weak/very_weak quality tier from portfolio (should be 1)
+- `max_spread_pct` — max bid-ask spread % for portfolio entry (default 0.5)
+- `round_trip_cost_pct` — estimated round-trip trading friction in % points (default 0.15)
+- `daily_loss_limit_pct` / `daily_loss_limit_enabled` — cap daily realized losses
+- `risk_sl_day`, `risk_tp_day`, `risk_trail_activate_day`, `risk_trail_pct_day` — day trade risk thresholds
+- `risk_sl_swing`, `risk_tp_swing`, `risk_trail_activate_swing`, `risk_trail_pct_swing` — swing trade risk thresholds
+- `risk_time_stop_hours_day`, `risk_time_stop_min_move_day` — close stale positions after N hours if not moved
+- `sizing_kelly_fraction`, `sizing_kelly_min_samples`, `sizing_min_fraction`, `sizing_max_fraction` — position sizing
+- `sizing_atr_target_pct` — ATR-based volatility target for sizing
+- `max_open_positions` — portfolio position limit (default 4)
+- `min_entry_price` — minimum stock price for portfolio entry
+- `min_target_move_pct` — minimum target move % for portfolio candidates
+- `regime_gate_enabled` — block entries in bear regime
+- `partial_profit_pct`, `partial_profit_fraction` — partial take-profit config
+
+### paper_stock_candidates
+`id`, `run_id` (UUID), `prediction_id`, `ticker`, `candidate_mode` (live_eligible/actionable_shadow/watch_only), `timeframe` (one_day/three_day/one_week/two_week/one_month), `quality_tier` (strong/moderate/weak/very_weak), `confidence_score`, `expected_value_percent`, `entry_price`, `target_price`, `stop_price`, `winning_direction`, `time_window`, `status` (pending/selected/rejected/expired), `created_at`
+
+### neutral_prediction_outcomes
+`id`, `prediction_id`, `evaluation_time`, `start_price`, `close_price`, `percent_move`, `stayed_neutral` (bool), `max_move_percent`, `outcome_summary`, `created_at`
+
+### portfolio_snapshots
+`id`, `challenge_id`, `snapshot_date`, `cash`, `invested_value`, `unrealized_pnl`, `total_equity`, `open_position_count`, `realized_pnl_cumulative`, `notes`, `created_at`
+
+Daily snapshots of portfolio value for equity curve charting.
 
 ### cap_tuning_stats
 `id`, `cap_reason` (UNIQUE — e.g. "Risk 75 ≥ 75 (dir clear, boost 0)"), `sample_size`, `accuracy`, `avg_confidence`, `avg_risk`, `avg_opposition_ratio`, `recommended_cap`, `current_cap`, `cap_delta`, `is_effective`, `analysis_notes`, `computed_at`, `applied_at`
@@ -280,6 +316,34 @@ ATR volatility adjustment: when `atrPercent` is provided, position size is scale
 ## Research Asset Enrichment (FUTURE — not yet implemented)
 
 Documented in `RESEARCH_ASSET_ENRICHMENT.md`. A future initiative to evolve Research Assets into complete research dossiers with historical market data, company intelligence, fundamentals, corporate event patterns, and market behavior profiles. Key constraints: provides context only (not scores), does not modify the scoring/prediction/learning engines, extends the existing Research Universe rather than introducing new services. See the doc for enrichment categories, roadmap phases, and the architectural decision record.
+
+## OpenAI Model (Runtime-Switchable)
+
+`OpenAiCompletionService` resolves the model from `scoring_weight_overrides` (signal_name=`openai_model`) on every request, cached 5 minutes. No redeploy needed to switch models. Numeric mapping in `ModelMap`: 0=gpt-4.1-mini, 1=gpt-4.1, 2=gpt-4o, 3=gpt-4o-mini, 4=gpt-5.6-luna (default), 5=gpt-5.6-terra, 6=gpt-5.6-sol.
+
+The LLM is used for: AI confidence adjustments in prediction pipeline, news catalyst classification (`NewsCatalystClassifier`), learning reports (`LearningEngine`), pattern detection (`PatternDetectionService`), morning briefings (`IntakeAnalysisService`). The core prediction scoring is deterministic (8-bucket scoring engine).
+
+## Broker Adapter (Alpaca)
+
+`IBrokerAdapter` → `AlpacaBrokerAdapter` for live/paper broker orders. `TradingMode` on `portfolio_challenges`:
+- `paper` — positions tracked in Supabase only
+- `broker_paper` — orders sent to Alpaca paper endpoint + Supabase
+- `live` — real money orders (guarded by `LIVE_TRADING_ENABLED=true`)
+
+Alpaca paper account: PA3L7HAG0A5E ($1,000). Orders use marketable limit (current price × 1.001) to cap slippage. `CurrentMarketPrice` on `OpenPositionRequest` ensures the limit reflects the live ask, not the stale prediction entry price. Close uses DELETE `/v2/positions/{ticker}` (market close).
+
+Key files: `Services/Broker/IBrokerAdapter.cs`, `Services/Broker/AlpacaBrokerAdapter.cs`, `Services/Portfolio/PortfolioBalanceEngine.cs`
+
+## Portfolio Risk Management
+
+`PortfolioLifecycleService.EvaluateRiskLimitsAsync` runs on cron and checks all open positions:
+- **Stop-loss** — configurable per timeframe (day/swing/longterm)
+- **Take-profit** — fixed targets, triggers partial profit-take first
+- **Trailing stop** — activates after position reaches threshold, trails at configured %
+- **Time stops** — close positions after N hours if not moved enough
+- **Daily loss limit** — blocks new entries when daily realized losses exceed threshold
+- **Spread filter** — rejects candidates with estimated spread > max_spread_pct
+- **Cost-adjusted EV** — subtracts round_trip_cost_pct from EV calculation
 
 ## Deployment
 

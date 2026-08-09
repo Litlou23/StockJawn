@@ -322,6 +322,109 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
         }
     }
 
+    // ── Screener (Market Data API) ─────────────────────────────────
+
+    private const string DataApiBaseUrl = "https://data.alpaca.markets";
+
+    public record ScreenerMover(string Ticker, double PercentChange, double Price);
+
+    /// <summary>
+    /// Fetch top market movers (gainers + losers) from Alpaca's screener API.
+    /// Uses the data API (data.alpaca.markets), not the trading API.
+    /// Free with any Alpaca account — no extra credits needed.
+    /// </summary>
+    public async Task<List<ScreenerMover>> GetTopMoversAsync(int top = 20)
+    {
+        if (!IsConfigured) return [];
+        var movers = new List<ScreenerMover>();
+
+        try
+        {
+            using var dataHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            dataHttp.DefaultRequestHeaders.Add("APCA-API-KEY-ID", _apiKey);
+            dataHttp.DefaultRequestHeaders.Add("APCA-API-SECRET-KEY", _apiSecret);
+
+            var response = await dataHttp.GetAsync($"{DataApiBaseUrl}/v1beta1/screener/stocks/movers?top={top}");
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[alpaca-screener] Movers endpoint returned {Status}", response.StatusCode);
+                return movers;
+            }
+
+            var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+
+            foreach (var direction in new[] { "gainers", "losers" })
+            {
+                var list = json?[direction] as JsonArray;
+                if (list is null) continue;
+                foreach (var item in list)
+                {
+                    if (item is null) continue;
+                    var ticker = item["symbol"]?.ToString();
+                    if (string.IsNullOrEmpty(ticker)) continue;
+                    movers.Add(new ScreenerMover(
+                        ticker,
+                        ParseDouble(item, "percent_change"),
+                        ParseDouble(item, "price")));
+                }
+            }
+
+            _logger.LogInformation("[alpaca-screener] Got {Count} movers ({Top} per side)", movers.Count, top);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[alpaca-screener] Failed to fetch top movers");
+        }
+
+        return movers;
+    }
+
+    /// <summary>
+    /// Fetch most active stocks by volume from Alpaca's screener API.
+    /// </summary>
+    public async Task<List<ScreenerMover>> GetMostActivesAsync(int top = 20)
+    {
+        if (!IsConfigured) return [];
+        var actives = new List<ScreenerMover>();
+
+        try
+        {
+            using var dataHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            dataHttp.DefaultRequestHeaders.Add("APCA-API-KEY-ID", _apiKey);
+            dataHttp.DefaultRequestHeaders.Add("APCA-API-SECRET-KEY", _apiSecret);
+
+            var response = await dataHttp.GetAsync($"{DataApiBaseUrl}/v1beta1/screener/stocks/most-actives?by=volume&top={top}");
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[alpaca-screener] Most-actives endpoint returned {Status}", response.StatusCode);
+                return actives;
+            }
+
+            var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+            var list = json?["most_actives"] as JsonArray;
+            if (list is null) return actives;
+
+            foreach (var item in list)
+            {
+                if (item is null) continue;
+                var ticker = item["symbol"]?.ToString();
+                if (string.IsNullOrEmpty(ticker)) continue;
+                actives.Add(new ScreenerMover(
+                    ticker,
+                    ParseDouble(item, "percent_change"),
+                    ParseDouble(item, "price")));
+            }
+
+            _logger.LogInformation("[alpaca-screener] Got {Count} most active stocks", actives.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[alpaca-screener] Failed to fetch most actives");
+        }
+
+        return actives;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────
 
     private void EnsureConfigured()

@@ -243,7 +243,8 @@ builder.Services.AddSingleton<OptionsDataService>();
     // Defaults to paper mode; set ALPACA_PAPER=false for live.
     // If ALPACA_API_KEY is not set, adapter reports IsConfigured=false
     // and all broker calls are skipped (pure Supabase paper trading).
-    builder.Services.AddSingleton<IBrokerAdapter, AlpacaBrokerAdapter>();
+    builder.Services.AddSingleton<AlpacaBrokerAdapter>();
+    builder.Services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AlpacaBrokerAdapter>());
     builder.Services.AddSingleton<BrokerSyncService>();
 
     builder.Services.AddSingleton<PortfolioBalanceEngine>();

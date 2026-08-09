@@ -13,7 +13,7 @@
 ## Supabase Database Tables (actual column names)
 
 ### research_runs
-`id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `error_message`, `metadata`
+`id`, `run_type` (morning_scan, end_of_day_review, learning_update, weekly_research), `status`, `started_at`, `completed_at`, `summary`, `errors` (text[] array, NOT jsonb), `predictions_generated`, `predictions_evaluated`
 
 ### prediction_candidates
 `id`, `run_id`, `ticker`, `prediction_type` (bullish/bearish/neutral_no_edge/neutral_range_bound/neutral_high_volatility/watch_only/rejected/unavailable), `asset_type`, `time_window`, `confidence_score`, `importance_score`, `risk_score`, `entry_reference_price`, `atr14`, `atr_percent`, `timeframe_multiplier`, `signal_modifier`, `expected_move_dollar`, `expected_move_percent`, `predicted_price`, `predicted_move_percent`, `projected_price_low`, `projected_price_high`, `target_price`, `stop_price`, `invalidation_price`, `support_level`, `resistance_level`, `risk_reward_ratio`, `price_prediction_method`, `price_prediction_warnings`, `bullish_case`, `bearish_case`, `prediction_reason`, `invalidation_rule`, `data_sources_used`, `missing_data_warnings`, `status` (open/evaluated/expired), `score_debug_json`, `bullish_score`, `bearish_score`, `winning_direction`, `direction_confidence`, `created_at`
@@ -39,11 +39,48 @@
 ### paper_option_outcomes
 `id`, `paper_candidate_id`, `evaluation_time`, `current_underlying_price`, `current_bid`, `current_ask`, `current_mid`, `current_iv`, `current_delta`, `current_open_interest`, `current_volume`, `paper_pnl_per_contract`, `paper_pnl_percent`, `underlying_move_percent`, `iv_change`, `outcome_summary`, `created_at`
 
+### prediction_profiles
+`id`, `profile_name`, `description`, `role` (champion/challenger), `experiment_status` (active/testing/draft/archived), `is_enabled` (bool), `hypothesis`, `learning_enabled` (bool), `created_at`, `updated_at`
+
+Only one profile has `role=champion`. Champion generates trades; challengers generate predictions for comparison only.
+
+### scoring_weight_overrides
+`id`, `signal_name` (UNIQUE), `effective_weight`, `created_at`, `updated_at`
+
+Runtime config table. Key entries: `openai_model` (AI model selector), `skip_weak_quality`, `max_spread_pct`, `round_trip_cost_pct`, `daily_loss_limit_pct`, risk thresholds (`risk_sl_day`, `risk_tp_day`, etc.), position sizing (`sizing_kelly_fraction`, `sizing_min_fraction`, etc.), `max_open_positions`, `min_entry_price`.
+
+### paper_stock_candidates
+`id`, `run_id` (UUID), `prediction_id`, `ticker`, `candidate_mode`, `timeframe`, `quality_tier`, `confidence_score`, `expected_value_percent`, `entry_price`, `target_price`, `stop_price`, `winning_direction`, `time_window`, `status`, `created_at`
+
+### portfolio_challenges
+`id`, `name`, `starting_balance`, `current_balance`, `target_balance`, `current_cash`, `buying_power`, `realized_profit`, `unrealized_profit`, `total_return`, `percent_return`, `number_of_trades`, `winning_trades`, `losing_trades`, `win_rate`, `status`, `portfolio_mode`, `trading_mode` (paper/broker_paper/live), `risk_profile`, `notes`, `created_at`, `updated_at`
+
+### portfolio_positions
+`id`, `portfolio_id`, `prediction_id`, `ticker`, `asset_type`, `entry_date`, `exit_date`, `entry_price`, `exit_price`, `quantity`, `dollars_invested`, `dollars_returned`, `profit_loss`, `percent_gain`, `reason_entered`, `reason_exited`, `status`, `high_water_mark`, `partial_profit_taken`, `broker_entry_order_id`, `broker_exit_order_id`, `created_at`, `updated_at`
+
+### portfolio_snapshots
+`id`, `challenge_id`, `snapshot_date`, `cash`, `invested_value`, `unrealized_pnl`, `total_equity`, `open_position_count`, `realized_pnl_cumulative`, `notes`, `created_at`
+
+### neutral_prediction_outcomes
+`id`, `prediction_id`, `evaluation_time`, `start_price`, `close_price`, `percent_move`, `stayed_neutral`, `max_move_percent`, `outcome_summary`, `created_at`
+
 ### cap_tuning_stats
 `id`, `cap_reason` (UNIQUE), `sample_size`, `accuracy`, `avg_confidence`, `avg_risk`, `avg_opposition_ratio`, `recommended_cap`, `current_cap`, `cap_delta`, `is_effective`, `analysis_notes`, `computed_at`, `applied_at`
 
 ### pg_cron jobs
 Column is `jobname` (not `name`). Query: `SELECT jobname, schedule, command FROM cron.job`
+
+## OpenAI Model (Runtime-Switchable)
+
+The API's `OpenAiCompletionService` resolves the model from `scoring_weight_overrides` (signal_name=`openai_model`) on every request, cached 5 minutes. No redeploy needed. Numeric mapping: 0=gpt-4.1-mini, 1=gpt-4.1, 2=gpt-4o, 3=gpt-4o-mini, 4=gpt-5.6-luna (default), 5=gpt-5.6-terra, 6=gpt-5.6-sol.
+
+## Broker Adapter (Alpaca)
+
+`IBrokerAdapter` → `AlpacaBrokerAdapter` for live/paper broker orders. `TradingMode` on `portfolio_challenges`: `paper` (Supabase only), `broker_paper` (Alpaca paper + Supabase), `live` (real money, guarded). Alpaca paper account: PA3L7HAG0A5E ($1,000). Orders use marketable limit (current price × 1.001).
+
+## Portfolio Risk Management
+
+`PortfolioLifecycleService.EvaluateRiskLimitsAsync` runs on cron: stop-loss, take-profit, trailing stop, time stops, daily loss limit, spread filter, cost-adjusted EV. All thresholds configurable via `scoring_weight_overrides` — no redeploy needed.
 
 ### Azure .NET API
 Deployed at: `https://stock-research-agent-api-lsmart-ghhwebetfycxgrf8.centralus-01.azurewebsites.net`

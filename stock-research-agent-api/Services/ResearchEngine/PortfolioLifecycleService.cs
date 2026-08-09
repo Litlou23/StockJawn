@@ -381,6 +381,21 @@ public class PortfolioLifecycleService
                     continue;
                 }
 
+                // ── Broker confidence floor — real money demands higher conviction ──
+                // Paper trades can experiment at conf=55, but broker_paper/live trades
+                // need conf>=60 to avoid wasting capital on weak setups like CCK (51) or UCB (55).
+                if (challenge.TradingMode is TradingMode.broker_paper or TradingMode.live)
+                {
+                    var brokerMinConf = (int)weights.GetValueOrDefault("broker_min_confidence", 60);
+                    if (c.ConfidenceScore < brokerMinConf)
+                    {
+                        _logger.LogInformation(
+                            "[portfolio] BROKER GATE: Skipping {Ticker} for {Challenge} — conf {Conf} < broker minimum {Min}",
+                            c.Ticker, challenge.Name, c.ConfidenceScore, brokerMinConf);
+                        continue;
+                    }
+                }
+
                 // ── Regime gate — don't trade against the market trend ──
                 // Bullish picks in a bearish market get slaughtered (data shows 4-23% accuracy).
                 // Bearish picks in a bullish market face a rising tide.
@@ -976,10 +991,11 @@ public class PortfolioLifecycleService
                     }
 
                     // After partial TP, activate trailing stop immediately (already in profit)
-                    // and tighten the trail — we've banked half, now protect the rest.
+                    // and tighten the trail slightly — we've banked half, now protect the rest
+                    // but not so tight that normal fluctuations trigger it.
                     var effectiveActivate = pos.PartialProfitTaken ? 0.0 : limits.TrailActivate;
                     var effectiveTrail = pos.PartialProfitTaken
-                        ? limits.TrailPercent * 0.6 // 40% tighter trail after partial TP
+                        ? limits.TrailPercent * 0.85 // 15% tighter trail after partial TP
                         : limits.TrailPercent;
 
                     // Check if trailing stop has been activated (price rose above activation threshold)

@@ -574,6 +574,62 @@ public class TwelveDataProvider
     }
 
     // -----------------------------------------------------------------------
+    // Market movers — top gainers/losers for universe discovery
+    // -----------------------------------------------------------------------
+
+    public record MarketMover(string Ticker, double PercentChange, double Volume);
+
+    /// <summary>
+    /// Fetch top market movers (gainers + losers) from the /market_movers endpoint.
+    /// Returns tickers with their percent change and volume.
+    /// Costs 100 API credits per call (one for gainers, one for losers = 200 total).
+    /// </summary>
+    public async Task<List<MarketMover>> GetMarketMoversAsync(int count = 20)
+    {
+        if (!_configured) return [];
+
+        var movers = new List<MarketMover>();
+
+        foreach (var direction in new[] { "gainers", "losers" })
+        {
+            if (!await ThrottleAsync()) break;
+
+            var url = $"{BaseUrl}/market_movers/stocks?direction={direction}&outputsize={count}&apikey={_apiKey}";
+            try
+            {
+                var body = await GetStringWithRetryAsync(url, "market_movers", direction);
+                var json = JsonNode.Parse(body);
+                var values = json?["values"] as JsonArray;
+                if (values is null)
+                {
+                    _logger.LogWarning("[twelve-data] /market_movers/{Direction} returned no values", direction);
+                    continue;
+                }
+
+                foreach (var item in values)
+                {
+                    if (item is null) continue;
+                    var ticker = item["symbol"]?.ToString();
+                    if (string.IsNullOrEmpty(ticker)) continue;
+
+                    var pctChange = ParseDouble(item["percent_change"]);
+                    var volume = ParseDouble(item["volume"]);
+                    movers.Add(new MarketMover(ticker, pctChange, volume));
+                }
+
+                _logger.LogInformation("[twelve-data] /market_movers/{Direction}: {Count} tickers",
+                    direction, values.Count);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[twelve-data] /market_movers/{Direction} failed", direction);
+            }
+        }
+
+        return movers;
+    }
+
+    // -----------------------------------------------------------------------
     // Provider health
     // -----------------------------------------------------------------------
 

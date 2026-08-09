@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using OpenAI.Chat;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services;
 
@@ -15,42 +17,74 @@ public interface IOpenAiCompletionService
 /// (read from configuration/environment, never hardcoded) and does nothing
 /// else — no business logic, no app data. The caller (Next.js) is
 /// responsible for building the messages it wants sent.
+///
+/// The model is resolved at runtime from scoring_weight_overrides
+/// (signal_name = 'openai_model'). Change it in the DB and the next
+/// request picks it up — no redeploy needed. Numeric mapping:
+///   0 = gpt-4.1-mini
+///   1 = gpt-4.1
+///   2 = gpt-4o
+///   3 = gpt-4o-mini
+///   4 = gpt-5.6-luna   (recommended — cheapest, newest gen)
+///   5 = gpt-5.6-terra
+///   6 = gpt-5.6-sol
 /// </summary>
 public class OpenAiCompletionService : IOpenAiCompletionService
 {
-    private readonly ChatClient? _chatClient;
+    private static readonly Dictionary<int, string> ModelMap = new()
+    {
+        { 0, "gpt-4.1-mini" },
+        { 1, "gpt-4.1" },
+        { 2, "gpt-4o" },
+        { 3, "gpt-4o-mini" },
+        { 4, "gpt-5.6-luna" },
+        { 5, "gpt-5.6-terra" },
+        { 6, "gpt-5.6-sol" },
+    };
+
+    private const string DefaultModel = "gpt-5.6-luna";
+    private const int CacheMinutes = 5;
+
+    private readonly string? _apiKey;
     private readonly bool _configured;
+    private readonly SupabaseClient _db;
     private readonly ILogger<OpenAiCompletionService> _logger;
+
+    // Cache: model name + expiry so we don't hit DB every call
+    private readonly ConcurrentDictionary<string, (string Model, DateTime Expiry)> _modelCache = new();
+    // Cache ChatClient instances per model string to avoid re-creating them
+    private readonly ConcurrentDictionary<string, ChatClient> _clientCache = new();
 
     public bool IsConfigured => _configured;
 
-    public OpenAiCompletionService(IConfiguration configuration, ILogger<OpenAiCompletionService> logger)
+    public OpenAiCompletionService(
+        IConfiguration configuration,
+        SupabaseClient db,
+        ILogger<OpenAiCompletionService> logger)
     {
+        _db = db;
         _logger = logger;
-        var apiKey = configuration["OPENAI_API_KEY"];
-        if (string.IsNullOrWhiteSpace(apiKey))
+        _apiKey = configuration["OPENAI_API_KEY"];
+
+        if (string.IsNullOrWhiteSpace(_apiKey))
         {
             _logger.LogWarning("[openai] OPENAI_API_KEY not set -- AI completions unavailable");
             _configured = false;
             return;
         }
 
-        var model = configuration["OPENAI_MODEL"];
-        if (string.IsNullOrWhiteSpace(model))
-        {
-            model = "gpt-4.1-mini";
-        }
-
-        _chatClient = new ChatClient(model, apiKey);
         _configured = true;
     }
 
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken)
     {
-        if (!_configured || _chatClient is null)
+        if (!_configured || _apiKey is null)
         {
             return new AiCompletionResult { Text = "[OpenAI not configured — OPENAI_API_KEY is missing]" };
         }
+
+        var model = await ResolveModelAsync();
+        var client = _clientCache.GetOrAdd(model, m => new ChatClient(m, _apiKey));
 
         var messages = request.Messages.Select(ToChatMessage).ToList();
 
@@ -80,7 +114,7 @@ public class OpenAiCompletionService : IOpenAiCompletionService
             }
         }
 
-        ChatCompletion completion = await _chatClient!.CompleteChatAsync(messages, options, cancellationToken);
+        ChatCompletion completion = await client.CompleteChatAsync(messages, options, cancellationToken);
 
         // Check if the model wants to call tools
         if (completion.FinishReason == ChatFinishReason.ToolCalls && completion.ToolCalls.Count > 0)
@@ -106,6 +140,44 @@ public class OpenAiCompletionService : IOpenAiCompletionService
             Text = text ?? "",
             FinishReason = "stop",
         };
+    }
+
+    /// <summary>
+    /// Reads the model from scoring_weight_overrides (cached for 5 min).
+    /// signal_name = 'openai_model', effective_weight maps to ModelMap.
+    /// </summary>
+    private async Task<string> ResolveModelAsync()
+    {
+        const string cacheKey = "openai_model";
+
+        if (_modelCache.TryGetValue(cacheKey, out var cached) && cached.Expiry > DateTime.UtcNow)
+            return cached.Model;
+
+        try
+        {
+            var row = await _db.SelectSingleAsync(
+                "scoring_weight_overrides",
+                "signal_name=eq.openai_model");
+
+            var model = DefaultModel;
+            if (row is not null)
+            {
+                var weight = row["effective_weight"]?.GetValue<double>() ?? 1.0;
+                var key = (int)Math.Round(weight);
+                if (ModelMap.TryGetValue(key, out var mapped))
+                    model = mapped;
+            }
+
+            _modelCache[cacheKey] = (model, DateTime.UtcNow.AddMinutes(CacheMinutes));
+            _logger.LogDebug("[openai] Resolved model: {Model}", model);
+            return model;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[openai] Failed to read model from DB, using default {Model}", DefaultModel);
+            _modelCache[cacheKey] = (DefaultModel, DateTime.UtcNow.AddMinutes(1)); // shorter cache on error
+            return DefaultModel;
+        }
     }
 
     private static ChatMessage ToChatMessage(AiChatMessageDto dto)

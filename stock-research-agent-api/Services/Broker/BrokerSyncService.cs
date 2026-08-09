@@ -59,17 +59,20 @@ public class BrokerSyncService
         // ── 1. Sync pending orders → check for fills ────────────────
         await SyncPendingOrdersAsync(brokerChallenges, result);
 
-        // ── 2. Sync account info ────────────────────────────────────
+        // ── 2. Fix stuck exit orders — cancel and resubmit ─────────
+        await FixStuckExitOrdersAsync(brokerChallenges, result);
+
+        // ── 3. Sync account info ────────────────────────────────────
         await SyncAccountAsync(result);
 
-        // ── 3. Sync positions — detect drift ────────────────────────
+        // ── 4. Sync positions — detect drift ────────────────────────
         await SyncPositionsAsync(brokerChallenges, result);
 
-        if (result.OrdersUpdated > 0 || result.PositionDrifts > 0)
+        if (result.OrdersUpdated > 0 || result.PositionDrifts > 0 || result.StuckOrdersFixed > 0)
             _logger.LogInformation(
                 "[broker-sync] Sync complete: {OrdersUpdated} orders updated, " +
-                "{PositionDrifts} position drifts detected, account equity=${Equity:F2}",
-                result.OrdersUpdated, result.PositionDrifts, result.BrokerEquity);
+                "{StuckFixed} stuck orders fixed, {PositionDrifts} position drifts, equity=${Equity:F2}",
+                result.OrdersUpdated, result.StuckOrdersFixed, result.PositionDrifts, result.BrokerEquity);
         else
             _logger.LogDebug("[broker-sync] Sync complete — no changes");
 
@@ -127,6 +130,89 @@ public class BrokerSyncService
                         pos.BrokerEntryOrderId, pos.Ticker);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Detect sell orders that have been in "accepted" or "pending_new" state
+    /// for too long (placed after market hours). Cancel them and resubmit
+    /// as market orders during market hours.
+    /// </summary>
+    private async Task FixStuckExitOrdersAsync(
+        List<PortfolioChallenge> challenges, BrokerSyncResult result)
+    {
+        // Check if market is currently open (rough check — ET 9:30-16:00 weekdays)
+        var eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+        var nowEt = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, eastern);
+        var isMarketHours = nowEt.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)
+            && nowEt.TimeOfDay >= new TimeSpan(9, 30, 0)
+            && nowEt.TimeOfDay < new TimeSpan(16, 0, 0);
+
+        if (!isMarketHours)
+        {
+            _logger.LogDebug("[broker-sync] Market closed — skipping stuck exit order check");
+            return;
+        }
+
+        try
+        {
+            var openOrders = await _broker.GetOpenOrdersAsync();
+            // Find sell orders that have been sitting in accepted/pending_new for >30 min
+            var stuckSellOrders = openOrders
+                .Where(o => o.Side == BrokerOrderSide.sell
+                    && o.Status is BrokerOrderState.accepted or BrokerOrderState.pending_new or BrokerOrderState.new_order
+                    && o.FilledQuantity == 0
+                    && (DateTimeOffset.UtcNow - o.CreatedAt).TotalMinutes > 30)
+                .ToList();
+
+            if (stuckSellOrders.Count == 0) return;
+
+            _logger.LogWarning(
+                "[broker-sync] Found {Count} stuck sell orders older than 30 min — cancelling and resubmitting",
+                stuckSellOrders.Count);
+
+            foreach (var stuckOrder in stuckSellOrders)
+            {
+                // Cancel the stuck order
+                var cancelled = await _broker.CancelOrderAsync(stuckOrder.BrokerOrderId);
+                if (!cancelled)
+                {
+                    _logger.LogWarning(
+                        "[broker-sync] Failed to cancel stuck order {OrderId} for {Ticker}",
+                        stuckOrder.BrokerOrderId, stuckOrder.Ticker);
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    "[broker-sync] Cancelled stuck sell order {OrderId} for {Ticker} " +
+                    "(was {Status} since {Created}, {MinAgo:F0} min ago)",
+                    stuckOrder.BrokerOrderId, stuckOrder.Ticker, stuckOrder.Status,
+                    stuckOrder.CreatedAt, (DateTimeOffset.UtcNow - stuckOrder.CreatedAt).TotalMinutes);
+
+                // Wait briefly for cancellation to process
+                await Task.Delay(500);
+
+                // Resubmit as a direct position close (uses DELETE /v2/positions/{ticker}
+                // which creates a market sell order)
+                var closeResult = await _broker.ClosePositionAsync(stuckOrder.Ticker);
+                if (closeResult.Success)
+                {
+                    _logger.LogInformation(
+                        "[broker-sync] Resubmitted close for {Ticker} — new order {OrderId}",
+                        stuckOrder.Ticker, closeResult.BrokerOrderId);
+                    result.StuckOrdersFixed++;
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "[broker-sync] Failed to resubmit close for {Ticker}: {Error}",
+                        stuckOrder.Ticker, closeResult.ErrorMessage);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[broker-sync] Failed to check/fix stuck exit orders");
         }
     }
 
@@ -215,6 +301,7 @@ public record BrokerSyncResult
 {
     public int OrdersUpdated { get; set; }
     public int PositionDrifts { get; set; }
+    public int StuckOrdersFixed { get; set; }
     public int BrokerPositionCount { get; set; }
     public int TrackedPositionCount { get; set; }
     public double BrokerCash { get; set; }
