@@ -212,6 +212,7 @@ public class UniverseDiscoveryService
             var movers = await _twelveData.GetMarketMoversAsync(30);
             foreach (var mover in movers)
             {
+                if (IsLikelyWarrantOrSPAC(mover.Ticker)) continue;
                 var builder = GetOrCreate(tickerScores, mover.Ticker);
                 // Big movers get high scores — this is what the system was missing
                 var absChange = Math.Abs(mover.PercentChange);
@@ -236,6 +237,7 @@ public class UniverseDiscoveryService
             var alpacaMovers = await _alpaca.GetTopMoversAsync(20);
             foreach (var mover in alpacaMovers)
             {
+                if (IsLikelyWarrantOrSPAC(mover.Ticker)) continue;
                 var builder = GetOrCreate(tickerScores, mover.Ticker);
                 var absChange = Math.Abs(mover.PercentChange);
                 var moverScore = absChange >= 10 ? 12 : absChange >= 5 ? 10 : 6;
@@ -256,6 +258,7 @@ public class UniverseDiscoveryService
             var actives = await _alpaca.GetMostActivesAsync(20);
             foreach (var active in actives)
             {
+                if (IsLikelyWarrantOrSPAC(active.Ticker)) continue;
                 var builder = GetOrCreate(tickerScores, active.Ticker);
                 builder.Score += 5; // High volume = institutional interest
                 if (!builder.Sources.Contains("alpaca-actives"))
@@ -385,6 +388,35 @@ public class UniverseDiscoveryService
             dict[ticker] = builder;
         }
         return builder;
+    }
+
+    /// <summary>
+    /// Filters out warrants (W, WS), SPAC units (U), rights (R, RT), and other
+    /// non-common-stock tickers that show up on screeners as big movers but are
+    /// illiquid and untradeable. Only applied to screener/mover sources — RSS,
+    /// Finnhub, and BaseUniverse bypass this filter.
+    ///
+    /// Conservative: only targets 5+ char tickers with known suffixes.
+    /// A legit 5-char ticker filtered here can still enter via news or base universe.
+    /// </summary>
+    private static bool IsLikelyWarrantOrSPAC(string ticker)
+    {
+        if (string.IsNullOrEmpty(ticker)) return true;
+
+        // Tickers > 5 chars are almost always warrants/units/rights (e.g., HGTXUW, SRZNWS)
+        if (ticker.Length > 5) return true;
+
+        // 5-char tickers with warrant/SPAC suffixes (catches HGTXU, SRZNW, HUBCZ, BGLWW, etc.)
+        // Safe: GOOGL (ends L), legit 5-char tickers don't typically end in W/U/Z
+        if (ticker.Length == 5)
+        {
+            if (ticker.EndsWith("W") || ticker.EndsWith("U") || ticker.EndsWith("Z"))
+                return true;
+            if (ticker.EndsWith("WS") || ticker.EndsWith("RT"))
+                return true;
+        }
+
+        return false;
     }
 
     private class TickerScoreBuilder

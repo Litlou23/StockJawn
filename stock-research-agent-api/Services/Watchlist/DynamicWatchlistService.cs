@@ -107,11 +107,18 @@ public class DynamicWatchlistService
         }
 
         // 2. Score all universe tickers as candidates
+        //    Filter warrants/SPACs before scoring — they inflate scores and
+        //    displace quality stocks from the watchlist.
         _logger.LogInformation("[watchlist] Scoring {Count} universe tickers...", universe.Length);
         var candidates = new List<ScoredCandidate>();
 
         foreach (var ticker in universe)
         {
+            if (IsLikelyWarrantOrSPAC(ticker))
+            {
+                _logger.LogDebug("[watchlist] Skipping probable warrant/SPAC: {Ticker}", ticker);
+                continue;
+            }
             discoveryMap.TryGetValue(ticker, out var discovery);
             var scored = await ScoreTickerAsync(ticker, scoringWeights, tickerAccuracy, recentPredictions, discovery);
             candidates.Add(scored);
@@ -718,6 +725,25 @@ public class DynamicWatchlistService
 
     private record ItemDecision(string Action, string Reason);
 
+    /// <summary>
+    /// Filter out warrants, SPAC units, and rights that contaminate scoring.
+    /// Same logic as UniverseDiscoveryService.IsLikelyWarrantOrSPAC — kept in
+    /// sync to avoid warrants slipping through either gate.
+    /// </summary>
+    private static bool IsLikelyWarrantOrSPAC(string ticker)
+    {
+        if (string.IsNullOrEmpty(ticker)) return true;
+        if (ticker.Length > 5) return true;
+        if (ticker.Length == 5)
+        {
+            if (ticker.EndsWith("W") || ticker.EndsWith("U") || ticker.EndsWith("Z"))
+                return true;
+            if (ticker.EndsWith("WS") || ticker.EndsWith("RT"))
+                return true;
+        }
+        return false;
+    }
+
     private ItemDecision EvaluateExistingItem(
         WatchlistItem item, ScoredCandidate newScore, List<ScoredCandidate> allCandidates)
     {
@@ -753,8 +779,12 @@ public class DynamicWatchlistService
             reasons.Add($"Score dropped significantly: {oldScore:F0} -> {newScore.TotalScore:F0}");
 
         // Check if significantly better candidates exist (informational flag for review)
+        // Exclude warrants/SPACs from this comparison — their inflated scores
+        // should never justify archiving legitimate stocks.
         var betterCandidates = allCandidates
-            .Where(c => c.Ticker != item.Ticker && c.TotalScore > newScore.TotalScore + 25)
+            .Where(c => c.Ticker != item.Ticker
+                && !IsLikelyWarrantOrSPAC(c.Ticker)
+                && c.TotalScore > newScore.TotalScore + 25)
             .Take(3).ToList();
         if (betterCandidates.Count > 0)
             reasons.Add($"Stronger candidates available: {string.Join(", ", betterCandidates.Select(c => $"{c.Ticker} ({c.TotalScore:F0})"))}");
