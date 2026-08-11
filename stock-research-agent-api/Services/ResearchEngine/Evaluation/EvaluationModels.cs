@@ -112,6 +112,18 @@ public record EvaluationContext
     /// </summary>
     public VolatilityOpportunityAssessment? VolatilityAssessment { get; init; }
 
+    /// <summary>
+    /// Days until this ticker's next scheduled earnings report.
+    /// Null when no upcoming earnings are known. Used by CatalystEvaluator
+    /// to boost confidence for imminent earnings catalysts.
+    /// </summary>
+    public int? DaysUntilEarnings { get; init; }
+
+    /// <summary>
+    /// Consensus EPS estimate for upcoming earnings. Null when unknown.
+    /// </summary>
+    public double? EstimatedEps { get; init; }
+
     public static EvaluationContext Create(
         MarketSnapshot snapshot,
         TechnicalIndicators indicators,
@@ -122,7 +134,9 @@ public record EvaluationContext
         List<ResearchSignal> researchSignals,
         ResearchUniverseContext? researchUniverse = null,
         VolatilityOpportunityAssessment? volatilityAssessment = null,
-        MarketRegimeResult? marketRegimeResult = null)
+        MarketRegimeResult? marketRegimeResult = null,
+        int? daysUntilEarnings = null,
+        double? estimatedEps = null)
     {
         var riskCapBoost = (int)Math.Clamp(weights.GetValueOrDefault("risk_cap_boost", 0.0), 0, 15);
         var calibrationFactor = Math.Clamp(weights.GetValueOrDefault("calibration_factor", 1.0), 0.85, 1.15);
@@ -138,6 +152,8 @@ public record EvaluationContext
             ResearchUniverse = researchUniverse ?? new ResearchUniverseContext(),
             VolatilityAssessment = volatilityAssessment,
             MarketRegimeResult = marketRegimeResult,
+            DaysUntilEarnings = daysUntilEarnings,
+            EstimatedEps = estimatedEps,
             LearningData = new EvaluationLearningData
             {
                 Weights = new Dictionary<string, double>(weights),

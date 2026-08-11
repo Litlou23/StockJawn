@@ -61,8 +61,8 @@ public class TwelveDataProvider
     private const int MaxRetries = 2; // 3 attempts total
 
     /// <summary>
-    /// GET with automatic retry on transient errors. Does NOT re-consume a
-    /// throttle slot on retry — the first attempt already counted it.
+    /// GET with automatic retry on transient errors. On 429 retries, re-acquires
+    /// a throttle slot to prevent retry pileups from exceeding rate limits.
     /// Returns the response body string, or throws if all attempts fail.
     /// </summary>
     private async Task<string> GetStringWithRetryAsync(string url, string endpoint, string ticker)
@@ -72,17 +72,20 @@ public class TwelveDataProvider
         {
             try
             {
+                // On retries, wait for a throttle slot so we don't pile up
+                // and exceed the per-minute rate limit with concurrent retries.
+                if (attempt > 0)
+                    await ThrottleAsync();
+
                 using var resp = await _http.GetAsync(url);
                 var body = await resp.Content.ReadAsStringAsync();
 
                 // Retry on rate-limit or server error
                 if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
                 {
-                    var delayMs = (attempt + 1) * 2000; // 2s, 4s, 6s
                     _logger.LogWarning(
-                        "[twelve-data] {Endpoint} for {Ticker} returned {Status}, retry {Attempt}/{Max} in {Delay}ms",
-                        endpoint, ticker, (int)resp.StatusCode, attempt + 1, MaxRetries, delayMs);
-                    await Task.Delay(delayMs);
+                        "[twelve-data] {Endpoint} for {Ticker} returned {Status}, retry {Attempt}/{Max}",
+                        endpoint, ticker, (int)resp.StatusCode, attempt + 1, MaxRetries);
                     continue;
                 }
 
@@ -90,21 +93,17 @@ public class TwelveDataProvider
             }
             catch (TaskCanceledException) when (attempt < MaxRetries)
             {
-                var delayMs = (attempt + 1) * 2000;
                 _logger.LogWarning(
-                    "[twelve-data] {Endpoint} for {Ticker} timed out, retry {Attempt}/{Max} in {Delay}ms",
-                    endpoint, ticker, attempt + 1, MaxRetries, delayMs);
+                    "[twelve-data] {Endpoint} for {Ticker} timed out, retry {Attempt}/{Max}",
+                    endpoint, ticker, attempt + 1, MaxRetries);
                 lastException = new TimeoutException($"{endpoint} timed out for {ticker}");
-                await Task.Delay(delayMs);
             }
             catch (HttpRequestException ex) when (attempt < MaxRetries)
             {
-                var delayMs = (attempt + 1) * 2000;
                 _logger.LogWarning(ex,
-                    "[twelve-data] {Endpoint} for {Ticker} network error, retry {Attempt}/{Max} in {Delay}ms",
-                    endpoint, ticker, attempt + 1, MaxRetries, delayMs);
+                    "[twelve-data] {Endpoint} for {Ticker} network error, retry {Attempt}/{Max}",
+                    endpoint, ticker, attempt + 1, MaxRetries);
                 lastException = ex;
-                await Task.Delay(delayMs);
             }
         }
 

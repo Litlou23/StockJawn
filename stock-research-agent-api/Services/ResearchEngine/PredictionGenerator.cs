@@ -46,6 +46,7 @@ public class PredictionGenerator
     private readonly PredictionProfileRepository _profileRepo;
     private readonly MarketStressDetector _stressDetector;
     private readonly IMarketRegimeEngine _regimeEngine;
+    private readonly FinnhubProvider _finnhub;
     private readonly ILogger<PredictionGenerator> _logger;
     private readonly ChatClient? _chatClient;
     private readonly bool _ensembleEnabled;
@@ -66,6 +67,7 @@ public class PredictionGenerator
         PredictionProfileRepository profileRepo,
         MarketStressDetector stressDetector,
         IMarketRegimeEngine regimeEngine,
+        FinnhubProvider finnhub,
         IConfiguration configuration,
         ILogger<PredictionGenerator> logger)
     {
@@ -83,6 +85,7 @@ public class PredictionGenerator
         _profileRepo = profileRepo;
         _stressDetector = stressDetector;
         _regimeEngine = regimeEngine;
+        _finnhub = finnhub;
         _logger = logger;
         _ensembleEnabled = string.Equals(
             configuration["ENSEMBLE_SCORING_ENABLED"], "true",
@@ -119,7 +122,8 @@ public class PredictionGenerator
         Dictionary<string, double> Weights,
         List<string> Lessons,
         string? ProfileId = null,
-        string? ProfileName = null);
+        string? ProfileName = null,
+        Dictionary<string, FinnhubProvider.EarningsEntry>? EarningsCalendar = null);
 
     /// <summary>
     /// Load scoring weights, overrides, and lessons once for the entire batch.
@@ -163,7 +167,30 @@ public class PredictionGenerator
             }
         }
 
-        return new SharedPredictionContext(weights, lessons, resolvedProfileId, resolvedProfileName);
+        // Fetch upcoming earnings calendar (single API call, shared across all tickers)
+        Dictionary<string, FinnhubProvider.EarningsEntry>? earningsCalendar = null;
+        try
+        {
+            var earningsList = await _finnhub.GetUpcomingEarningsAsync(7);
+            if (earningsList.Count > 0)
+            {
+                earningsCalendar = new Dictionary<string, FinnhubProvider.EarningsEntry>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var e in earningsList)
+                {
+                    // Keep first entry per ticker (earliest date)
+                    earningsCalendar.TryAdd(e.Ticker, e);
+                }
+                _logger.LogInformation("[prediction] Loaded {Count} upcoming earnings entries for catalyst scoring",
+                    earningsCalendar.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Earnings calendar fetch failed, continuing without");
+        }
+
+        return new SharedPredictionContext(weights, lessons, resolvedProfileId, resolvedProfileName, earningsCalendar);
     }
 
     public async Task<(PredictionCandidate? Prediction, List<PredictionInput> Inputs)>
@@ -358,6 +385,20 @@ public class PredictionGenerator
         // Persist assessment (fire-and-forget — non-blocking, best-effort)
         _ = _repo.SaveVolatilityAssessmentAsync(volatilityAssessment, runId);
 
+        // ── Earnings calendar lookup ──────────────────────────────────
+        int? daysUntilEarnings = null;
+        double? estimatedEps = null;
+        if (sharedContext?.EarningsCalendar is not null
+            && sharedContext.EarningsCalendar.TryGetValue(ticker, out var earningsEntry))
+        {
+            if (DateTime.TryParse(earningsEntry.Date, out var earningsDate))
+            {
+                daysUntilEarnings = (int)(earningsDate - DateTime.UtcNow.Date).TotalDays;
+                if (daysUntilEarnings < 0) daysUntilEarnings = 0; // reporting today
+            }
+            estimatedEps = earningsEntry.EstimateEps;
+        }
+
         ScoringEngine.ScoringResult scoring;
         EnsembleScoringService.EnsembleResult? ensembleResult = null;
 
@@ -365,7 +406,8 @@ public class PredictionGenerator
         {
             ensembleResult = await _ensemble.ScoreWithEnsembleAsync(
                 snapshot, indicators, benchmark, weights, lessons, researchSignals,
-                intelligence, researchUniverse, volatilityAssessment, regimeResult);
+                intelligence, researchUniverse, volatilityAssessment, regimeResult,
+                daysUntilEarnings, estimatedEps);
             scoring = ensembleResult.BlendedResult;
             _logger.LogInformation(
                 "[prediction] {Ticker}: ensemble scoring — agreement={Agreement:P0}, dominant={Dominant}",
@@ -375,7 +417,8 @@ public class PredictionGenerator
         {
             scoring = _scoringEngine.Evaluate(
                 snapshot, indicators, benchmark, weights, lessons, researchSignals,
-                intelligence, researchUniverse, volatilityAssessment, regimeResult);
+                intelligence, researchUniverse, volatilityAssessment, regimeResult,
+                daysUntilEarnings, estimatedEps);
         }
 
         var predType = scoring.PredictionType;

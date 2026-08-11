@@ -124,6 +124,33 @@ public class ResearchRepository
         return cleaned;
     }
 
+    /// <summary>
+    /// Append a progress entry to the research_runs.progress_log jsonb array.
+    /// This gives real-time visibility into where a scan is at (or where it died).
+    /// Non-blocking — swallows errors so it never kills the scan.
+    /// </summary>
+    public async Task LogProgressAsync(string runId, string step, string message, object? data = null)
+    {
+        if (!_db.IsConfigured) return;
+        try
+        {
+            var entry = new
+            {
+                step,
+                message,
+                timestamp = DateTimeOffset.UtcNow.ToString("o"),
+                data
+            };
+            var entryJson = System.Text.Json.JsonSerializer.Serialize(entry);
+            // Use raw SQL via RPC to append to the jsonb array atomically
+            await _db.RpcAsync("append_progress_log", new { run_id = runId, entry = entryJson });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[repo] Failed to log progress for run {RunId} step {Step} (non-blocking)", runId, step);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Market Snapshots
     // -----------------------------------------------------------------------
@@ -689,7 +716,7 @@ public class ResearchRepository
     {
         try
         {
-            await _db.InsertAsync("volatility_assessments", new
+            await _db.UpsertAsync("volatility_assessments", new
             {
                 run_id = runId,
                 ticker = a.Ticker,
@@ -711,7 +738,7 @@ public class ResearchRepository
                 volatility_risk_modifier = a.RiskModifier,
                 features_skipped = a.FeaturesSkipped.ToArray(),
                 bars_used_for_history = a.BarsUsedForHistory,
-            }, returnRows: false);
+            }, onConflict: "ticker,run_id");
             return true;
         }
         catch (Exception ex)

@@ -180,9 +180,9 @@ public class ResearchJobsController : ControllerBase
             // 2-hour hard timeout prevents stuck runs that block future scans.
             // Normal scans take 60–90 minutes. If we hit 2 hours, something hung.
             using var cts = new CancellationTokenSource(TimeSpan.FromHours(2));
+            using var scope = _scopeFactory.CreateScope();
             try
             {
-                using var scope = _scopeFactory.CreateScope();
                 var orchestrator = scope.ServiceProvider.GetRequiredService<DynamicPickOrchestrator>();
                 var result = await orchestrator.RunDynamicMorningPicksAsync(cts.Token);
 
@@ -197,11 +197,35 @@ public class ResearchJobsController : ControllerBase
             {
                 _logger.LogError("[jobs] Morning scan timed out after 2 hours traceId={TraceId}", traceId ?? "(none)");
                 _tracker.MarkFailed("morning_scan", "Timed out after 2 hours");
+                try
+                {
+                    var repo = scope.ServiceProvider.GetRequiredService<ResearchRepository>();
+                    var latestRun = await repo.GetRunningJobAsync("morning_scan");
+                    if (latestRun is not null)
+                    {
+                        await repo.LogProgressAsync(latestRun.Id, "timeout", "TIMED OUT after 2 hours — process killed");
+                        await repo.CompleteResearchRunAsync(latestRun.Id, "Timed out after 2 hours", 0, 0, ["timeout_2h"]);
+                    }
+                }
+                catch { /* best-effort */ }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[jobs] Morning scan failed traceId={TraceId}", traceId ?? "(none)");
                 _tracker.MarkFailed("morning_scan", ex.Message);
+                try
+                {
+                    var repo = scope.ServiceProvider.GetRequiredService<ResearchRepository>();
+                    var latestRun = await repo.GetRunningJobAsync("morning_scan");
+                    if (latestRun is not null)
+                    {
+                        await repo.LogProgressAsync(latestRun.Id, "crash",
+                            $"CRASHED: {ex.GetType().Name}: {ex.Message}",
+                            new { stackTrace = ex.StackTrace?[..Math.Min(500, ex.StackTrace?.Length ?? 0)] });
+                        await repo.CompleteResearchRunAsync(latestRun.Id, $"Crashed: {ex.Message}", 0, 0, [ex.Message]);
+                    }
+                }
+                catch { /* best-effort */ }
             }
         });
 

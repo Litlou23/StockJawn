@@ -124,9 +124,9 @@ public sealed class StockFitClient
         {
             try
             {
-                // Only throttle on first attempt — retries shouldn't re-queue
-                if (attempt == 0) await ThrottleAsync();
-                else await Task.Delay((attempt) * 2000, cancellationToken); // 2s, 4s backoff
+                // Always throttle — retries must also respect rate limits
+                // to prevent retry pileups from exceeding the per-minute cap.
+                await ThrottleAsync();
 
                 var resp = await _http.GetAsync(url, cancellationToken);
                 var body = await resp.Content.ReadAsStringAsync(cancellationToken);

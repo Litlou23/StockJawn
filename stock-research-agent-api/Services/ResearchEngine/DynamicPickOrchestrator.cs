@@ -129,6 +129,8 @@ public class DynamicPickOrchestrator
             errors.Add($"evidence-recording: {ex.Message}");
         }
 
+        await _researchRepo.LogProgressAsync(scan.RunId, "building_candidates",
+            $"Building paper stock candidates from {runPredictions.Count} champion predictions");
         _logger.LogInformation("[dynamic] Wrapping {Count} champion predictions as paper stock candidates", runPredictions.Count);
 
         // 3. Build stock candidates from champion predictions, then batch-save
@@ -222,6 +224,9 @@ public class DynamicPickOrchestrator
             .Select(b => b.SavedCandidate!)
             .ToList();
 
+        await _researchRepo.LogProgressAsync(scan.RunId, "candidates_saved",
+            $"Saved {savedStockCandidates.Count} paper stock candidates ({stockSaveFailures} failures)");
+
         // 5. Auto-open portfolio positions via extracted service
         var actionableCandidates = savedStockCandidates
             .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)
@@ -235,6 +240,10 @@ public class DynamicPickOrchestrator
                      $". {optionEligible} were learning-eligible for options. " +
                      $"Saved {optionResult.OptionsGenerated} paper option candidates and blocked {optionResult.BlockedCandidates}." +
                      (portfolioPositionsOpened > 0 ? $" Opened {portfolioPositionsOpened} portfolio positions." : "");
+
+        await _researchRepo.LogProgressAsync(scan.RunId, "orchestrator_complete",
+            $"Orchestrator done: {savedStockCandidates.Count} candidates, {portfolioPositionsOpened} positions opened, {optionResult.OptionsGenerated} options",
+            new { candidates = savedStockCandidates.Count, positionsOpened = portfolioPositionsOpened, options = optionResult.OptionsGenerated, errors = errors.Count });
 
         return new DynamicMorningResult
         {

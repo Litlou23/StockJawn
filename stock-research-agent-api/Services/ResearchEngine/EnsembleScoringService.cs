@@ -86,7 +86,9 @@ public class EnsembleScoringService
         MarketIntelligenceContext? intelligence = null,
         ResearchUniverseContext? researchUniverse = null,
         VolatilityOpportunityAssessment? volatilityAssessment = null,
-        MarketRegimeResult? marketRegimeResult = null)
+        MarketRegimeResult? marketRegimeResult = null,
+        int? daysUntilEarnings = null,
+        double? estimatedEps = null)
     {
         var modelAccuracies = await GetModelAccuraciesAsync();
         var modelScores = new List<ModelScore>();
@@ -104,7 +106,7 @@ public class EnsembleScoringService
             }
 
             var result = _scoringEngine.Evaluate(
-                snapshot, indicators, benchmark, adjustedWeights, lessons, researchSignals, intelligence, researchUniverse, volatilityAssessment, marketRegimeResult);
+                snapshot, indicators, benchmark, adjustedWeights, lessons, researchSignals, intelligence, researchUniverse, volatilityAssessment, marketRegimeResult, daysUntilEarnings, estimatedEps);
 
             var accuracy = modelAccuracies.GetValueOrDefault(modelName, 0.5);
             // Weight = accuracy squared to amplify good models

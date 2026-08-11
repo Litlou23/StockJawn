@@ -8,9 +8,42 @@ public class CatalystEvaluator : ICatalystEvaluator
     {
         var news = context.Snapshot.NewsContext;
         var signals = new List<string>();
-        if (news.Count == 0)
+        double bull = 0, bear = 0;
+        var weights = context.LearningData.Weights;
+
+        // ── Earnings calendar proximity boost ──────────────────────────
+        // Upcoming earnings are a major catalyst regardless of news sentiment.
+        // Boost both bull and bear (earnings = high volatility both directions).
+        // Checked BEFORE news-empty short-circuit so earnings-only catalysts still score.
+        if (context.DaysUntilEarnings is not null)
         {
-            signals.Add("Catalyst: no recent news");
+            var daysOut = context.DaysUntilEarnings.Value;
+            double earningsBoost = daysOut switch
+            {
+                0 => 10,    // Reporting today — maximum catalyst impact
+                1 => 8,     // Tomorrow — very high
+                2 => 6,     // 2 days out — strong
+                3 => 5,     // 3 days — moderate-strong
+                <= 5 => 3,  // Within a week — moderate
+                <= 7 => 2,  // Week out — mild awareness
+                _ => 0,
+            };
+
+            if (earningsBoost > 0)
+            {
+                bull += earningsBoost;
+                bear += earningsBoost;
+                var epsNote = context.EstimatedEps is not null
+                    ? $", est EPS=${context.EstimatedEps:F2}"
+                    : "";
+                signals.Add($"Catalyst: earnings in {daysOut}d{epsNote} — volatility boost +{earningsBoost:F0}");
+            }
+        }
+
+        // No news and no earnings — nothing to score
+        if (news.Count == 0 && bull == 0)
+        {
+            signals.Add("Catalyst: no recent news or upcoming earnings");
             return new EvaluatorOutput
             {
                 Kind = Kind,
@@ -24,8 +57,23 @@ public class CatalystEvaluator : ICatalystEvaluator
             };
         }
 
-        double bull = 0, bear = 0;
-        var weights = context.LearningData.Weights;
+        if (news.Count == 0)
+        {
+            // Earnings-only catalyst — no news to score, just return earnings boost
+            return new EvaluatorOutput
+            {
+                Kind = Kind,
+                BullishContribution = Math.Clamp(bull, 0, 25),
+                BearishContribution = Math.Clamp(bear, 0, 25),
+                DebugSignals = signals,
+                DebugInformation = new EvaluatorReasoning
+                {
+                    EvaluatorName = nameof(CatalystEvaluator),
+                    Summary = "Earnings calendar catalyst — upcoming report boosts volatility expectation.",
+                    Reasons = signals,
+                },
+            };
+        }
 
         var sources = news.Select(n => n.SourceName).Distinct().Count();
         if (sources >= 3) { bull += 3; bear += 3; signals.Add($"Catalyst: {sources} sources confirming"); }
@@ -72,7 +120,13 @@ public class CatalystEvaluator : ICatalystEvaluator
     public double ScoreCatalystStrength(EvaluationContext context)
     {
         var news = context.Snapshot.NewsContext;
-        if (news.Count == 0) return 0;
+        if (news.Count == 0 && context.DaysUntilEarnings is null) return 0;
+        if (news.Count == 0)
+        {
+            // Earnings-only catalyst strength
+            double earningsOnly = context.DaysUntilEarnings <= 5 ? 6 : context.DaysUntilEarnings <= 7 ? 3 : 0;
+            return Math.Clamp(earningsOnly, 0, 25);
+        }
 
         double strength = 0;
         strength += news.Count switch
@@ -128,6 +182,12 @@ public class CatalystEvaluator : ICatalystEvaluator
         var sourceCount = news.Select(n => n.SourceName).Distinct().Count();
         if (sourceCount >= 4) strength += 2;
         else if (sourceCount >= 2) strength += 1;
+
+        // Earnings calendar proximity — strongest single catalyst signal
+        if (context.DaysUntilEarnings is not null && context.DaysUntilEarnings <= 5)
+            strength += 6;
+        else if (context.DaysUntilEarnings is not null && context.DaysUntilEarnings <= 7)
+            strength += 3;
 
         return Math.Clamp(strength, 0, 25);
     }

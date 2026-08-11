@@ -93,15 +93,20 @@ public class DailyResearchRunService
         try
         {
             // 1. Build market snapshots from research candidates
+            await _repo.LogProgressAsync(run.Id, "load_candidates", "Loading research candidates...");
             var (tickers, assetLookup) = await GetResearchCandidatesAsync();
 
             if (tickers.Length == 0)
             {
                 _logger.LogWarning("[research-engine] No research candidates — Research Universe is empty and watchlist fallback returned nothing");
+                await _repo.LogProgressAsync(run.Id, "no_candidates", "No research candidates found — aborting");
                 await _repo.CompleteResearchRunAsync(run.Id, "No research candidates. Run discovery first to populate the Research Universe.", 0, 0,
                     ["No research candidates"]);
                 return new MorningScanResult { RunId = run.Id, Report = "No research candidates. Run discovery first to populate the Research Universe.", Errors = ["No research candidates"] };
             }
+
+            await _repo.LogProgressAsync(run.Id, "candidates_loaded", $"Loaded {tickers.Length} research candidates",
+                new { count = tickers.Length, tickers = string.Join(", ", tickers.Take(30)) });
 
             _logger.LogInformation("[research-engine] Building snapshots for {Count} research candidates: [{Tickers}]",
                 tickers.Length, string.Join(", ", tickers));
@@ -125,7 +130,10 @@ public class DailyResearchRunService
                     throttle.Release();
                 }
             });
+            await _repo.LogProgressAsync(run.Id, "building_snapshots", $"Building market snapshots for {tickers.Length} tickers (concurrency={maxConcurrency})...");
             var snapshots = (await Task.WhenAll(snapshotTasks)).ToList();
+            await _repo.LogProgressAsync(run.Id, "snapshots_built", $"Built {snapshots.Count} market snapshots",
+                new { count = snapshots.Count });
 
             // Save snapshots
             var snapshotRows = snapshots.Select(s => (object)new
@@ -154,6 +162,9 @@ public class DailyResearchRunService
             _logger.LogInformation("[research-engine] Generating predictions for {Count} profile(s): {Names}",
                 profilesToRun.Count, string.Join(", ", profilesToRun.Select(p => p.Name)));
 
+            await _repo.LogProgressAsync(run.Id, "generating_predictions",
+                $"Generating predictions for {profilesToRun.Count} profile(s): {string.Join(", ", profilesToRun.Select(p => p.Name))}");
+
             // 3. Generate predictions per profile (snapshots are shared)
             var allPredictions = new List<PredictionCandidate>();
             var totalAllInputs = new List<PredictionInput>();
@@ -162,16 +173,20 @@ public class DailyResearchRunService
             foreach (var (profileId, profileName) in profilesToRun)
             {
                 _logger.LogInformation("[research-engine] Generating predictions for profile '{Name}'...", profileName);
+                await _repo.LogProgressAsync(run.Id, "profile_start", $"Starting predictions for profile '{profileName}'");
                 var (predictions, allInputs, pendingSupersessions) = await _predGen.GeneratePredictionsForWatchlistAsync(
                     tickers, run.Id, snapshots, assetLookup, profileId: profileId);
 
                 _logger.LogInformation("[research-engine] Profile '{Name}': {Count} predictions", profileName, predictions.Count);
+                await _repo.LogProgressAsync(run.Id, "profile_done", $"Profile '{profileName}': {predictions.Count} predictions");
                 allPredictions.AddRange(predictions);
                 totalAllInputs.AddRange(allInputs);
                 totalSupersessions.AddRange(pendingSupersessions);
             }
 
             // Save all predictions
+            await _repo.LogProgressAsync(run.Id, "saving_predictions",
+                $"Saving {allPredictions.Count} predictions to database...");
             var predRows = allPredictions.Select(p => (object)new
             {
                 run_id = p.RunId,
@@ -298,10 +313,15 @@ public class DailyResearchRunService
                 errors.Add(msg);
             }
 
+            await _repo.LogProgressAsync(run.Id, "predictions_saved",
+                $"Saved {ids.Count}/{allPredictions.Count} predictions",
+                new { saved = ids.Count, total = allPredictions.Count, errors = errors.Count });
+
             // 4. Report
             var report = _reports.GenerateMorningReport(allPredictions, snapshots);
 
             // 5. Complete run — report actual persisted count, not in-memory count
+            await _repo.LogProgressAsync(run.Id, "scan_complete", $"Morning scan complete: {ids.Count} predictions");
             await _repo.CompleteResearchRunAsync(run.Id, report, ids.Count, 0, errors);
 
             _logger.LogInformation("[research-engine] Morning scan complete: {Count} predictions across {Profiles} profile(s)",
@@ -311,6 +331,8 @@ public class DailyResearchRunService
         catch (Exception ex)
         {
             errors.Add(ex.Message);
+            await _repo.LogProgressAsync(run.Id, "scan_failed", $"Morning scan FAILED: {ex.Message}",
+                new { exceptionType = ex.GetType().Name, stackTrace = ex.StackTrace?[..Math.Min(500, ex.StackTrace?.Length ?? 0)] });
             await _repo.CompleteResearchRunAsync(run.Id, $"Morning scan failed: {ex.Message}", 0, 0, errors);
             _logger.LogError(ex, "[research-engine] Morning scan failed");
             return new MorningScanResult { RunId = run.Id, Report = $"Morning scan failed: {ex.Message}", Errors = errors };
@@ -399,47 +421,107 @@ public class DailyResearchRunService
             .ToList();
 
         // Filter: skip low-value tickers that would waste API quota.
-        // Keep tickers that are either:
-        //   - Past the Discovered stage (actively being researched), OR
-        //   - Have an interest score >= 15 (meaningful evidence accumulated)
-        // Then cap total to stay within API rate limits.
-        const int minInterestScore = 15;
-        const int maxCandidates = 150;
+        // Raise threshold high enough to exclude micro-cap noise but keep
+        // anything with real evidence. Also filter warrants/preferred shares
+        // by ticker pattern — they burn API calls and are untradeable.
+        const int minInterestScore = 30;
+        const int maxCandidates = 80;
 
         var qualified = deduped
+            .Where(a => !IsUntradeable(a.Ticker))
             .Where(a => a.CurrentState != ResearchState.Discovered || a.InterestScore >= minInterestScore)
             .OrderByDescending(a => a.InterestScore)
-            .Take(maxCandidates)
             .ToList();
 
-        var skipped = deduped.Count - qualified.Count;
-        if (skipped > 0)
-            _logger.LogInformation(
-                "[research-engine] Filtered {Skipped} low-priority tickers " +
-                "(score < {MinScore} in Discovered state or beyond cap of {Cap}). " +
-                "{Qualified} candidates proceeding.",
-                skipped, minInterestScore, maxCandidates, qualified.Count);
+        // Always include active watchlist tickers first — these are the ones
+        // the portfolio actually trades. Fill remaining slots from top universe tickers.
+        var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
+        var watchlistTickers = new HashSet<string>(
+            activeWatchlist.Select(w => w.Ticker),
+            StringComparer.OrdinalIgnoreCase);
 
-        var assetLookup = qualified.ToDictionary(
+        var watchlistCandidates = qualified.Where(a => watchlistTickers.Contains(a.Ticker)).ToList();
+        var universeCandidates = qualified.Where(a => !watchlistTickers.Contains(a.Ticker)).ToList();
+
+        // Watchlist tickers that aren't in the universe yet still get scanned
+        var missingWatchlistTickers = watchlistTickers
+            .Where(t => !watchlistCandidates.Any(a => a.Ticker.Equals(t, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        var remainingSlots = maxCandidates - watchlistCandidates.Count - missingWatchlistTickers.Count;
+        var finalCandidates = watchlistCandidates
+            .Concat(universeCandidates.Take(Math.Max(0, remainingSlots)))
+            .ToList();
+
+        var skipped = deduped.Count - finalCandidates.Count - missingWatchlistTickers.Count;
+        _logger.LogInformation(
+            "[research-engine] Candidates: {Watchlist} watchlist + {Universe} universe = {Total} (skipped {Skipped}, cap {Cap})",
+            watchlistCandidates.Count + missingWatchlistTickers.Count,
+            Math.Max(0, finalCandidates.Count - watchlistCandidates.Count),
+            finalCandidates.Count + missingWatchlistTickers.Count,
+            skipped, maxCandidates);
+
+        var assetLookup = finalCandidates.ToDictionary(
             a => a.Ticker,
             a => a,
             StringComparer.OrdinalIgnoreCase);
 
+        // Add watchlist tickers that weren't in universe (no ResearchAsset, but still scan them)
+        foreach (var t in missingWatchlistTickers)
+            assetLookup.TryAdd(t, new ResearchAsset
+            {
+                Ticker = t,
+                CurrentState = ResearchState.Monitoring,
+                InterestScore = 50,
+            });
+
         if (assetLookup.Count > 0)
         {
-            _logger.LogInformation(
-                "[research-engine] Sourced {Count} candidates from Research Universe",
-                assetLookup.Count);
             return (assetLookup.Keys.ToArray(), assetLookup);
         }
 
-        // Fallback: if Research Universe is empty, use watchlist so we don't
-        // produce zero predictions during the bootstrap period.
-        _logger.LogWarning(
-            "[research-engine] Research Universe is empty — falling back to watchlist");
-        var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
-        var tickers = activeWatchlist.Select(w => w.Ticker).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        return (tickers, new Dictionary<string, ResearchAsset>(StringComparer.OrdinalIgnoreCase));
+        // Fallback: if both universe and watchlist are empty
+        _logger.LogWarning("[research-engine] No candidates from universe or watchlist");
+        return ([], new Dictionary<string, ResearchAsset>(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Filters out warrants, preferred shares, units, rights, and other
+    /// untradeable ticker patterns that waste API quota and AI tokens.
+    /// </summary>
+    private static bool IsUntradeable(string ticker)
+    {
+        if (string.IsNullOrEmpty(ticker)) return true;
+
+        // Tickers longer than 5 chars are almost always warrants, units, or preferred
+        if (ticker.Length > 5) return true;
+
+        if (ticker.Length == 5)
+        {
+            // Warrants: end in W, U (units), Z (when-issued)
+            if (ticker.EndsWith('W') || ticker.EndsWith('U') || ticker.EndsWith('Z'))
+                return true;
+            // Warrant suffixes: WS, RT (rights)
+            if (ticker.EndsWith("WS") || ticker.EndsWith("RT"))
+                return true;
+        }
+
+        // Preferred shares: tickers containing a hyphen (e.g. BAC-PL) or
+        // 4-5 char tickers ending in common preferred patterns
+        if (ticker.Contains('-')) return true;
+
+        if (ticker.Length >= 4)
+        {
+            // Preferred share suffixes: PN, PR, PRA-PRZ pattern
+            if (ticker.EndsWith("PN") || ticker.EndsWith("PR"))
+                return true;
+            // 5-char tickers ending in P + letter (e.g. BPYPN, GOOGL excluded by not matching)
+            if (ticker.Length == 5 && ticker[3] == 'P' && char.IsLetter(ticker[4])
+                && ticker[4] != 'L' && ticker[4] != 'E' && ticker[4] != 'T')
+                return true;
+        }
+
+        return false;
     }
 
     // -----------------------------------------------------------------------

@@ -53,5 +53,7 @@ public interface IScoringEngine
         MarketIntelligenceContext? intelligence = null,
         ResearchUniverseContext? researchUniverse = null,
         VolatilityOpportunityAssessment? volatilityAssessment = null,
-        MarketRegimeResult? marketRegimeResult = null);
+        MarketRegimeResult? marketRegimeResult = null,
+        int? daysUntilEarnings = null,
+        double? estimatedEps = null);
 }
