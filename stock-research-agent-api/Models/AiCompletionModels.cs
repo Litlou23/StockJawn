@@ -49,6 +49,14 @@ public class AiCompletionRequest
 
     /// <summary>Tool definitions — when present, the model may respond with tool_calls instead of text.</summary>
     public List<AiToolDefinitionDto>? Tools { get; set; }
+
+    /// <summary>
+    /// Override the global model for this single request. Uses the same
+    /// numeric mapping as scoring_weight_overrides 'openai_model':
+    ///   0=gpt-4.1-mini, 1=gpt-4.1, 4=gpt-5.6-luna, 5=gpt-5.6-terra, 6=gpt-5.6-sol
+    /// Null = use the global default from DB.
+    /// </summary>
+    public int? ModelOverride { get; set; }
 }
 
 public class AiCompletionResult

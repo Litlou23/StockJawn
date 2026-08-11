@@ -1,3 +1,4 @@
+using System.Text.Json;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
@@ -25,6 +26,7 @@ public class PortfolioLifecycleService
     private readonly MarketDataService _marketData;
     private readonly MarketStressDetector _stressDetector;
     private readonly TradeStatsProvider _tradeStats;
+    private readonly IOpenAiCompletionService _ai;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -36,6 +38,7 @@ public class PortfolioLifecycleService
         MarketDataService marketData,
         MarketStressDetector stressDetector,
         TradeStatsProvider tradeStats,
+        IOpenAiCompletionService ai,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -46,6 +49,7 @@ public class PortfolioLifecycleService
         _marketData = marketData;
         _stressDetector = stressDetector;
         _tradeStats = tradeStats;
+        _ai = ai;
         _logger = logger;
     }
 
@@ -148,6 +152,7 @@ public class PortfolioLifecycleService
         var roundTripCostPct = weights.GetValueOrDefault("round_trip_cost_pct", 0.15);
         var minBearishConfidence = (int)weights.GetValueOrDefault("min_bearish_confidence", 55);
         var bearishAllowed = weights.GetValueOrDefault("bearish_portfolio_allowed", 0.0) >= 1.0;
+        var aiEntryGateEnabled = weights.GetValueOrDefault("ai_entry_gate_enabled", 1.0) >= 1.0;
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
@@ -588,6 +593,25 @@ public class PortfolioLifecycleService
                         }
                     }
 
+                    // ── AI Trade Gate — holistic go/no-go before opening ──
+                    // AI can veto marginal trades the mechanical system approves.
+                    // Uses Terra model for quality. Only for broker/live modes by default,
+                    // or when ai_entry_gate_enabled is set.
+                    var shouldRunAiGate = aiEntryGateEnabled
+                        && challenge.TradingMode != TradingMode.paper; // Skip for pure paper to save API cost
+                    if (shouldRunAiGate)
+                    {
+                        var aiGate = await GetAiTradeGateDecisionAsync(
+                            c, livePrice ?? entryPrice, evPercent, marketRegime, aiEntryGateEnabled);
+                        if (!aiGate.Approved)
+                        {
+                            _logger.LogInformation(
+                                "[portfolio] AI REJECTED {Ticker}: {Reason}",
+                                c.Ticker, aiGate.Reason);
+                            continue;
+                        }
+                    }
+
                     var pos = await _portfolio.AutoOpenPositionAsync(
                         challenge.Id,
                         c.PredictionId,
@@ -830,6 +854,9 @@ public class PortfolioLifecycleService
         var partialTpEnabled = weights.GetValueOrDefault("partial_tp_enabled", 1.0) >= 1.0;
         var partialTpFraction = Math.Clamp(weights.GetValueOrDefault("partial_tp_fraction", 0.5), 0.1, 0.9);
 
+        // AI exit advisor: consult AI before time-stop decisions
+        var aiExitEnabled = weights.GetValueOrDefault("ai_exit_enabled", 1.0) >= 1.0;
+
         // Market stress: widen stop-losses during volatile conditions
         // so temporary drops don't trigger premature exits
         var stopMultiplier = 1.0;
@@ -1024,26 +1051,44 @@ public class PortfolioLifecycleService
                     }
                 }
 
-                // ── Time stop — kill stale positions that aren't moving ──
-                // Real scalpers don't let capital sit in dead trades. If a position
-                // hasn't moved meaningfully after its expected hold period, close it
-                // at market and redeploy the capital into better opportunities.
+                // ── Time stop — AI-enhanced exit decision ──
+                // When a position hits the time stop threshold, ask AI whether
+                // to hold or exit. AI sees the P&L, hold duration, entry reason,
+                // and makes a holistic judgment. This replaces the rigid
+                // mechanical rule with an intelligent exit decision.
                 if (limits.TimeStopHours > 0)
                 {
                     var hoursHeld = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
                     if (hoursHeld >= limits.TimeStopHours)
                     {
-                        var absMove = Math.Abs(pnlPercent);
-                        if (absMove < limits.TimeStopMinMove)
+                        if (pnlPercent < limits.TimeStopMinMove)
                         {
-                            var reason = $"TIME-STOP ({tier}): {pos.Ticker} held {hoursHeld:F0}h (limit {limits.TimeStopHours}h) " +
-                                         $"with only {pnlPercent:P1} move (min {limits.TimeStopMinMove:P1} required). " +
-                                         $"Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}. Capital redeployed.";
-                            await CloseWithReason(pos, currentPrice, reason);
-                            result.TimeStopClosed++;
-                            result.ClosedTickers.Add(pos.Ticker);
-                            _logger.LogInformation("[risk] {Reason}", reason);
-                            continue;
+                            // Ask AI for exit decision — is there a reason to keep holding?
+                            var aiDecision = await GetAiExitDecisionAsync(
+                                pos, currentPrice, pnlPercent, hoursHeld, tier, aiExitEnabled);
+
+                            if (aiDecision.ShouldExit)
+                            {
+                                var reason = $"TIME-STOP ({tier}): {pos.Ticker} held {hoursHeld:F0}h (limit {limits.TimeStopHours}h) " +
+                                             $"at {pnlPercent:P1} P&L (need +{limits.TimeStopMinMove:P1} to keep). " +
+                                             $"Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}. " +
+                                             (aiDecision.AiReason is not null
+                                                 ? $"AI: {aiDecision.AiReason}"
+                                                 : "Capital redeployed.");
+                                await CloseWithReason(pos, currentPrice, reason);
+                                result.TimeStopClosed++;
+                                result.ClosedTickers.Add(pos.Ticker);
+                                _logger.LogInformation("[risk] {Reason}", reason);
+                                if (aiDecision.AiReason is not null) result.AiExitPositions++;
+                                continue;
+                            }
+                            else
+                            {
+                                _logger.LogInformation(
+                                    "[risk] AI HOLD {Ticker}: time stop triggered but AI says hold — {Reason}",
+                                    pos.Ticker, aiDecision.AiReason ?? "no reason given");
+                                result.AiHeldPositions++;
+                            }
                         }
                     }
                 }
@@ -1051,11 +1096,16 @@ public class PortfolioLifecycleService
         }
 
         if (result.TotalClosed > 0 || result.PartialProfitsTaken > 0)
+        {
             _logger.LogWarning("[risk] Risk check complete: {Checked} positions checked, " +
                 "{SL} stop-loss, {TP} take-profit, {TS} trailing-stop, {TmS} time-stop closures, " +
                 "{Partial} partial profits taken, {HWM} high-water marks updated",
                 result.PositionsChecked, result.StopLossClosed, result.TakeProfitClosed,
                 result.TrailingStopClosed, result.TimeStopClosed, result.PartialProfitsTaken, result.HighWaterMarksUpdated);
+            if (result.AiHeldPositions > 0 || result.AiExitPositions > 0)
+                _logger.LogInformation("[risk] AI decisions: {AiHeld} held (overrode time-stop), {AiExit} exited",
+                    result.AiHeldPositions, result.AiExitPositions);
+        }
         else
             _logger.LogInformation("[risk] Risk check complete: {Checked} positions checked, no triggers hit",
                 result.PositionsChecked);
@@ -1199,6 +1249,157 @@ public class PortfolioLifecycleService
     }
 
     /// <summary>Close a position with a specific risk management reason.</summary>
+    // ── AI Exit Advisor ──────────────────────────────────────────────────
+    // When a position hits the time stop, ask AI whether to hold or exit.
+    // Uses Terra model for higher-quality decisions on real money positions.
+    // Gated by ai_exit_enabled config flag. Falls back to mechanical exit
+    // if AI is unavailable or errors.
+
+    private record AiExitDecision(bool ShouldExit, string? AiReason);
+
+    private async Task<AiExitDecision> GetAiExitDecisionAsync(
+        PortfolioPosition pos, double currentPrice, double pnlPercent,
+        double hoursHeld, RiskTier tier, bool aiEnabled)
+    {
+        // Default to mechanical exit if AI is disabled or unavailable
+        if (!aiEnabled || !_ai.IsConfigured)
+            return new AiExitDecision(true, null);
+
+        try
+        {
+            var prompt = $$"""
+                You are a trading exit advisor. A position has hit its time stop and the
+                mechanical system wants to close it. Analyze whether to EXIT or HOLD.
+
+                Position: {{pos.Ticker}}
+                Entry price: ${{pos.EntryPrice:F2}}
+                Current price: ${{currentPrice:F2}}
+                P&L: {{pnlPercent:P2}}
+                Hours held: {{hoursHeld:F0}}h
+                Tier: {{tier}}
+                Entry reason: {{pos.ReasonEntered ?? "unknown"}}
+                High water mark: ${{pos.HighWaterMark ?? pos.EntryPrice:F2}}
+
+                Rules:
+                - If the position is LOSING money, strongly favor EXIT — dead money should be redeployed
+                - If barely profitable but flat/stalling, favor EXIT
+                - Only recommend HOLD if there's a clear reason the stock hasn't moved yet
+                  but the original thesis is still intact (e.g., catalyst is upcoming,
+                  strong entry that just needs time)
+                - Be aggressive about cutting losers — profit matters more than being right
+
+                Respond in JSON: {"decision": "EXIT" or "HOLD", "reason": "one sentence why"}
+                """;
+
+            var result = await _ai.CompleteAsync(new AiCompletionRequest
+            {
+                Messages = [new AiChatMessageDto { Role = "user", Content = prompt }],
+                ResponseFormatJson = true,
+                MaxOutputTokens = 100,
+                ModelOverride = 5, // Terra — higher quality for money decisions
+            }, CancellationToken.None);
+
+            if (string.IsNullOrWhiteSpace(result.Text))
+                return new AiExitDecision(true, null);
+
+            using var doc = JsonDocument.Parse(result.Text);
+            var decision = doc.RootElement.GetProperty("decision").GetString() ?? "EXIT";
+            var reason = doc.RootElement.GetProperty("reason").GetString() ?? "";
+
+            _logger.LogInformation(
+                "[ai-exit] {Ticker} — AI says {Decision}: {Reason}",
+                pos.Ticker, decision, reason);
+
+            return new AiExitDecision(
+                decision.Equals("EXIT", StringComparison.OrdinalIgnoreCase),
+                reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ai-exit] AI exit decision failed for {Ticker}, defaulting to mechanical exit",
+                pos.Ticker);
+            return new AiExitDecision(true, null);
+        }
+    }
+
+    // ── AI Trade Gate ─────────────────────────────────────────────────────
+    // Before opening a position, ask AI for a holistic go/no-go decision.
+    // AI can veto marginal trades that mechanical scoring approves.
+    // Uses Terra model for quality. Gated by ai_entry_gate_enabled config.
+
+    private record AiTradeGateResult(bool Approved, string? Reason);
+
+    private async Task<AiTradeGateResult> GetAiTradeGateDecisionAsync(
+        PaperStockCandidate candidate, double livePrice, double? evPercent,
+        string? marketRegime, bool aiEnabled)
+    {
+        if (!aiEnabled || !_ai.IsConfigured)
+            return new AiTradeGateResult(true, null);
+
+        try
+        {
+            var evDisplay = evPercent is not null ? $"{evPercent:F1}%" : "n/a";
+            var prompt = $$"""
+                You are a trading entry advisor. The mechanical scoring system has approved
+                this trade. Make a final GO or NO-GO decision.
+
+                Stock: {{candidate.Ticker}}
+                Direction: {{candidate.WinningDirection}}
+                Timeframe: {{candidate.Timeframe}}
+                Confidence: {{candidate.ConfidenceScore}}
+                Expected Value: {{evDisplay}}
+                Entry price: ${{candidate.EntryPrice:F2}}
+                Target price: ${{candidate.TargetPrice:F2}}
+                Stop price: ${{candidate.StopPrice:F2}}
+                Live price: ${{livePrice:F2}}
+                Quality tier: {{candidate.QualityTier}}
+                Market regime: {{marketRegime ?? "unknown"}}
+                Candidate mode: {{candidate.CandidateMode}}
+
+                Rules:
+                - APPROVE if the risk/reward makes sense and the setup looks clean
+                - REJECT if:
+                  * The stock has already moved significantly toward the target (chasing)
+                  * The confidence is borderline and the EV is thin
+                  * The quality tier is weak with low confidence
+                  * Something about the setup looks off (stop too wide, target too ambitious)
+                - Be selective — we want FEWER, BETTER trades, not more trades
+                - Default to APPROVE unless you see a clear reason to reject
+
+                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence why"}
+                """;
+
+            var result = await _ai.CompleteAsync(new AiCompletionRequest
+            {
+                Messages = [new AiChatMessageDto { Role = "user", Content = prompt }],
+                ResponseFormatJson = true,
+                MaxOutputTokens = 100,
+                ModelOverride = 5, // Terra for quality decisions
+            }, CancellationToken.None);
+
+            if (string.IsNullOrWhiteSpace(result.Text))
+                return new AiTradeGateResult(true, null);
+
+            using var doc = JsonDocument.Parse(result.Text);
+            var decision = doc.RootElement.GetProperty("decision").GetString() ?? "APPROVE";
+            var reason = doc.RootElement.GetProperty("reason").GetString() ?? "";
+
+            _logger.LogInformation(
+                "[ai-gate] {Ticker} — AI says {Decision}: {Reason}",
+                candidate.Ticker, decision, reason);
+
+            return new AiTradeGateResult(
+                decision.Equals("APPROVE", StringComparison.OrdinalIgnoreCase),
+                reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ai-gate] AI trade gate failed for {Ticker}, defaulting to approve",
+                candidate.Ticker);
+            return new AiTradeGateResult(true, null);
+        }
+    }
+
     private async Task CloseWithReason(PortfolioPosition pos, double exitPrice, string reason)
     {
         await _portfolio.ClosePositionAsync(new ClosePositionRequest
@@ -1308,6 +1509,8 @@ public record RiskCheckResult
     public int TimeStopClosed { get; set; }
     public int HighWaterMarksUpdated { get; set; }
     public int PartialProfitsTaken { get; set; }
+    public int AiHeldPositions { get; set; }
+    public int AiExitPositions { get; set; }
     public int TotalClosed => StopLossClosed + TakeProfitClosed + TrailingStopClosed + TimeStopClosed;
     /// <summary>Tickers closed this cycle — used to prevent immediate same-ticker reentry.</summary>
     public HashSet<string> ClosedTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);

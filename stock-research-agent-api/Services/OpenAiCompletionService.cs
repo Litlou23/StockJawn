@@ -83,7 +83,11 @@ public class OpenAiCompletionService : IOpenAiCompletionService
             return new AiCompletionResult { Text = "[OpenAI not configured — OPENAI_API_KEY is missing]" };
         }
 
-        var model = await ResolveModelAsync();
+        // Per-request model override for high-stakes decisions (e.g., Terra for
+        // portfolio entry/exit) while keeping Luna for bulk predictions.
+        var model = request.ModelOverride is { } overrideKey && ModelMap.TryGetValue(overrideKey, out var overrideModel)
+            ? overrideModel
+            : await ResolveModelAsync();
         var client = _clientCache.GetOrAdd(model, m => new ChatClient(m, _apiKey));
 
         var messages = request.Messages.Select(ToChatMessage).ToList();
