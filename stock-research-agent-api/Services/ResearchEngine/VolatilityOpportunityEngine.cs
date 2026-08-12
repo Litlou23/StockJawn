@@ -148,13 +148,22 @@ public class VolatilityOpportunityEngine
             return OpportunityType.SqueezeBreakout;
 
         // ── MomentumContinuation ────────────────────────────────
-        // Gap up with volume in an expanding volatility regime, RSI mid-range.
-        // Rule: gap up AND volume ratio > 2.0 AND RSI 45-72 AND ATR pctile > 60
+        // Gap up with volume in an expanding volatility regime.
+        // For extreme gaps (10%+), RSI will naturally be overbought — relax RSI cap.
+        // Standard rule: gap up AND volume ratio > 2.0 AND RSI 45-72 AND ATR pctile > 60
+        // Extreme gap rule: gap up AND volume ratio > 2.0 AND gap >= 10% (RSI uncapped)
         if (gapDir == GapDirection.Up
-            && indicators.VolumeRatio is not null && indicators.VolumeRatio > 2.0
-            && indicators.Rsi14 is not null && indicators.Rsi14 >= 45 && indicators.Rsi14 <= 72
-            && atrPctile > 60)
-            return OpportunityType.MomentumContinuation;
+            && indicators.VolumeRatio is not null && indicators.VolumeRatio > 2.0)
+        {
+            bool isExtremeGap = gapType >= GapType.Extreme;
+            bool rsiInRange = indicators.Rsi14 is not null && indicators.Rsi14 >= 45 && indicators.Rsi14 <= 72;
+            bool atrExpanding = atrPctile > 60;
+
+            // Extreme gaps with volume are momentum regardless of RSI/ATR
+            // Standard gaps need RSI mid-range + ATR expanding
+            if (isExtremeGap || (rsiInRange && atrExpanding))
+                return OpportunityType.MomentumContinuation;
+        }
 
         // ── FailedBounce ────────────────────────────────────────
         // Price near support + high volatility + volume drying up.

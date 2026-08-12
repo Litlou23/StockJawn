@@ -171,23 +171,32 @@ public class VolatilityEvaluator : IVolatilityEvaluator
         // Only score significant gaps (>= 3%)
         if (a.GapClassification < GapType.Significant) return;
 
+        // Scale score with gap magnitude: Significant(3-5%)=+2, Large(5-10%)=+3, Extreme(10%+)=+5
+        double gapScore = a.GapClassification switch
+        {
+            GapType.Extreme => 5,
+            GapType.Large => 3,
+            _ => 2  // Significant
+        };
+
         if (a.GapDir == GapDirection.Up && a.GapWithVolume)
         {
-            bull += 2;
-            signals.Add($"+2 bull: Gap up {a.GapPercent:F1}% with volume confirmation");
+            bull += gapScore;
+            signals.Add($"+{gapScore} bull: Gap up {a.GapPercent:F1}% ({a.GapClassification}) with volume confirmation");
         }
         else if (a.GapDir == GapDirection.Down && a.GapWithVolume)
         {
             // Gap down with volume is bearish pressure, but may be dip opportunity
             // (DipAfterPanic already scored separately if RSI confirms)
-            bear += 2;
-            signals.Add($"+2 bear: Gap down {a.GapPercent:F1}% with volume confirmation");
+            bear += gapScore;
+            signals.Add($"+{gapScore} bear: Gap down {a.GapPercent:F1}% ({a.GapClassification}) with volume confirmation");
         }
         else if (a.GapClassification >= GapType.Large && !a.GapWithVolume)
         {
-            // Large gap without volume — suspicious, mild caution
-            bear += 1;
-            signals.Add($"+1 bear: Large gap {a.GapPercent:F1}% without volume — thin-market move");
+            // Large gap without volume — suspicious, mild caution (still scale slightly)
+            double cautionScore = a.GapClassification == GapType.Extreme ? 2 : 1;
+            bear += cautionScore;
+            signals.Add($"+{cautionScore} bear: Large gap {a.GapPercent:F1}% without volume — thin-market move");
         }
     }
 
