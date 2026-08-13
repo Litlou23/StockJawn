@@ -284,7 +284,7 @@ export default function ProfileAnalyticsPage() {
               <div className="grid grid-cols-2 gap-2 text-xs">
                 <div><span className="text-zinc-500">Total</span><div className="text-zinc-200 font-medium tabular-nums">{a.total}</div></div>
                 <div><span className="text-zinc-500">Evaluated</span><div className="text-zinc-200 font-medium tabular-nums">{a.evaluated ?? 0}</div></div>
-                <div><span className="text-zinc-500">Win Rate</span><div className={`font-medium tabular-nums ${(a.winRate ?? 0) >= 50 ? 'text-green-400' : 'text-red-400'}`}>{a.winRate ?? 0}%</div></div>
+                <div><span className="text-zinc-500">Win Rate</span><div className={`font-medium tabular-nums ${(a.evaluated ?? 0) < 10 ? 'text-zinc-500' : (a.winRate ?? 0) >= 50 ? 'text-green-400' : 'text-red-400'}`}>{a.winRate ?? 0}%{(a.evaluated ?? 0) < 10 ? ' ⚠' : ''}</div>{(a.evaluated ?? 0) < 10 && <span className="text-[10px] text-zinc-600">low sample</span>}</div>
                 <div><span className="text-zinc-500">Avg Return</span><div className={`font-medium tabular-nums ${(a.avgReturn ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>{(a.avgReturn ?? 0) >= 0 ? '+' : ''}{(a.avgReturn ?? 0).toFixed(2)}%</div></div>
                 <div><span className="text-zinc-500">Bull</span><div className="text-zinc-200 tabular-nums">{a.bullAccuracy ?? 0}% <span className="text-zinc-500">({a.bullCount ?? 0})</span></div></div>
                 <div><span className="text-zinc-500">Bear</span><div className="text-zinc-200 tabular-nums">{a.bearAccuracy ?? 0}% <span className="text-zinc-500">({a.bearCount ?? 0})</span></div></div>

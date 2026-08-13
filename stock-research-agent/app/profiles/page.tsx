@@ -294,7 +294,7 @@ export default function ProfilesPage() {
             </select>
             <label className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer">
               <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} className="rounded border-zinc-600 bg-zinc-800 text-violet-500" />
-              Show archived
+              Show disabled
             </label>
             <button onClick={() => setShowHelp(h => !h)} className="px-3 py-2 text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors">
               {showHelp ? 'Hide Help' : '? Help'}
@@ -377,7 +377,7 @@ export default function ProfilesPage() {
               </thead>
               <tbody>
                 {profiles.filter(p => {
-                    if (!showArchived && p.experimentStatus === 'archived') return false;
+                    if (!showArchived && (p.experimentStatus === 'archived' || !p.isEnabled)) return false;
                     if (roleFilter && p.role !== roleFilter) return false;
                     if (statusFilter && p.experimentStatus !== statusFilter) return false;
                     return true;
@@ -450,7 +450,7 @@ export default function ProfilesPage() {
                   );
                 })}
                 {profiles.filter(p => {
-                    if (!showArchived && p.experimentStatus === 'archived') return false;
+                    if (!showArchived && (p.experimentStatus === 'archived' || !p.isEnabled)) return false;
                     if (roleFilter && p.role !== roleFilter) return false;
                     if (statusFilter && p.experimentStatus !== statusFilter) return false;
                     return true;

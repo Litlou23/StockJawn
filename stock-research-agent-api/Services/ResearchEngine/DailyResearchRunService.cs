@@ -156,7 +156,7 @@ public class DailyResearchRunService
                 profilesToRun.Add((champion.Id, champion.ProfileName));
 
             var allProfiles = await _profileRepo.GetAllProfilesAsync();
-            foreach (var p in allProfiles.Where(p => p.Role == ProfileRole.challenger && p.ExperimentStatus == ExperimentStatus.testing && p.IsEnabled))
+            foreach (var p in allProfiles.Where(p => p.Role == ProfileRole.challenger && p.ExperimentStatus is ExperimentStatus.testing or ExperimentStatus.active && p.IsEnabled))
                 profilesToRun.Add((p.Id, p.ProfileName));
 
             _logger.LogInformation("[research-engine] Generating predictions for {Count} profile(s): {Names}",
