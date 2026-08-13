@@ -354,6 +354,12 @@ public class PortfolioLifecycleService
 
             var slotsAvailable = maxPositions - currentOpenCount;
             var opened = 0;
+            // For broker challenges, track tickers opened this run to prevent
+            // duplicate positions on the same stock from different profiles.
+            // Paper challenges allow independent profile trades.
+            var brokerTickersOpened = challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                : null;
 
             // ── Fetch real trade stats for Kelly criterion position sizing ──
             var tradeStats = await _tradeStats.GetStatsAsync();
@@ -418,8 +424,9 @@ public class PortfolioLifecycleService
                     }
                 }
 
-                // Skip tickers we already hold
-                if (openPositions.Any(p => p.Ticker == c.Ticker))
+                // Skip tickers we already hold (or just opened this run for broker challenges)
+                if (openPositions.Any(p => p.Ticker == c.Ticker)
+                    || (brokerTickersOpened?.Contains(c.Ticker) == true))
                 {
                     _logger.LogDebug("[portfolio] Skipping {Ticker} — already held in challenge {Challenge}",
                         c.Ticker, challenge.Name);
@@ -635,6 +642,7 @@ public class PortfolioLifecycleService
                     {
                         portfolioPositionsOpened++;
                         opened++;
+                        brokerTickersOpened?.Add(c.Ticker);
 
                         // Update sector count so subsequent candidates respect the limit
                         if (!string.IsNullOrEmpty(candidateSector))
