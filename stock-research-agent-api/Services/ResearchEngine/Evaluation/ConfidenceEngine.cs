@@ -107,6 +107,7 @@ public class ConfidenceEngine : IConfidenceEngine
             EvaluatorKind.trend,
             EvaluatorKind.momentum,
             EvaluatorKind.market_context,
+            EvaluatorKind.catalyst,
         };
         double weightedAligned = 0, weightedConflicting = 0;
         bool winIsBullish = winningDirection == "bullish";
@@ -424,8 +425,11 @@ public class ConfidenceEngine : IConfidenceEngine
 
         if (riskAssessment.EarningsNear)
         {
-            confidence = Math.Min(confidence, 45);
-            capReason = "Earnings within 3 days — binary event";
+            // Earnings are binary events but also the biggest movers.
+            // Cap at 65 instead of 45 — still cautious, but doesn't kill
+            // post-earnings momentum plays where the catalyst already fired.
+            confidence = Math.Min(confidence, 65);
+            capReason = "Earnings within 3 days — binary event (cap 65)";
         }
 
         // ── Historical volatility calibration (Phase 3) ──────────────
