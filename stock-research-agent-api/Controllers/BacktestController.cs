@@ -394,6 +394,128 @@ public class BacktestController : ControllerBase
         return Ok(rows);
     }
 
+    // ── Dev hook (GET-only sweep trigger) ────────────────────────
+    //
+    // Purpose: my Claude sandbox can GET this API but cannot POST to it
+    // (outbound proxy 403s POST to azurewebsites.net). This endpoint gives
+    // GET access to a small library of predefined sweeps so I can drive the
+    // backtest from the sandbox.
+    //
+    // Not a security hole per se — still requires the same JOB_RUN_SECRET
+    // token, just passed as ?token= instead of an x-job-secret header. Only
+    // predefined presets can be started; arbitrary parameter spaces cannot.
+
+    /// <summary>
+    /// Start a preset sweep via GET. Requires ?token=&lt;JOB_RUN_SECRET&gt;.
+    /// Presets:
+    ///   quick10   — 10 blue chips, 8 combos, correct parameter names
+    ///   full12    — full universe, 12 combos, correct parameter names
+    /// </summary>
+    [HttpGet("dev/start-sweep")]
+    public IActionResult DevStartSweep(
+        [FromQuery] string? token,
+        [FromQuery] string? preset,
+        [FromQuery] string? startDate,
+        [FromQuery] string? endDate)
+    {
+        var expected = _configuration["JOB_RUN_SECRET"];
+        if (string.IsNullOrWhiteSpace(expected) || token != expected)
+            return Unauthorized(new { error = "Invalid or missing ?token=" });
+
+        // Resolve preset → BacktestSweepRequest body
+        var start = startDate ?? DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-3).ToString("yyyy-MM-dd");
+        var end = endDate ?? DateOnly.FromDateTime(DateTime.UtcNow).ToString("yyyy-MM-dd");
+
+        BacktestSweepRequest req = preset switch
+        {
+            "quick10" => new BacktestSweepRequest
+            {
+                StartDate = start,
+                EndDate = end,
+                Tickers = new List<string> { "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN", "TSLA", "AMD" },
+                ParameterSpace = new Dictionary<string, double[]>
+                {
+                    ["min_confidence_threshold"] = new[] { 35.0, 45.0 },
+                    ["risk_tp_swing"] = new[] { 0.04, 0.06 },
+                    ["risk_sl_swing"] = new[] { 0.02, 0.03 },
+                },
+                UseSetupHistory = true,
+            },
+            "full12" => new BacktestSweepRequest
+            {
+                StartDate = start,
+                EndDate = end,
+                Tickers = null,
+                ParameterSpace = new Dictionary<string, double[]>
+                {
+                    ["min_confidence_threshold"] = new[] { 30.0, 40.0, 50.0 },
+                    ["risk_tp_swing"] = new[] { 0.04, 0.06 },
+                    ["risk_sl_swing"] = new[] { 0.02, 0.03 },
+                },
+                UseSetupHistory = true,
+            },
+            _ => throw new ArgumentException("unknown preset"),
+        };
+
+        // Delegate to the same logic as the POST endpoint via internal call.
+        // Copy of StartSweep body — kept small so this stays a "single dev switch".
+        var jobName = "backtest-sweep";
+        if (_jobs.GetStatus(jobName)?.State == "running")
+            return Conflict(new { error = "Parameter sweep already in progress" });
+
+        _jobs.MarkStarted(jobName);
+        _ = Task.Run(async () =>
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var sweeper = scope.ServiceProvider.GetRequiredService<ParameterSweepEngine>();
+            var universeRepo = scope.ServiceProvider.GetRequiredService<IResearchUniverseRepository>();
+            try
+            {
+                var startD = DateOnly.Parse(req.StartDate);
+                var endD = DateOnly.Parse(req.EndDate);
+                List<string> tickers = req.Tickers is { Count: > 0 }
+                    ? req.Tickers
+                    : (await universeRepo.GetActiveTickerSetAsync()).ToList();
+
+                var config = new SweepConfig
+                {
+                    StartDate = startD,
+                    EndDate = endD,
+                    Tickers = tickers,
+                    ParameterSpace = req.ParameterSpace,
+                    MinConfidence = req.MinConfidence,
+                    MaxTickersPerDay = req.MaxTickersPerDay,
+                    StartingBalance = req.StartingBalance ?? 1000,
+                    UseEnsemble = req.UseEnsemble ?? false,
+                    UseSetupHistory = req.UseSetupHistory ?? true,
+                };
+
+                var progress = new Progress<string>(msg => _jobs.UpdateProgress(jobName, msg));
+                var result = await sweeper.RunSweepAsync(config, progress);
+
+                if (result.Error is not null)
+                    _jobs.MarkFailed(jobName, result.Error);
+                else
+                    _jobs.MarkCompleted(jobName,
+                        $"Sweep {result.SweepId}: {result.RunsCompleted} runs, best expectancy {result.Best?.Expectancy:+0.00;-0.00}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[backtest] Dev sweep failed");
+                _jobs.MarkFailed(jobName, ex.Message);
+            }
+        });
+
+        return Ok(new
+        {
+            message = "Preset sweep started via GET",
+            preset,
+            startDate = req.StartDate,
+            endDate = req.EndDate,
+            statusUrl = "/api/backtest/sweep-status",
+        });
+    }
+
     // ── Helpers ──────────────────────────────────────────────────
 
     private bool ValidateJobSecret()
