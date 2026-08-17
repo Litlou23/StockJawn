@@ -1,6 +1,8 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketData;
+using StockResearchAgent.Api.Services.MetaLabeling;
 using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Supabase;
 
@@ -68,6 +70,7 @@ public class StockCandidateService
     private readonly MarketDataService _marketData;
     private readonly MarketDataOptionsProvider _optionsProvider;
     private readonly TradeSetupEngine _setupEngine;
+    private readonly MetaLabelerService _metaLabeler;
     private readonly ILogger<StockCandidateService> _logger;
 
     public StockCandidateService(
@@ -76,6 +79,7 @@ public class StockCandidateService
         MarketDataService marketData,
         MarketDataOptionsProvider optionsProvider,
         TradeSetupEngine setupEngine,
+        MetaLabelerService metaLabeler,
         ILogger<StockCandidateService> logger)
     {
         _stockRepo = stockRepo;
@@ -83,7 +87,30 @@ public class StockCandidateService
         _marketData = marketData;
         _optionsProvider = optionsProvider;
         _setupEngine = setupEngine;
+        _metaLabeler = metaLabeler;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Meta-labeler advisory scoring. Returns (probability, model_version) or
+    /// (null, null) when no model is loaded. Never throws — advisory only.
+    /// </summary>
+    private (double? probability, int? version) ScoreMetaAdvisory(PredictionCandidate pred)
+    {
+        if (!_metaLabeler.IsReady || string.IsNullOrWhiteSpace(pred.ScoreDebugJson))
+            return (null, null);
+        try
+        {
+            var breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(pred.ScoreDebugJson);
+            if (breakdown is null) return (null, null);
+            var p = _metaLabeler.Score(breakdown, pred);
+            return (p, _metaLabeler.ActiveVersion);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[meta-labeler] Advisory scoring failed for {Ticker}", pred.Ticker);
+            return (null, null);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -228,6 +255,27 @@ public class StockCandidateService
                      $"run percentile={percentileInRun:F1}. " +
                      $"{(qualifies ? "Qualifies" : "Does not qualify")} for learning-mode options.";
 
+        var (metaProb, metaVersion) = ScoreMetaAdvisory(pred);
+
+        // Enforcement gate — if a threshold is configured (via
+        // scoring_weight_overrides.meta_labeler_enforce_threshold) and the
+        // meta-labeler assigned a probability below it, disqualify the
+        // candidate. Advisory-mode when threshold is null. When the model
+        // hasn't scored (metaProb is null) we don't gate — no opinion, no veto.
+        var metaThreshold = _metaLabeler.GetCachedEnforcementThreshold();
+        if (metaThreshold.HasValue && metaProb.HasValue && metaProb.Value < metaThreshold.Value)
+        {
+            isActionable = false;
+            qualifies = false;
+            exclusionReason = $"meta_labeler_rejected (prob={metaProb.Value:F3} < {metaThreshold.Value:F3})";
+            reason += $" | Meta-labeler REJECTED at threshold {metaThreshold.Value:F3}.";
+        }
+        else if (metaProb.HasValue)
+        {
+            reason += $" | Meta-labeler probability={metaProb.Value:F3}" +
+                      (metaThreshold.HasValue ? $" (threshold {metaThreshold.Value:F3})" : " (advisory)");
+        }
+
         return new PaperStockCandidate
         {
             PredictionId = pred.Id,
@@ -239,6 +287,8 @@ public class StockCandidateService
             ReferencePrice = pred.EntryReferencePrice,
             TargetPrice = target,
             StopPrice = stop,
+            MetaProbability = metaProb,
+            MetaModelVersion = metaVersion,
             CatalystScore = catalystScore,
             TrendScore = trendScore,
             VolumeScore = volumeScore,

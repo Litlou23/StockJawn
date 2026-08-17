@@ -100,6 +100,7 @@ export const navEntries: NavEntry[] = [
       { href: '/results', label: 'Results' },
       { href: '/history', label: 'History' },
       { href: '/backtest', label: 'Backtest' },
+      { href: '/meta-labeler', label: 'Meta-Labeler' },
     ],
   },
   {

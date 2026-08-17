@@ -85,6 +85,7 @@ function RunTab() {
   const [tickersText, setTickersText] = useState('SPY,QQQ,AAPL,MSFT,NVDA');
   const [minConfidence, setMinConfidence] = useState<number | ''>('');
   const [maxTickersPerDay, setMaxTickersPerDay] = useState<number | ''>('');
+  const [metaThreshold, setMetaThreshold] = useState<number | ''>('');
   const [overridesText, setOverridesText] = useState('{}');
 
   const [runs, setRuns] = useState<BacktestRun[]>([]);
@@ -140,6 +141,7 @@ function RunTab() {
         parameterOverrides: Object.keys(overrides).length ? overrides : undefined,
         minConfidence: minConfidence === '' ? undefined : Number(minConfidence),
         maxTickersPerDay: maxTickersPerDay === '' ? undefined : Number(maxTickersPerDay),
+        metaProbabilityThreshold: metaThreshold === '' ? undefined : Number(metaThreshold),
       });
       setInfo(res.message ?? 'Backtest started.');
       await loadStatus();
@@ -180,6 +182,11 @@ function RunTab() {
             <input type="number" min={1} value={maxTickersPerDay}
               onChange={e => setMaxTickersPerDay(e.target.value === '' ? '' : Number(e.target.value))}
               className={inputCls} placeholder="500" />
+          </Field>
+          <Field label="Meta-labeler threshold (0.0–1.0, blank = advisory only)">
+            <input type="number" min={0} max={1} step={0.05} value={metaThreshold}
+              onChange={e => setMetaThreshold(e.target.value === '' ? '' : Number(e.target.value))}
+              className={inputCls} placeholder="0.55" />
           </Field>
         </div>
         <div className="mt-3">
@@ -307,7 +314,7 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
           <table className="w-full text-left text-xs">
             <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
               <tr>
-                {['Ticker', 'Dir', 'Entry', 'Exit', 'Reason', 'PnL $', 'PnL %', 'MFE %', 'MAE %', 'Conf', 'EV', 'R/R'].map(h => (
+                {['Ticker', 'Dir', 'Entry', 'Exit', 'Reason', 'PnL $', 'PnL %', 'MFE %', 'MAE %', 'Conf', 'Meta', 'EV', 'R/R'].map(h => (
                   <th key={h} className="px-2 py-2 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -337,6 +344,14 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
                   <td className="px-2 py-1 text-zinc-300">{fmtPct(t.max_favorable_percent)}</td>
                   <td className="px-2 py-1 text-red-300">{fmtPct(t.max_adverse_percent)}</td>
                   <td className="px-2 py-1 text-zinc-300">{fmtNum(t.confidence, 0)}</td>
+                  <td className={`px-2 py-1 font-mono ${
+                    t.meta_probability == null ? 'text-zinc-500'
+                      : t.meta_probability >= 0.6 ? 'text-emerald-300'
+                        : t.meta_probability >= 0.4 ? 'text-zinc-300'
+                          : 'text-red-300'
+                  }`}>
+                    {t.meta_probability == null ? '—' : t.meta_probability.toFixed(2)}
+                  </td>
                   <td className="px-2 py-1 text-zinc-300">{fmtNum(t.expected_value)}</td>
                   <td className="px-2 py-1 text-zinc-300">{fmtNum(t.risk_reward_ratio)}</td>
                 </tr>
@@ -365,6 +380,7 @@ function SweepTab() {
   );
   const [useEnsemble, setUseEnsemble] = useState(false);
   const [useSetupHistory, setUseSetupHistory] = useState(true);
+  const [sweepMetaThreshold, setSweepMetaThreshold] = useState<number | ''>('');
 
   const [sweeps, setSweeps] = useState<BacktestSweep[]>([]);
   const [status, setStatus] = useState<JobStatus | null>(null);
@@ -412,6 +428,7 @@ function SweepTab() {
         tickers: tickers.length ? tickers : undefined,
         parameterSpace: space,
         useEnsemble, useSetupHistory,
+        metaProbabilityThreshold: sweepMetaThreshold === '' ? undefined : Number(sweepMetaThreshold),
       });
       setInfo(res.message ?? 'Sweep started.');
       await loadStatus();
@@ -464,6 +481,13 @@ function SweepTab() {
             <input type="checkbox" checked={useSetupHistory} onChange={e => setUseSetupHistory(e.target.checked)}
               className="rounded border-zinc-600 bg-zinc-800" />
             Use setup history adjustment
+          </label>
+          <label className="flex items-center gap-1 text-xs text-zinc-300">
+            Meta threshold
+            <input type="number" min={0} max={1} step={0.05} value={sweepMetaThreshold}
+              onChange={e => setSweepMetaThreshold(e.target.value === '' ? '' : Number(e.target.value))}
+              className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 focus:border-violet-500 focus:outline-none"
+              placeholder="—" />
           </label>
           <span className="text-xs text-zinc-500">
             {combinationCount} combination{combinationCount === 1 ? '' : 's'}

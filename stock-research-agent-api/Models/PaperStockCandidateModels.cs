@@ -70,6 +70,11 @@ public record PaperStockCandidate
     public PaperStockStatus Status { get; init; } = PaperStockStatus.open;
     public bool QualifiesForOptions { get; init; }
 
+    // Meta-labeler advisory output (Aug 2026). Null when no model is loaded.
+    // Not yet used to gate — only observed. See MetaLabelerService.
+    public double? MetaProbability { get; init; }
+    public int? MetaModelVersion { get; init; }
+
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 

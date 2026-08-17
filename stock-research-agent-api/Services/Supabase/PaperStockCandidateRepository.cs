@@ -65,6 +65,8 @@ public class PaperStockCandidateRepository
                 winning_direction = c.WinningDirection,
                 status = c.Status.ToString(),
                 qualifies_for_options = c.QualifiesForOptions,
+                meta_probability = c.MetaProbability,
+                meta_model_version = c.MetaModelVersion,
             }
         });
 
@@ -122,6 +124,8 @@ public class PaperStockCandidateRepository
             winning_direction = c.WinningDirection,
             status = c.Status.ToString(),
             qualifies_for_options = c.QualifiesForOptions,
+            meta_probability = c.MetaProbability,
+            meta_model_version = c.MetaModelVersion,
         }).ToList();
 
         var saved = new List<PaperStockCandidate>();
@@ -372,6 +376,8 @@ public class PaperStockCandidateRepository
         Status = Enum.TryParse<PaperStockStatus>(r["status"]?.ToString(), out var s)
             ? s : PaperStockStatus.open,
         QualifiesForOptions = GetBool(r, "qualifies_for_options"),
+        MetaProbability = GetNullableDouble(r, "meta_probability"),
+        MetaModelVersion = GetNullableInt(r, "meta_model_version"),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };
 
@@ -421,6 +427,14 @@ public class PaperStockCandidateRepository
         if (node is null) return 0;
         if (node is JsonValue jv && jv.TryGetValue<int>(out var i)) return i;
         return int.TryParse(node.ToString(), out var parsed) ? parsed : 0;
+    }
+
+    private static int? GetNullableInt(JsonObject r, string key)
+    {
+        var node = r[key];
+        if (node is null || node.GetValueKind() == JsonValueKind.Null) return null;
+        if (node is JsonValue jv && jv.TryGetValue<int>(out var i)) return i;
+        return int.TryParse(node.ToString(), out var parsed) ? parsed : null;
     }
 
     private static double GetDouble(JsonObject r, string key)

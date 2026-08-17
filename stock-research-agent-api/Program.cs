@@ -201,6 +201,14 @@ try
     builder.Services.AddSingleton<BacktestEngine>();
     builder.Services.AddSingleton<ParameterSweepEngine>();
 
+    // Meta-labeling (López de Prado — Level 4 scoring improvement)
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.MetaLabeling.MetaLabelerFeatureExtractor>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.MetaLabeling.TripleBarrierLabeler>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.MetaLabeling.MetaLabelerTrainingService>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.MetaLabeling.MetaLabelerService>();
+    builder.Services.AddHostedService<StockResearchAgent.Api.Services.MetaLabeling.MetaLabelerLoaderHostedService>();
+    builder.Services.AddHostedService<StockResearchAgent.Api.Services.MetaLabeling.MetaLabelerScheduler>();
+
     // Options Lab — theoretical simulation only
     builder.Services.AddSingleton<TheoreticalOptionsSimulator>();
     builder.Services.AddSingleton<AutomaticScenarioGenerator>();

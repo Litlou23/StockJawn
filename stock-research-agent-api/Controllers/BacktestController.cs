@@ -197,6 +197,7 @@ public class BacktestController : ControllerBase
                     ParameterOverrides = request.ParameterOverrides,
                     MinConfidence = request.MinConfidence,
                     MaxTickersPerDay = request.MaxTickersPerDay,
+                    MetaProbabilityThreshold = request.MetaProbabilityThreshold,
                 };
 
                 var progress = new Progress<string>(msg => _jobs.UpdateProgress(jobName, msg));
@@ -324,6 +325,7 @@ public class BacktestController : ControllerBase
                     StartingBalance = request.StartingBalance ?? 1000,
                     UseEnsemble = request.UseEnsemble ?? false,
                     UseSetupHistory = request.UseSetupHistory ?? true,
+                    MetaProbabilityThreshold = request.MetaProbabilityThreshold,
                 };
 
                 var progress = new Progress<string>(msg => _jobs.UpdateProgress(jobName, msg));
@@ -537,6 +539,8 @@ public class BacktestRunRequest
     public int? MinConfidence { get; init; }
     /// <summary>Cap tickers scored per day — null = engine default (500).</summary>
     public int? MaxTickersPerDay { get; init; }
+    /// <summary>Meta-labeler probability floor (0.0–1.0). Null = advisory only.</summary>
+    public double? MetaProbabilityThreshold { get; init; }
 }
 
 /// <summary>
@@ -561,4 +565,6 @@ public class BacktestSweepRequest
     public double? StartingBalance { get; init; }
     public bool? UseEnsemble { get; init; }
     public bool? UseSetupHistory { get; init; }
+    /// <summary>Baseline meta-labeler threshold for every child run; can be overridden per-combo via parameter_space["meta_probability_threshold"].</summary>
+    public double? MetaProbabilityThreshold { get; init; }
 }

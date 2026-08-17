@@ -54,6 +54,8 @@ export interface BacktestTrade {
   expected_value: number | null;
   risk_reward_ratio: number | null;
   score_debug: string | null;
+  meta_probability: number | null;
+  meta_model_version: number | null;
   created_at: string;
 }
 
@@ -103,6 +105,8 @@ export interface StartRunRequest {
   minConfidence?: number;
   /** Cap tickers scored per day. Blank/undefined = engine default (500). */
   maxTickersPerDay?: number;
+  /** Meta-labeler probability floor (0.0–1.0). Blank/undefined = advisory only. */
+  metaProbabilityThreshold?: number;
 }
 
 export interface StartSweepRequest {
@@ -115,6 +119,7 @@ export interface StartSweepRequest {
   startingBalance?: number;
   useEnsemble?: boolean;
   useSetupHistory?: boolean;
+  metaProbabilityThreshold?: number;
 }
 
 // ---------------------------------------------------------------------------

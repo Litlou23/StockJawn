@@ -49,7 +49,9 @@ public class SimulatedPortfolio
         double expectedValue,
         double riskRewardRatio,
         string? sector = null,
-        string? scoreDebug = null)
+        string? scoreDebug = null,
+        double? metaProbability = null,
+        int? metaModelVersion = null)
     {
         // ── Cash check ──
         if (Cash < _config.MinPositionDollars)
@@ -138,6 +140,8 @@ public class SimulatedPortfolio
             MaxHoldDays = maxHoldDays,
             HighWaterMark = entryPrice,
             ScoreDebug = scoreDebug,
+            MetaProbability = metaProbability,
+            MetaModelVersion = metaModelVersion,
         };
 
         Cash -= dollarsInvested;
@@ -367,6 +371,8 @@ public class SimulatedPortfolio
                 ExpectedValue = p.ExpectedValue,
                 RiskRewardRatio = p.RiskRewardRatio,
                 ScoreDebug = p.ScoreDebug,
+                MetaProbability = p.MetaProbability,
+                MetaModelVersion = p.MetaModelVersion,
             };
         }).ToList();
     }
@@ -530,6 +536,10 @@ public class SimPosition
     public double RiskRewardRatio { get; init; }
     public string? Sector { get; init; }
     public string? ScoreDebug { get; init; }
+
+    // Meta-labeler advisory output (nullable when no model was loaded).
+    public double? MetaProbability { get; init; }
+    public int? MetaModelVersion { get; init; }
 
     // Risk params
     public double StopLossPct { get; init; }

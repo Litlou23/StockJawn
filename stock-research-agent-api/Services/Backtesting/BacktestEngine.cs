@@ -1,6 +1,7 @@
 using System.Text.Json;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services.MarketRegime;
+using StockResearchAgent.Api.Services.MetaLabeling;
 using StockResearchAgent.Api.Services.ResearchEngine;
 using StockResearchAgent.Api.Services.ResearchEngine.Evaluation;
 using StockResearchAgent.Api.Services.Supabase;
@@ -28,6 +29,7 @@ public class BacktestEngine
     private readonly IMarketRegimeEngine _regimeEngine;
     private readonly ResearchRepository _repo;
     private readonly SupabaseClient _db;
+    private readonly MetaLabelerService _metaLabeler;
     private readonly ILogger<BacktestEngine> _logger;
 
     /// <summary>
@@ -58,6 +60,7 @@ public class BacktestEngine
         IMarketRegimeEngine regimeEngine,
         ResearchRepository repo,
         SupabaseClient db,
+        MetaLabelerService metaLabeler,
         ILogger<BacktestEngine> logger)
     {
         _snapshotBuilder = snapshotBuilder;
@@ -69,6 +72,7 @@ public class BacktestEngine
         _regimeEngine = regimeEngine;
         _repo = repo;
         _db = db;
+        _metaLabeler = metaLabeler;
         _logger = logger;
     }
 
@@ -190,6 +194,8 @@ public class BacktestEngine
                     expected_value = t.ExpectedValue,
                     risk_reward_ratio = t.RiskRewardRatio,
                     score_debug = t.ScoreDebug,
+                    meta_probability = t.MetaProbability,
+                    meta_model_version = t.MetaModelVersion,
                 }).ToArray();
                 await _db.InsertAsync("backtest_trades", rows);
             }
@@ -302,8 +308,11 @@ public class BacktestEngine
             ? tickers.Take(perDayCap).ToList()
             : tickers;
 
-        // Collect scored candidates before opening (so we can sort by EV)
-        var candidates = new List<(ScoringEngine.ScoringResult scoring, double price, string ticker)>();
+        // Collect scored candidates before opening (so we can sort by EV).
+        // Meta-probability is captured now — the historical model version at the
+        // moment the backtest ran, stamped onto every trade for later comparison.
+        var candidates = new List<(ScoringEngine.ScoringResult scoring, double price, string ticker,
+            double? metaProbability, int? metaModelVersion)>();
 
         foreach (var ticker in tickersToProcess)
         {
@@ -373,7 +382,20 @@ public class BacktestEngine
                     continue;
             }
 
-            candidates.Add((scoring, snapshot.Quote.Price, ticker));
+            // Meta-labeler advisory scoring. Null when no model is loaded.
+            var metaProb = _metaLabeler.IsReady
+                ? (double?)_metaLabeler.Score(scoring.Breakdown)
+                : null;
+            var metaVersion = _metaLabeler.IsReady ? _metaLabeler.ActiveVersion : null;
+
+            // Optional gate — reject candidates below the configured meta floor.
+            // Null threshold = advisory only.
+            if (config.MetaProbabilityThreshold.HasValue
+                && metaProb.HasValue
+                && metaProb.Value < config.MetaProbabilityThreshold.Value)
+                continue;
+
+            candidates.Add((scoring, snapshot.Quote.Price, ticker, metaProb, metaVersion));
         }
 
         // Sort by EV descending — open highest-edge trades first (mirrors live pipeline)
@@ -386,12 +408,12 @@ public class BacktestEngine
                     ? (c.scoring.Confidence / 100.0 * tpPct) - ((1 - c.scoring.Confidence / 100.0) * slPct)
                     : 0.0;
                 var rr = slPct > 0 ? Math.Round(tpPct / slPct, 2) : 0.0;
-                return (c.scoring, c.price, c.ticker, timeframe, ev, rr);
+                return (c.scoring, c.price, c.ticker, timeframe, ev, rr, c.metaProbability, c.metaModelVersion);
             })
             .OrderByDescending(c => c.ev)
             .ThenByDescending(c => c.scoring.Confidence);
 
-        foreach (var (scoring, price, ticker, timeframe, ev, rr) in sorted)
+        foreach (var (scoring, price, ticker, timeframe, ev, rr, metaProb, metaVersion) in sorted)
         {
             var scoreDebug = JsonSerializer.Serialize(new
             {
@@ -399,6 +421,7 @@ public class BacktestEngine
                 scoring.BearishScore,
                 scoring.DirectionMargin,
                 scoring.Breakdown.ActionabilityTier,
+                metaProbability = metaProb,
             });
 
             // Sector lookup — pulled from historical_research_profiles at run
@@ -415,7 +438,9 @@ public class BacktestEngine
                 expectedValue: ev,
                 riskRewardRatio: rr,
                 sector: sector,
-                scoreDebug: scoreDebug);
+                scoreDebug: scoreDebug,
+                metaProbability: metaProb,
+                metaModelVersion: metaVersion);
         }
 
         return scored;
@@ -739,6 +764,13 @@ public class BacktestConfig
     /// </summary>
     public int? MaxTickersPerDay { get; init; }
 
+    /// <summary>
+    /// Meta-labeler probability floor (0.0–1.0). Predictions scoring below
+    /// this get rejected before position sizing. Null = advisory only.
+    /// Use sweeps over this to find the optimal enforcement threshold.
+    /// </summary>
+    public double? MetaProbabilityThreshold { get; init; }
+
     public double GetOverride(string key, double defaultValue)
         => ParameterOverrides is not null && ParameterOverrides.TryGetValue(key, out var v) ? v : defaultValue;
 }
@@ -791,6 +823,8 @@ public class BacktestTrade
     public double? ExpectedValue { get; init; }
     public double? RiskRewardRatio { get; init; }
     public string? ScoreDebug { get; init; }
+    public double? MetaProbability { get; init; }
+    public int? MetaModelVersion { get; init; }
 }
 
 internal record DayResult

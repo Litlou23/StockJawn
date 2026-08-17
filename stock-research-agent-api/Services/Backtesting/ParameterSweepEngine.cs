@@ -90,6 +90,15 @@ public class ParameterSweepEngine
                 ct.ThrowIfCancellationRequested();
 
                 var overrides = combinations[i];
+
+                // Hoist special keys out of the override dictionary and onto the
+                // typed BacktestConfig fields — otherwise they'd be silently
+                // ignored (the scoring pipeline reads a fixed set of weight keys,
+                // not arbitrary override names).
+                double? metaThreshold = null;
+                if (overrides.TryGetValue("meta_probability_threshold", out var mv))
+                    metaThreshold = mv;
+
                 var childConfig = new BacktestConfig
                 {
                     StartDate = config.StartDate,
@@ -101,6 +110,7 @@ public class ParameterSweepEngine
                     UseEnsemble = config.UseEnsemble,
                     UseSetupHistory = config.UseSetupHistory,
                     MaxTickersPerDay = config.MaxTickersPerDay,
+                    MetaProbabilityThreshold = metaThreshold ?? config.MetaProbabilityThreshold,
                     SweepId = sweepId,
                 };
 
@@ -313,6 +323,12 @@ public class SweepConfig
     public double StartingBalance { get; init; } = 1000;
     public bool UseEnsemble { get; init; }
     public bool UseSetupHistory { get; init; } = true;
+    /// <summary>
+    /// Meta-labeler probability floor applied to every child run in the sweep
+    /// unless overridden by a "meta_probability_threshold" entry in
+    /// ParameterSpace. Null = advisory only.
+    /// </summary>
+    public double? MetaProbabilityThreshold { get; init; }
 }
 
 public class SweepChildResult
