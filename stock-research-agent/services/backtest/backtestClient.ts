@@ -125,6 +125,8 @@ export interface StartSweepRequest {
   useEnsemble?: boolean;
   useSetupHistory?: boolean;
   metaProbabilityThreshold?: number;
+  /** How to rank runs. "pnl" (default) | "expectancy" | "sharpe" | "profit_factor". */
+  rankBy?: 'pnl' | 'expectancy' | 'sharpe' | 'profit_factor';
 }
 
 // ---------------------------------------------------------------------------

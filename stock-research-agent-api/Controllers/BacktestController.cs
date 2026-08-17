@@ -326,6 +326,7 @@ public class BacktestController : ControllerBase
                     UseEnsemble = request.UseEnsemble ?? false,
                     UseSetupHistory = request.UseSetupHistory ?? true,
                     MetaProbabilityThreshold = request.MetaProbabilityThreshold,
+                    RankBy = request.RankBy,
                 };
 
                 var progress = new Progress<string>(msg => _jobs.UpdateProgress(jobName, msg));
@@ -410,8 +411,11 @@ public class BacktestController : ControllerBase
     /// <summary>
     /// Start a preset sweep via GET. Requires ?token=&lt;JOB_RUN_SECRET&gt;.
     /// Presets:
-    ///   quick10   — 10 blue chips, 8 combos, correct parameter names
-    ///   full12    — full universe, 12 combos, correct parameter names
+    ///   quick10       — 10 blue chips, 8 combos of exit-risk params
+    ///   full12        — full universe, 12 combos of exit-risk params
+    ///   regime_tune   — 10 blue chips, 9 combos varying the regime gate
+    ///                   (ADX floor + realized-vol upper band). Uses the
+    ///                   winning scoring params (conf=45, tp=0.06, sl=0.02).
     /// </summary>
     [HttpGet("dev/start-sweep")]
     public IActionResult DevStartSweep(
@@ -453,6 +457,25 @@ public class BacktestController : ControllerBase
                     ["min_confidence_threshold"] = new[] { 30.0, 40.0, 50.0 },
                     ["risk_tp_swing"] = new[] { 0.04, 0.06 },
                     ["risk_sl_swing"] = new[] { 0.02, 0.03 },
+                },
+                UseSetupHistory = true,
+            },
+            "regime_tune" => new BacktestSweepRequest
+            {
+                // Tune the trend-quality gate thresholds — keep the winning
+                // scoring params fixed and vary ADX floor + realized-vol band.
+                // 3 × 3 = 9 combinations. Small enough to complete quickly on
+                // 10 blue chips; big enough to find the sweet spot.
+                StartDate = start,
+                EndDate = end,
+                Tickers = new List<string> { "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "META", "GOOGL", "AMZN", "TSLA", "AMD" },
+                ParameterSpace = new Dictionary<string, double[]>
+                {
+                    ["regime_adx_floor"] = new[] { 15.0, 20.0, 25.0 },
+                    ["regime_rv_high"] = new[] { 1.2, 1.3, 1.4 },
+                    ["min_confidence_threshold"] = new[] { 45.0 },
+                    ["risk_tp_swing"] = new[] { 0.06 },
+                    ["risk_sl_swing"] = new[] { 0.02 },
                 },
                 UseSetupHistory = true,
             },
@@ -567,4 +590,6 @@ public class BacktestSweepRequest
     public bool? UseSetupHistory { get; init; }
     /// <summary>Baseline meta-labeler threshold for every child run; can be overridden per-combo via parameter_space["meta_probability_threshold"].</summary>
     public double? MetaProbabilityThreshold { get; init; }
+    /// <summary>How to rank child runs: "pnl" (default), "expectancy", "sharpe", or "profit_factor".</summary>
+    public string? RankBy { get; init; }
 }

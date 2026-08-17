@@ -154,7 +154,7 @@ public class ParameterSweepEngine
             }
 
             // 4. Rank and finalize.
-            var ranked = RankResults(completed);
+            var ranked = RankResults(completed, config.RankBy);
             var best = ranked.FirstOrDefault();
 
             await _db.UpdateAsync("backtest_sweeps", $"id=eq.{sweepId}", new
@@ -268,11 +268,17 @@ public class ParameterSweepEngine
     // ── Ranking ────────────────────────────────────────────────
 
     /// <summary>
-    /// Rank child results by expectancy (highest first), tiebreak on profit
-    /// factor then trade count. A run with zero trades gets expectancy 0 so it
-    /// sinks to the bottom instead of showing up as a "great" no-op.
+    /// Rank child results by PORTFOLIO PnL % (highest first) — money made in
+    /// the whole run, not per-trade edge. Tiebreak on profit factor then
+    /// expectancy so tightly-clustered results still order sensibly. A run
+    /// with zero trades still gets expectancy 0 to sort below any real trade
+    /// activity.
+    ///
+    /// Earlier version sorted on per-trade expectancy first. That penalized
+    /// combos that made real money with lower per-trade averages — swapped to
+    /// PnL-first at user request ("focus is profit not accuracy").
     /// </summary>
-    internal static List<SweepChildResult> RankResults(List<SweepChildResult> completed)
+    internal static List<SweepChildResult> RankResults(List<SweepChildResult> completed, string? rankBy = null)
     {
         foreach (var r in completed)
         {
@@ -289,9 +295,21 @@ public class ParameterSweepEngine
                 (winRate * m.AvgWin) - (lossRate * Math.Abs(m.AvgLoss)), 3);
         }
 
+        // Choose the primary sort key based on the caller's preference.
+        // Runs with zero trades always sort last (NegativeInfinity primary key).
+        Func<SweepChildResult, double> primaryKey = (rankBy?.ToLowerInvariant()) switch
+        {
+            "expectancy"    => r => r.TradeCount > 0 ? r.Expectancy : double.NegativeInfinity,
+            "sharpe"        => r => r.TradeCount > 0 ? (r.Metrics?.SharpeRatio ?? 0) : double.NegativeInfinity,
+            "profit_factor" => r => r.TradeCount > 0 ? (r.Metrics?.ProfitFactor ?? 0) : double.NegativeInfinity,
+            _               => r => r.TradeCount > 0 ? r.PortfolioPnlPercent : double.NegativeInfinity,
+        };
+
         return completed
-            .OrderByDescending(r => r.Expectancy)
+            .OrderByDescending(primaryKey)
+            .ThenByDescending(r => r.TradeCount > 0 ? r.PortfolioPnlPercent : double.NegativeInfinity)
             .ThenByDescending(r => r.Metrics?.ProfitFactor ?? 0)
+            .ThenByDescending(r => r.Expectancy)
             .ThenByDescending(r => r.TradeCount)
             .ToList();
     }
@@ -329,6 +347,15 @@ public class SweepConfig
     /// ParameterSpace. Null = advisory only.
     /// </summary>
     public double? MetaProbabilityThreshold { get; init; }
+    /// <summary>
+    /// How to rank child runs. Recognized values:
+    ///   "pnl"           — portfolio PnL % (default; what you keep)
+    ///   "expectancy"    — per-trade edge in dollars
+    ///   "sharpe"        — Sharpe ratio (risk-adjusted return)
+    ///   "profit_factor" — gross wins ÷ gross losses
+    /// Unknown values fall back to "pnl".
+    /// </summary>
+    public string? RankBy { get; init; }
 }
 
 public class SweepChildResult

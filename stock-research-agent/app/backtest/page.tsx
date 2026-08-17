@@ -392,6 +392,7 @@ function SweepTab() {
   const [useEnsemble, setUseEnsemble] = useState(false);
   const [useSetupHistory, setUseSetupHistory] = useState(true);
   const [sweepMetaThreshold, setSweepMetaThreshold] = useState<number | ''>('');
+  const [rankBy, setRankBy] = useState<'pnl' | 'expectancy' | 'sharpe' | 'profit_factor'>('pnl');
 
   const [sweeps, setSweeps] = useState<BacktestSweep[]>([]);
   const [status, setStatus] = useState<JobStatus | null>(null);
@@ -440,6 +441,7 @@ function SweepTab() {
         parameterSpace: space,
         useEnsemble, useSetupHistory,
         metaProbabilityThreshold: sweepMetaThreshold === '' ? undefined : Number(sweepMetaThreshold),
+        rankBy,
       });
       setInfo(res.message ?? 'Sweep started.');
       await loadStatus();
@@ -499,6 +501,17 @@ function SweepTab() {
               onChange={e => setSweepMetaThreshold(e.target.value === '' ? '' : Number(e.target.value))}
               className="w-20 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 focus:border-violet-500 focus:outline-none"
               placeholder="—" />
+          </label>
+          <label className="flex items-center gap-1 text-xs text-zinc-300">
+            Rank by
+            <select value={rankBy}
+              onChange={e => setRankBy(e.target.value as typeof rankBy)}
+              className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 focus:border-violet-500 focus:outline-none">
+              <option value="pnl">PnL %</option>
+              <option value="expectancy">Expectancy</option>
+              <option value="sharpe">Sharpe</option>
+              <option value="profit_factor">Profit Factor</option>
+            </select>
           </label>
           <span className="text-xs text-zinc-500">
             {combinationCount} combination{combinationCount === 1 ? '' : 's'}
