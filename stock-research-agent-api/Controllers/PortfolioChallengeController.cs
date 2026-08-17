@@ -501,10 +501,23 @@ public class PortfolioChallengeController : ControllerBase
 
         foreach (var pos in openPositions)
         {
-            var currentPrice = quoteMap.GetValueOrDefault(pos.Ticker, 0);
-            if (currentPrice <= 0) currentPrice = pos.EntryPrice; // fallback
-            var multiplier = pos.AssetType == PositionAssetType.option ? 100.0 : 1.0;
-            var currentValue = Math.Round(currentPrice * pos.Quantity * multiplier, 2);
+            double currentValue;
+            double displayPrice;
+            if (pos.AssetType == PositionAssetType.option)
+            {
+                // Options: quoteMap returns the STOCK price, not the option premium.
+                // Without live option quotes, value the position at cost (DollarsInvested)
+                // to avoid inflating the portfolio by 100× the stock price.
+                currentValue = pos.DollarsInvested;
+                displayPrice = pos.EntryPrice; // show entry premium as current price
+            }
+            else
+            {
+                var currentPrice = quoteMap.GetValueOrDefault(pos.Ticker, 0);
+                if (currentPrice <= 0) currentPrice = pos.EntryPrice; // fallback
+                currentValue = Math.Round(currentPrice * pos.Quantity, 2);
+                displayPrice = currentPrice;
+            }
             var unrealizedPnL = Math.Round(currentValue - pos.DollarsInvested, 2);
             var unrealizedPct = pos.DollarsInvested > 0
                 ? Math.Round(unrealizedPnL / pos.DollarsInvested * 100, 2) : 0;
@@ -516,7 +529,7 @@ public class PortfolioChallengeController : ControllerBase
                 Ticker = pos.Ticker,
                 AssetType = pos.AssetType,
                 EntryPrice = pos.EntryPrice,
-                CurrentPrice = currentPrice,
+                CurrentPrice = displayPrice,
                 Quantity = pos.Quantity,
                 DollarsInvested = pos.DollarsInvested,
                 CurrentValue = currentValue,

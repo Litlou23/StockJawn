@@ -243,6 +243,48 @@ public class TwelveDataProvider
         }
     }
 
+    /// <summary>
+    /// Fetch daily OHLCV candles for a date range. Used by backtest data loader.
+    /// Returns bars in chronological order (oldest first).
+    /// </summary>
+    public async Task<List<MarketSnapshotBar>> GetHistoricalBarsAsync(
+        string ticker, DateOnly startDate, DateOnly endDate, string interval = "1day")
+    {
+        if (!_configured) return [];
+
+        if (!await ThrottleAsync()) return [];
+        _logger.LogDebug("[twelve-data] calling /time_series historical for {Ticker} ({Start} → {End})",
+            ticker, startDate, endDate);
+
+        var url = $"{BaseUrl}/time_series?symbol={ticker}&interval={interval}" +
+                  $"&start_date={startDate:yyyy-MM-dd}&end_date={endDate:yyyy-MM-dd}" +
+                  $"&order=ASC&apikey={_apiKey}";
+        try
+        {
+            var resp = await GetStringWithRetryAsync(url, "/time_series", ticker);
+            var json = JsonNode.Parse(resp);
+            if (json is null || json["status"]?.ToString() == "error") return [];
+
+            var values = json["values"]?.AsArray();
+            if (values is null) return [];
+
+            return values.Select(v => new MarketSnapshotBar
+            {
+                Date = v?["datetime"]?.ToString() ?? "",
+                Open = ParseDouble(v?["open"]),
+                High = ParseDouble(v?["high"]),
+                Low = ParseDouble(v?["low"]),
+                Close = ParseDouble(v?["close"]),
+                Volume = ParseDouble(v?["volume"]),
+            }).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[twelve-data] Historical fetch failed for {Ticker}", ticker);
+            return [];
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Technical Context (computed from bars)
     // -----------------------------------------------------------------------

@@ -99,6 +99,7 @@ export const navEntries: NavEntry[] = [
       { href: '/congress-trades', label: 'Congress Intel' },
       { href: '/results', label: 'Results' },
       { href: '/history', label: 'History' },
+      { href: '/backtest', label: 'Backtest' },
     ],
   },
   {

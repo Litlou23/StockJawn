@@ -114,7 +114,7 @@ public class SupabaseResearchUniverseRepository : IResearchUniverseRepository
 
     public async Task<HashSet<string>> GetActiveTickerSetAsync()
     {
-        var rows = await _db.SelectAsync(Table, "status=eq.Active", select: "ticker", limit: 2000);
+        var rows = await _db.SelectAsync(Table, "status=eq.Active", select: "ticker", limit: 5000);
         return rows
             .Select(r => r["ticker"]?.ToString() ?? "")
             .Where(t => t.Length > 0)

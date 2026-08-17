@@ -69,6 +69,15 @@ public class MarketDataService
             async () => await _provider.GetRecentBarsAsync(ticker, count)) ?? [];
     }
 
+    /// <summary>
+    /// Fetch historical daily candles for a date range. No caching — used for bulk backtest data loading.
+    /// </summary>
+    public async Task<List<MarketSnapshotBar>> GetHistoricalBarsAsync(
+        string ticker, DateOnly startDate, DateOnly endDate)
+    {
+        return await _provider.GetHistoricalBarsAsync(ticker, startDate, endDate);
+    }
+
     public async Task<MarketSnapshotTechnical?> GetTechnicalContextAsync(string ticker)
     {
         var bars = await GetRecentBarsAsync(ticker);

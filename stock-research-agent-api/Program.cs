@@ -28,6 +28,7 @@ using StockResearchAgent.Api.Services.Discovery;
 using StockResearchAgent.Api.Services.Discovery.Providers;
 using StockResearchAgent.Api.Services.Evidence;
 using StockResearchAgent.Api.Services.OpportunityLearning;
+using StockResearchAgent.Api.Services.Backtesting;
 using StockResearchAgent.Api.Models;
 
 // =====================================================================
@@ -193,6 +194,12 @@ try
     builder.Services.AddSingleton<WatchlistRepository>();
     builder.Services.AddSingleton<DynamicWatchlistService>();
     builder.Services.AddSingleton<JobStatusTracker>();
+
+    // Backtesting engine + Phase 5 parameter sweeper
+    builder.Services.AddSingleton<HistoricalDataLoader>();
+    builder.Services.AddSingleton<HistoricalMarketSnapshotBuilder>();
+    builder.Services.AddSingleton<BacktestEngine>();
+    builder.Services.AddSingleton<ParameterSweepEngine>();
 
     // Options Lab — theoretical simulation only
     builder.Services.AddSingleton<TheoreticalOptionsSimulator>();

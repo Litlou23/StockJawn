@@ -41,6 +41,17 @@ public class JobStatusTracker
         }
     }
 
+    public void UpdateProgress(string jobName, string progress)
+    {
+        lock (_lock)
+        {
+            if (_statuses.TryGetValue(jobName, out var status))
+            {
+                _statuses[jobName] = status with { Summary = progress };
+            }
+        }
+    }
+
     public void MarkFailed(string jobName, string error)
     {
         lock (_lock)

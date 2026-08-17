@@ -357,6 +357,133 @@ public class PortfolioChallengeRepository
     }
 
     // -----------------------------------------------------------------------
+    // AI Trade Decisions
+    // -----------------------------------------------------------------------
+
+    public async Task SaveAiDecisionAsync(
+        string positionId, string ticker, string? challengeId,
+        string decisionType, string decision, string? reason,
+        double? positionScale = null,
+        double? entryPrice = null, double? currentPrice = null,
+        double? pnlPercent = null, double? hoursHeld = null,
+        double? highWaterMark = null,
+        string? marketRegime = null, bool isMacroShock = false,
+        double? rsi = null, double? volumeRatio = null,
+        double? atrPercent = null, string? sector = null,
+        int? portfolioOpenCount = null, bool portfolioAllRed = false,
+        double? portfolioCash = null)
+    {
+        try
+        {
+            await _db.InsertAsync("ai_trade_decisions", new[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["position_id"] = positionId,
+                    ["ticker"] = ticker,
+                    ["challenge_id"] = challengeId,
+                    ["decision_type"] = decisionType,
+                    ["decision"] = decision,
+                    ["reason"] = reason,
+                    ["position_scale"] = positionScale,
+                    ["entry_price"] = entryPrice,
+                    ["current_price"] = currentPrice,
+                    ["pnl_percent"] = pnlPercent,
+                    ["hours_held"] = hoursHeld,
+                    ["high_water_mark"] = highWaterMark,
+                    ["market_regime"] = marketRegime,
+                    ["is_macro_shock"] = isMacroShock,
+                    ["rsi"] = rsi,
+                    ["volume_ratio"] = volumeRatio,
+                    ["atr_percent"] = atrPercent,
+                    ["sector"] = sector,
+                    ["portfolio_open_count"] = portfolioOpenCount,
+                    ["portfolio_all_red"] = portfolioAllRed,
+                    ["portfolio_cash"] = portfolioCash,
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ai-decisions] Failed to save AI decision for {Ticker}", ticker);
+        }
+    }
+
+    /// <summary>
+    /// Get recent AI decisions for a ticker to feed into AI self-awareness prompts.
+    /// </summary>
+    public async Task<List<JsonObject>> GetRecentAiDecisionsAsync(string ticker, int limit = 10)
+    {
+        return await _db.SelectAsync("ai_trade_decisions",
+            filter: $"ticker=eq.{ticker}",
+            order: "created_at.desc",
+            limit: limit);
+    }
+
+    /// <summary>
+    /// Get all unevaluated AI decisions for a position (for outcome tracking).
+    /// </summary>
+    public async Task<List<JsonObject>> GetUnevaluatedDecisionsForPositionAsync(string positionId)
+    {
+        return await _db.SelectAsync("ai_trade_decisions",
+            filter: $"position_id=eq.{positionId}&outcome_evaluated=eq.false",
+            order: "created_at.desc");
+    }
+
+    /// <summary>
+    /// Mark an AI decision with its outcome — was the decision correct?
+    /// </summary>
+    public async Task<bool> EvaluateAiDecisionAsync(
+        string decisionId, bool correct, double priceAtOutcome,
+        double outcomePnlPercent, string? notes = null)
+    {
+        return await _db.UpdateAsync("ai_trade_decisions", $"id=eq.{decisionId}", new
+        {
+            outcome_evaluated = true,
+            outcome_correct = correct,
+            price_at_outcome = priceAtOutcome,
+            outcome_pnl_percent = outcomePnlPercent,
+            outcome_notes = notes,
+            outcome_evaluated_at = DateTimeOffset.UtcNow.ToString("o"),
+        });
+    }
+
+    /// <summary>
+    /// Get AI decision accuracy stats for the last N days.
+    /// </summary>
+    public async Task<(int Total, int Correct, int Wrong)> GetAiAccuracyStatsAsync(int days = 30)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-days).ToString("yyyy-MM-dd");
+        var rows = await _db.SelectAsync("ai_trade_decisions",
+            filter: $"outcome_evaluated=eq.true&created_at=gte.{cutoff}",
+            order: "created_at.desc",
+            limit: 500);
+        var total = rows.Count;
+        var correct = rows.Count(r =>
+            r["outcome_correct"]?.ToString()?.Equals("true", StringComparison.OrdinalIgnoreCase) == true);
+        return (total, correct, total - correct);
+    }
+
+    /// <summary>
+    /// After a position is created, backfill the entry gate AI decision row
+    /// so its position_id matches the actual position (not the prediction_id).
+    /// </summary>
+    public async Task BackfillAiDecisionPositionIdAsync(string oldPositionId, string newPositionId)
+    {
+        try
+        {
+            await _db.UpdateAsync("ai_trade_decisions",
+                $"position_id=eq.{oldPositionId}&decision_type=eq.entry_gate&outcome_evaluated=eq.false",
+                new { position_id = newPositionId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ai-decisions] Failed to backfill position_id {Old} → {New}",
+                oldPositionId, newPositionId);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Mappers
     // -----------------------------------------------------------------------
 

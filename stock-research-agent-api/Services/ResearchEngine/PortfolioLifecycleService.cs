@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.TradeDecision;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
@@ -27,6 +28,7 @@ public class PortfolioLifecycleService
     private readonly MarketStressDetector _stressDetector;
     private readonly TradeStatsProvider _tradeStats;
     private readonly IOpenAiCompletionService _ai;
+    private readonly FinnhubProvider _finnhub;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -39,6 +41,7 @@ public class PortfolioLifecycleService
         MarketStressDetector stressDetector,
         TradeStatsProvider tradeStats,
         IOpenAiCompletionService ai,
+        FinnhubProvider finnhub,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -50,6 +53,7 @@ public class PortfolioLifecycleService
         _stressDetector = stressDetector;
         _tradeStats = tradeStats;
         _ai = ai;
+        _finnhub = finnhub;
         _logger = logger;
     }
 
@@ -284,6 +288,30 @@ public class PortfolioLifecycleService
             .ThenByDescending(c => c.ConfidenceScore)
             .ToList();
 
+        // ── Same-day earnings guard — fetch once, reuse for all challenges ──
+        // A stock reporting earnings today is a coin flip. The post-earnings gap
+        // can be 5-20% in either direction regardless of the prediction's thesis.
+        // AMAT on Aug 14 is the poster child: entered intraday, reported after close,
+        // stock gapped down $44 and took two positions with it.
+        var earningsToday = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var earningsEntries = await _finnhub.GetUpcomingEarningsAsync(daysAhead: 1);
+            var todayStr = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            foreach (var e in earningsEntries.Where(e => e.Date == todayStr))
+                earningsToday.Add(e.Ticker);
+
+            if (earningsToday.Count > 0)
+                _logger.LogInformation(
+                    "[portfolio] Earnings guard: {Count} tickers reporting today — will block broker entries for: {Sample}",
+                    earningsToday.Count,
+                    string.Join(", ", earningsToday.Take(20)));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[portfolio] Earnings calendar fetch failed — proceeding without earnings guard");
+        }
+
         var filteredByConfidence = actionableCandidates.Count(c => c.IsActionable
             && c.Status == PaperStockStatus.open
             && c.EntryPrice is > 0
@@ -339,6 +367,42 @@ public class PortfolioLifecycleService
                     continue;
                 }
             }
+
+            // ── Stop-loss cooldown — don't re-enter tickers that just blew through stops ──
+            // A stock that triggered a stop-loss is falling for a reason. Re-entering the
+            // same ticker on the next scan (like AMAT on Aug 14) just compounds losses.
+            // Build a set of tickers stopped out in the last 24h and block them.
+            var recentClosed = await _portfolioRepo.GetClosedPositionsAsync(challenge.Id, limit: 100);
+            var cooldownCutoff = DateTimeOffset.UtcNow.AddHours(-24);
+            var stoppedOutTickers = new HashSet<string>(
+                recentClosed
+                    .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= cooldownCutoff)
+                    .Where(p => p.ReasonExited is not null
+                        && (p.ReasonExited.StartsWith("STOP-LOSS", StringComparison.OrdinalIgnoreCase)
+                         || p.ReasonExited.StartsWith("TRAILING-STOP", StringComparison.OrdinalIgnoreCase)))
+                    .Select(p => p.Ticker),
+                StringComparer.OrdinalIgnoreCase);
+            if (stoppedOutTickers.Count > 0)
+                _logger.LogInformation(
+                    "[portfolio] Stop-loss cooldown active for {Challenge}: {Tickers}",
+                    challenge.Name, string.Join(", ", stoppedOutTickers));
+
+            // ── Repeat loser blacklist — block tickers with 2+ losses recently ──
+            // AMAT lost $18.71 across 4 trades (46% of all losses). If a ticker keeps
+            // losing, stop trading it. The market is telling us something.
+            // Configurable via DB: repeat_loser_blacklist_days (default 30)
+            var blacklistDays = (int)weights.GetValueOrDefault("repeat_loser_blacklist_days", 30);
+            var blacklistCutoff = DateTimeOffset.UtcNow.AddDays(-blacklistDays);
+            var repeatLoserTickers = recentClosed
+                .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= blacklistCutoff && p.ProfitLoss < 0)
+                .GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() >= 2)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (repeatLoserTickers.Count > 0)
+                _logger.LogInformation(
+                    "[portfolio] Repeat loser blacklist for {Challenge}: {Tickers} (2+ losses in {Days} days)",
+                    challenge.Name, string.Join(", ", repeatLoserTickers), blacklistDays);
 
             // ── Max open positions check ──
             var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
@@ -429,6 +493,38 @@ public class PortfolioLifecycleService
                     || (brokerTickersOpened?.Contains(c.Ticker) == true))
                 {
                     _logger.LogDebug("[portfolio] Skipping {Ticker} — already held in challenge {Challenge}",
+                        c.Ticker, challenge.Name);
+                    continue;
+                }
+
+                // ── Stop-loss cooldown — don't re-enter tickers that just got stopped out ──
+                if (stoppedOutTickers.Contains(c.Ticker))
+                {
+                    _logger.LogInformation(
+                        "[portfolio] COOLDOWN: Skipping {Ticker} for {Challenge} — stopped out in last 24h. " +
+                        "Re-entering a stock that blew through your stop is chasing a loser.",
+                        c.Ticker, challenge.Name);
+                    continue;
+                }
+
+                // ── Repeat loser blacklist — block tickers that keep losing ──
+                if (repeatLoserTickers.Contains(c.Ticker))
+                {
+                    _logger.LogInformation(
+                        "[portfolio] BLACKLISTED: Skipping {Ticker} for {Challenge} — 2+ losses in last {Days} days. " +
+                        "Stop trading what doesn't work.",
+                        c.Ticker, challenge.Name, blacklistDays);
+                    continue;
+                }
+
+                // ── Same-day earnings guard — don't enter before a binary event ──
+                // Only applied to broker challenges — paper challenges can experiment freely.
+                if (challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
+                    && earningsToday.Contains(c.Ticker))
+                {
+                    _logger.LogInformation(
+                        "[portfolio] EARNINGS GUARD: Skipping {Ticker} for {Challenge} — reports earnings today. " +
+                        "Entering before a binary event is gambling, not trading.",
                         c.Ticker, challenge.Name);
                     continue;
                 }
@@ -606,10 +702,51 @@ public class PortfolioLifecycleService
                     // or when ai_entry_gate_enabled is set.
                     var shouldRunAiGate = aiEntryGateEnabled
                         && challenge.TradingMode != TradingMode.paper; // Skip for pure paper to save API cost
+                    var aiPositionScale = 1.0;
                     if (shouldRunAiGate)
                     {
+                        // Fetch AI track record for self-awareness
+                        string? entryTrackRecord = null;
+                        try
+                        {
+                            var (total, correct, wrong) = await _portfolioRepo.GetAiAccuracyStatsAsync(30);
+                            if (total >= 3)
+                            {
+                                var accuracy = (double)correct / total;
+                                entryTrackRecord = $"YOUR TRACK RECORD (last 30 days): {total} decisions, " +
+                                    $"{correct} correct ({accuracy:P0}), {wrong} wrong. " +
+                                    (accuracy < 0.5
+                                        ? "Your recent calls have been poor — be more selective with APPROVE decisions."
+                                        : accuracy > 0.7
+                                            ? "Your recent calls have been strong — trust your judgment."
+                                            : "Your accuracy is moderate — weigh the evidence carefully.");
+                            }
+                        }
+                        catch { /* non-critical */ }
+
+                        // Build lightweight portfolio context for entry gate
+                        var entryCtx = $"PORTFOLIO STATE: {challenge.Name} | Cash: ${challenge.CurrentCash:F2} | " +
+                                       $"Open positions: {currentOpenCount}/{maxPositions} | " +
+                                       $"Recent trades: {recentClosed?.Count ?? 0} closed\n" +
+                                       (openPositions.Count > 0
+                                           ? "Current holdings: " + string.Join(", ", openPositions.Select(p => p.Ticker))
+                                           : "No open positions.") +
+                                       (stoppedOutTickers.Count > 0
+                                           ? $"\nRecently stopped out (24h cooldown): {string.Join(", ", stoppedOutTickers)}"
+                                           : "");
                         var aiGate = await GetAiTradeGateDecisionAsync(
-                            c, livePrice ?? entryPrice, evPercent, marketRegime, aiEntryGateEnabled);
+                            c, livePrice ?? entryPrice, evPercent, marketRegime, aiEntryGateEnabled, entryCtx, entryTrackRecord);
+                        // Persist AI decision (fire-and-forget)
+                        _ = _portfolioRepo.SaveAiDecisionAsync(
+                            c.PredictionId ?? c.Ticker, c.Ticker, challenge.Id,
+                            "entry_gate", aiGate.Approved ? "APPROVE" : "REJECT",
+                            aiGate.Reason,
+                            positionScale: aiGate.PositionScale,
+                            entryPrice: entryPrice, currentPrice: livePrice ?? entryPrice,
+                            marketRegime: marketRegime,
+                            portfolioOpenCount: currentOpenCount,
+                            portfolioCash: challenge.CurrentCash);
+
                         if (!aiGate.Approved)
                         {
                             _logger.LogInformation(
@@ -617,6 +754,7 @@ public class PortfolioLifecycleService
                                 c.Ticker, aiGate.Reason);
                             continue;
                         }
+                        aiPositionScale = aiGate.PositionScale;
                     }
 
                     var pos = await _portfolio.AutoOpenPositionAsync(
@@ -636,13 +774,22 @@ public class PortfolioLifecycleService
                         avgWinPercent: tradeStats.IsReal ? tradeStats.AverageWinPercent : null,
                         avgLossPercent: tradeStats.IsReal ? tradeStats.AverageLossPercent : null,
                         statsSampleSize: tradeStats.SampleSize,
-                        currentMarketPrice: livePrice);
+                        currentMarketPrice: livePrice,
+                        positionScaleOverride: aiPositionScale);
 
                     if (pos is not null)
                     {
                         portfolioPositionsOpened++;
                         opened++;
                         brokerTickersOpened?.Add(c.Ticker);
+
+                        // Backfill entry gate AI decision with actual position ID
+                        // (saved with prediction_id before position existed)
+                        if (shouldRunAiGate)
+                        {
+                            _ = _portfolioRepo.BackfillAiDecisionPositionIdAsync(
+                                c.PredictionId ?? c.Ticker, pos.Id);
+                        }
 
                         // Update sector count so subsequent candidates respect the limit
                         if (!string.IsNullOrEmpty(candidateSector))
@@ -884,6 +1031,77 @@ public class PortfolioLifecycleService
             _logger.LogWarning(ex, "[risk-mgmt] Market stress check failed, using normal stops");
         }
 
+        // ── Regime-aware time-stop extension ──
+        // On neutral/bullish days, extend time-stops so positions get room to recover
+        // instead of closing early on what's probably temporary weakness.
+        // On confirmed bearish days, use normal (tighter) time-stops.
+        var timeStopMultiplier = 1.0;
+        string? riskRegime = null;
+        try
+        {
+            var spyQuoteTask = _marketData.GetQuoteAsync("SPY");
+            var spyEmaTask = _marketData.GetEmaAsync("SPY");
+            await Task.WhenAll(spyQuoteTask, spyEmaTask);
+
+            var spyPrice = spyQuoteTask.Result?.Price;
+            var spyEma = spyEmaTask.Result.Ema26;
+
+            if (spyPrice is > 0 && spyEma is > 0)
+            {
+                var spyRatio = spyPrice.Value / spyEma.Value;
+                if (spyRatio > 1.003)
+                    riskRegime = "bullish";
+                else if (spyRatio < 0.997)
+                    riskRegime = "bearish";
+                // else neutral
+
+                // Neutral or bullish → extend time-stops by 2x to give positions recovery room
+                // Bearish → keep normal time-stops (close losers faster)
+                if (riskRegime != "bearish")
+                {
+                    timeStopMultiplier = weights.GetValueOrDefault("time_stop_neutral_extension", 2.0);
+                    _logger.LogInformation(
+                        "[risk-mgmt] Regime {Regime} — extending time-stops by {Mult:F1}x. " +
+                        "Neutral days recover; let positions breathe.",
+                        riskRegime ?? "neutral", timeStopMultiplier);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "[risk-mgmt] Regime bearish — using standard time-stops (close losers faster)");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[risk-mgmt] Regime check for time-stop extension failed — using defaults");
+        }
+
+        // ── Macro shock: also widen stops on days with major economic misses ──
+        // If consumer sentiment crashes or retail sales misses badly, the whole
+        // market dips temporarily. Widening stops avoids getting shaken out by
+        // the initial reaction — stocks often recover by next session.
+        var isMacroShockDay = false;
+        try
+        {
+            var (isMacroShock, shockEvents) = await _finnhub.DetectMacroShockAsync();
+            isMacroShockDay = isMacroShock;
+            if (isMacroShock)
+            {
+                var macroStopWiden = weights.GetValueOrDefault("macro_shock_stop_multiplier", 1.5);
+                stopMultiplier = Math.Max(stopMultiplier, macroStopWiden);
+                // Also extend time-stops — don't close during the panic
+                timeStopMultiplier = Math.Max(timeStopMultiplier, 2.0);
+                _logger.LogWarning(
+                    "[risk-mgmt] MACRO SHOCK: widening stops to {StopMult:F1}x, time-stops to {TimeMult:F1}x — {Events}",
+                    stopMultiplier, timeStopMultiplier, string.Join(" | ", shockEvents));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[risk-mgmt] Macro shock check failed in risk management — proceeding normally");
+        }
+
         var thresholds = new Dictionary<RiskTier, RiskThresholds>
         {
             [RiskTier.Day] = new()
@@ -892,7 +1110,7 @@ public class PortfolioLifecycleService
                 TakeProfit = weights.GetValueOrDefault("risk_tp_day", 0.08),
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_day", 0.04),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_day", 0.025),
-                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_day", 6),
+                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_day", 6) * timeStopMultiplier,
                 TimeStopMinMove = weights.GetValueOrDefault("risk_time_stop_min_move_day", 0.005),
             },
             [RiskTier.Swing] = new()
@@ -901,7 +1119,7 @@ public class PortfolioLifecycleService
                 TakeProfit = weights.GetValueOrDefault("risk_tp_swing", 0.15),
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_swing", 0.10),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_swing", 0.05),
-                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_swing", 72),
+                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_swing", 72) * timeStopMultiplier,
                 TimeStopMinMove = weights.GetValueOrDefault("risk_time_stop_min_move_swing", 0.008),
             },
             [RiskTier.LongTerm] = new()
@@ -910,7 +1128,7 @@ public class PortfolioLifecycleService
                 TakeProfit = 0, // no fixed take-profit for long-term — trailing stop handles it
                 TrailActivate = weights.GetValueOrDefault("risk_trail_activate_longterm", 0.20),
                 TrailPercent = weights.GetValueOrDefault("risk_trail_pct_longterm", 0.10),
-                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_longterm", 168),
+                TimeStopHours = weights.GetValueOrDefault("risk_time_stop_hours_longterm", 168) * timeStopMultiplier,
                 TimeStopMinMove = weights.GetValueOrDefault("risk_time_stop_min_move_longterm", 0.01),
             },
         };
@@ -934,6 +1152,42 @@ public class PortfolioLifecycleService
                 .Distinct()
                 .ToList();
             var candidateMap = await _candidateRepo.GetCandidateMapByPredictionIdsAsync(predictionIds);
+
+            // ── Build portfolio context for AI decisions ──
+            // Fetch recent closed trades so AI can see patterns (churning, streak, etc.)
+            // Only for broker/live — don't waste API calls on pure paper
+            string? portfolioCtx = null;
+            string? aiTrackRecord = null;
+            List<PortfolioPosition>? recentClosed = null;
+            var isBrokerChallenge = challenge.TradingMode is TradingMode.broker_paper or TradingMode.live;
+            var portfolioAllRed = openPositions.Count >= 2
+                && openPositions.All(p => quoteMap.GetValueOrDefault(p.Ticker, p.EntryPrice) < p.EntryPrice);
+            if (isBrokerChallenge && aiExitEnabled)
+            {
+                try
+                {
+                    recentClosed = await _portfolioRepo.GetClosedPositionsAsync(challenge.Id, limit: 10);
+                    portfolioCtx = BuildPortfolioContext(openPositions, quoteMap, challenge, recentClosed);
+
+                    // Fetch AI accuracy stats for self-awareness
+                    var (total, correct, wrong) = await _portfolioRepo.GetAiAccuracyStatsAsync(30);
+                    if (total >= 3)
+                    {
+                        var accuracy = (double)correct / total;
+                        aiTrackRecord = $"YOUR TRACK RECORD (last 30 days): {total} decisions, " +
+                                        $"{correct} correct ({accuracy:P0}), {wrong} wrong. " +
+                                        (accuracy < 0.5
+                                            ? "Your recent calls have been poor — be more cautious with HOLD decisions."
+                                            : accuracy > 0.7
+                                                ? "Your recent calls have been strong — trust your judgment."
+                                                : "Your accuracy is moderate — weigh the evidence carefully.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[risk] Portfolio context build failed — AI will operate without it");
+                }
+            }
 
             foreach (var pos in openPositions)
             {
@@ -961,15 +1215,57 @@ public class PortfolioLifecycleService
                 var pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice;
                 var hwm = pos.HighWaterMark ?? pos.EntryPrice;
 
-                // ── Stop-loss check ──
+                // ── Stop-loss check — AI-gated for broker challenges ──
+                // For broker/live: ask AI before closing. AI can override if this is
+                // a market-wide dip (all positions red) vs stock-specific breakdown.
+                // For paper: mechanical close (save API cost).
                 if (limits.StopLoss > 0 && pnlPercent <= -limits.StopLoss)
                 {
-                    var reason = $"STOP-LOSS ({tier}): {pos.Ticker} down {pnlPercent:P1} " +
+                    if (isBrokerChallenge && aiExitEnabled)
+                    {
+                        var aiStop = await GetAiStopLossOverrideAsync(
+                            pos, currentPrice, pnlPercent, tier, aiExitEnabled,
+                            portfolioCtx ?? "", isMacroShockDay, riskRegime, aiTrackRecord);
+                        // Persist AI decision (fire-and-forget)
+                        _ = _portfolioRepo.SaveAiDecisionAsync(
+                            pos.Id, pos.Ticker, challenge.Id,
+                            "stop_loss_override", aiStop.ShouldClose ? "EXIT" : "HOLD",
+                            aiStop.AiReason,
+                            entryPrice: pos.EntryPrice, currentPrice: currentPrice,
+                            pnlPercent: pnlPercent,
+                            hoursHeld: (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours,
+                            highWaterMark: pos.HighWaterMark,
+                            marketRegime: riskRegime, isMacroShock: isMacroShockDay,
+                            portfolioOpenCount: openPositions.Count,
+                            portfolioAllRed: portfolioAllRed,
+                            portfolioCash: challenge.CurrentCash);
+
+                        if (!aiStop.ShouldClose)
+                        {
+                            _logger.LogWarning(
+                                "[risk] AI OVERRODE stop-loss for {Ticker} at {Pnl:P1}: {Reason}",
+                                pos.Ticker, pnlPercent, aiStop.AiReason);
+                            result.AiOverrides++;
+                            continue; // AI says hold — skip the close
+                        }
+                        // AI agreed to close — include AI reasoning in the exit reason
+                        var reason = $"STOP-LOSS ({tier}): {pos.Ticker} down {pnlPercent:P1} " +
+                                     $"(limit -{limits.StopLoss:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}" +
+                                     (aiStop.AiReason is not null ? $". AI: {aiStop.AiReason}" : "");
+                        await CloseWithReason(pos, currentPrice, reason);
+                        result.StopLossClosed++;
+                        result.ClosedTickers.Add(pos.Ticker);
+                        _logger.LogWarning("[risk] {Reason}", reason);
+                        continue;
+                    }
+
+                    // Paper mode — mechanical close, no AI
+                    var paperReason = $"STOP-LOSS ({tier}): {pos.Ticker} down {pnlPercent:P1} " +
                                  $"(limit -{limits.StopLoss:P0}). Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}";
-                    await CloseWithReason(pos, currentPrice, reason);
+                    await CloseWithReason(pos, currentPrice, paperReason);
                     result.StopLossClosed++;
                     result.ClosedTickers.Add(pos.Ticker);
-                    _logger.LogWarning("[risk] {Reason}", reason);
+                    _logger.LogWarning("[risk] {Reason}", paperReason);
                     continue;
                 }
 
@@ -1071,9 +1367,24 @@ public class PortfolioLifecycleService
                     {
                         if (pnlPercent < limits.TimeStopMinMove)
                         {
-                            // Ask AI for exit decision — is there a reason to keep holding?
+                            // Ask AI for exit decision — pass macro context so AI knows
+                            // whether this is a bad-day dip (hold) or a broken thesis (exit)
                             var aiDecision = await GetAiExitDecisionAsync(
-                                pos, currentPrice, pnlPercent, hoursHeld, tier, aiExitEnabled);
+                                pos, currentPrice, pnlPercent, hoursHeld, tier, aiExitEnabled,
+                                isMacroShockDay, riskRegime, portfolioCtx, aiTrackRecord);
+
+                            // Persist AI decision (fire-and-forget)
+                            _ = _portfolioRepo.SaveAiDecisionAsync(
+                                pos.Id, pos.Ticker, challenge.Id,
+                                "exit_advisor", aiDecision.ShouldExit ? "EXIT" : "HOLD",
+                                aiDecision.AiReason,
+                                entryPrice: pos.EntryPrice, currentPrice: currentPrice,
+                                pnlPercent: pnlPercent, hoursHeld: hoursHeld,
+                                highWaterMark: pos.HighWaterMark,
+                                marketRegime: riskRegime, isMacroShock: isMacroShockDay,
+                                portfolioOpenCount: openPositions.Count,
+                                portfolioAllRed: portfolioAllRed,
+                                portfolioCash: challenge.CurrentCash);
 
                             if (aiDecision.ShouldExit)
                             {
@@ -1257,6 +1568,149 @@ public class PortfolioLifecycleService
     }
 
     /// <summary>Close a position with a specific risk management reason.</summary>
+
+    // ── Portfolio Context ────────────────────────────────────────────────
+    // Shared context block that gives AI a holistic portfolio view.
+    // Both entry gate, exit advisor, and stop-loss override use this
+    // so AI can see "everything is red = market dip" vs "just this stock."
+
+    private string BuildPortfolioContext(
+        List<PortfolioPosition> openPositions,
+        Dictionary<string, double> quoteMap,
+        PortfolioChallenge challenge,
+        List<PortfolioPosition>? recentClosedTrades = null)
+    {
+        var lines = new List<string>
+        {
+            $"PORTFOLIO STATE: {challenge.Name} | Cash: ${challenge.CurrentCash:F2} | " +
+            $"Balance: ${challenge.CurrentBalance:F2} | Mode: {challenge.TradingMode}"
+        };
+
+        if (openPositions.Count > 0)
+        {
+            lines.Add($"Open positions ({openPositions.Count}):");
+            var allRed = true;
+            var allGreen = true;
+            foreach (var p in openPositions)
+            {
+                var price = quoteMap.GetValueOrDefault(p.Ticker, 0);
+                if (price <= 0) continue;
+                var pnl = (price - p.EntryPrice) / p.EntryPrice;
+                var held = (DateTimeOffset.UtcNow - p.EntryDate).TotalHours;
+                lines.Add($"  {p.Ticker}: entry ${p.EntryPrice:F2} → ${price:F2} ({pnl:P1}), held {held:F0}h");
+                if (pnl >= 0) allRed = false;
+                if (pnl < 0) allGreen = false;
+            }
+            if (allRed && openPositions.Count >= 2)
+                lines.Add("  ⚠ ALL positions are red — this is likely a MARKET-WIDE dip, not stock-specific weakness.");
+            else if (allGreen && openPositions.Count >= 2)
+                lines.Add("  All positions are green — market conditions favorable.");
+        }
+        else
+        {
+            lines.Add("No other open positions.");
+        }
+
+        if (recentClosedTrades is { Count: > 0 })
+        {
+            var recent = recentClosedTrades.Take(5).ToList();
+            var wins = recent.Count(t => t.ProfitLoss > 0);
+            var losses = recent.Count(t => t.ProfitLoss <= 0);
+            lines.Add($"Recent trades (last {recent.Count}): {wins}W-{losses}L");
+            foreach (var t in recent)
+                lines.Add($"  {t.Ticker}: {t.ReasonExited?.Split(':')[0] ?? "unknown"} → " +
+                          $"{(t.ProfitLoss >= 0 ? "+" : "")}${t.ProfitLoss:F2}");
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    // ── AI Stop-Loss Override ────────────────────────────────────────────
+    // Before mechanically closing a stop-loss, ask AI if this is a market-wide
+    // dip (hold) or a broken thesis (exit). Only on non-bearish regime days.
+    // Falls back to mechanical stop-loss if AI errors or is disabled.
+
+    private record AiStopLossDecision(bool ShouldClose, string? AiReason);
+
+    private async Task<AiStopLossDecision> GetAiStopLossOverrideAsync(
+        PortfolioPosition pos, double currentPrice, double pnlPercent,
+        RiskTier tier, bool aiEnabled, string portfolioContext,
+        bool isMacroShockDay, string? regime,
+        string? aiTrackRecord = null)
+    {
+        // Default to mechanical close if AI is disabled
+        if (!aiEnabled || !_ai.IsConfigured)
+            return new AiStopLossDecision(true, null);
+
+        // On confirmed bearish days, don't override — cut losses fast
+        if (regime == "bearish" && !isMacroShockDay)
+            return new AiStopLossDecision(true, "Bearish regime — mechanical stop honored.");
+
+        try
+        {
+            var macroLine = isMacroShockDay
+                ? "A major economic release missed estimates badly today — this is a MACRO SHOCK. " +
+                  "The dip is market-wide. Stocks with intact theses recover within 1-2 sessions."
+                : regime == "bearish"
+                    ? "Market regime is bearish (SPY below EMA)."
+                    : $"Market regime is {regime ?? "neutral"}. Temporary dips often recover on neutral/bullish days.";
+
+            var prompt = $$"""
+                You are a trader managing a real $1,000 account. Stop-loss hit — EXIT or HOLD?
+                The only question: which decision makes us more money going forward?
+
+                {{pos.Ticker}} | Entry: ${{pos.EntryPrice:F2}} → Now: ${{currentPrice:F2}} | P&L: {{pnlPercent:P2}}
+                Peak: ${{pos.HighWaterMark ?? pos.EntryPrice:F2}} | Tier: {{tier}}
+
+                {{macroLine}}
+                {{portfolioContext}}
+                {{(aiTrackRecord ?? "")}}
+
+                Think about P&L — is there a real path back to profit, or are we bleeding?
+                - Default to EXIT. The stop triggered for a reason. Take the small loss, redeploy.
+                - HOLD only if there's a real reason this bounces back:
+                  1. ALL portfolio positions are red (market-wide dip, not stock-specific weakness)
+                  2. It's a macro shock day OR regime is not bearish
+                  3. Loss is under 4% — still recoverable
+                - If this stock dropped alone while others are flat/green → EXIT. That's stock-specific.
+                - If loss is over 5% → EXIT. A -$50 hit on $1,000 is huge — stop the bleeding.
+                - A small loss today beats a big loss tomorrow. There's always another trade.
+
+                Respond in JSON: {"decision": "EXIT" or "HOLD", "reason": "one sentence about the P&L math"}
+                """;
+
+            var result = await _ai.CompleteAsync(new AiCompletionRequest
+            {
+                Messages = [new AiChatMessageDto { Role = "user", Content = prompt }],
+                ResponseFormatJson = true,
+                MaxOutputTokens = 100,
+                ModelOverride = 5, // Terra — real money decisions
+            }, CancellationToken.None);
+
+            if (string.IsNullOrWhiteSpace(result.Text))
+                return new AiStopLossDecision(true, null);
+
+            using var doc = JsonDocument.Parse(result.Text);
+            var decision = doc.RootElement.GetProperty("decision").GetString() ?? "EXIT";
+            var reason = doc.RootElement.GetProperty("reason").GetString() ?? "";
+
+            _logger.LogInformation(
+                "[ai-stop-override] {Ticker} at {Pnl:P1} — AI says {Decision}: {Reason}",
+                pos.Ticker, pnlPercent, decision, reason);
+
+            return new AiStopLossDecision(
+                decision.Equals("EXIT", StringComparison.OrdinalIgnoreCase),
+                reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[ai-stop-override] AI stop-loss override failed for {Ticker}, defaulting to mechanical close",
+                pos.Ticker);
+            return new AiStopLossDecision(true, null);
+        }
+    }
+
     // ── AI Exit Advisor ──────────────────────────────────────────────────
     // When a position hits the time stop, ask AI whether to hold or exit.
     // Uses Terra model for higher-quality decisions on real money positions.
@@ -1267,7 +1721,9 @@ public class PortfolioLifecycleService
 
     private async Task<AiExitDecision> GetAiExitDecisionAsync(
         PortfolioPosition pos, double currentPrice, double pnlPercent,
-        double hoursHeld, RiskTier tier, bool aiEnabled)
+        double hoursHeld, RiskTier tier, bool aiEnabled,
+        bool isMacroShockDay = false, string? regime = null,
+        string? portfolioContext = null, string? aiTrackRecord = null)
     {
         // Default to mechanical exit if AI is disabled or unavailable
         if (!aiEnabled || !_ai.IsConfigured)
@@ -1275,28 +1731,39 @@ public class PortfolioLifecycleService
 
         try
         {
+            var macroContext = isMacroShockDay
+                ? "MACRO CONTEXT: A major economic data release missed estimates badly today. " +
+                  "The whole market is reacting — this is NOT stock-specific weakness. " +
+                  "Stocks with intact theses typically recover within 1-2 sessions after macro shocks."
+                : regime == "bearish"
+                    ? "MACRO CONTEXT: Market regime is bearish (SPY below EMA). Be cautious about holding losers."
+                    : "MACRO CONTEXT: Market regime is neutral/bullish. Temporary dips often recover.";
+
+            var portfolioBlock = portfolioContext is not null
+                ? $"\n{portfolioContext}\n"
+                : "";
+
             var prompt = $$"""
-                You are a trading exit advisor. A position has hit its time stop and the
-                mechanical system wants to close it. Analyze whether to EXIT or HOLD.
+                You are a trader managing a real $1,000 account. Time stop hit — EXIT or HOLD?
+                The only question: which decision makes us more money?
 
-                Position: {{pos.Ticker}}
-                Entry price: ${{pos.EntryPrice:F2}}
-                Current price: ${{currentPrice:F2}}
-                P&L: {{pnlPercent:P2}}
-                Hours held: {{hoursHeld:F0}}h
-                Tier: {{tier}}
-                Entry reason: {{pos.ReasonEntered ?? "unknown"}}
-                High water mark: ${{pos.HighWaterMark ?? pos.EntryPrice:F2}}
+                {{pos.Ticker}} | Entry: ${{pos.EntryPrice:F2}} → Now: ${{currentPrice:F2}} | P&L: {{pnlPercent:P2}}
+                Held: {{hoursHeld:F0}}h | Peak: ${{pos.HighWaterMark ?? pos.EntryPrice:F2}} | Tier: {{tier}}
 
-                Rules:
-                - If the position is LOSING money, strongly favor EXIT — dead money should be redeployed
-                - If barely profitable but flat/stalling, favor EXIT
-                - Only recommend HOLD if there's a clear reason the stock hasn't moved yet
-                  but the original thesis is still intact (e.g., catalyst is upcoming,
-                  strong entry that just needs time)
-                - Be aggressive about cutting losers — profit matters more than being right
+                {{macroContext}}
+                {{portfolioBlock}}
+                {{(aiTrackRecord ?? "")}}
 
-                Respond in JSON: {"decision": "EXIT" or "HOLD", "reason": "one sentence why"}
+                Think about P&L — will holding or exiting make us more money?
+                - If RED and no catalyst to reverse → EXIT and redeploy that capital to something better.
+                - If we were green and faded back to flat → EXIT. The move happened, take what's left.
+                - If barely green (<0.5%) after 20+ hours → EXIT. That capital is doing nothing.
+                - HOLD if the stock is still trending in our favor and hasn't peaked.
+                - HOLD if ALL positions are red — that's a market dip, not a bad pick. It'll recover.
+                - HOLD if there's a clear reason to expect more upside (catalyst, momentum).
+                - Dead money is the enemy. Every dollar sitting in a stale trade is a dollar not making profit elsewhere.
+
+                Respond in JSON: {"decision": "EXIT" or "HOLD", "reason": "one sentence about the P&L decision"}
                 """;
 
             var result = await _ai.CompleteAsync(new AiCompletionRequest
@@ -1335,11 +1802,12 @@ public class PortfolioLifecycleService
     // AI can veto marginal trades that mechanical scoring approves.
     // Uses Terra model for quality. Gated by ai_entry_gate_enabled config.
 
-    private record AiTradeGateResult(bool Approved, string? Reason);
+    private record AiTradeGateResult(bool Approved, string? Reason, double PositionScale = 1.0);
 
     private async Task<AiTradeGateResult> GetAiTradeGateDecisionAsync(
         PaperStockCandidate candidate, double livePrice, double? evPercent,
-        string? marketRegime, bool aiEnabled)
+        string? marketRegime, bool aiEnabled,
+        string? portfolioContext = null, string? aiTrackRecord = null)
     {
         if (!aiEnabled || !_ai.IsConfigured)
             return new AiTradeGateResult(true, null);
@@ -1347,41 +1815,43 @@ public class PortfolioLifecycleService
         try
         {
             var evDisplay = evPercent is not null ? $"{evPercent:F1}%" : "n/a";
+            var portfolioBlock = portfolioContext is not null
+                ? $"\n{portfolioContext}\n"
+                : "";
+
             var prompt = $$"""
-                You are a trading entry advisor. The mechanical scoring system has approved
-                this trade. Make a final GO or NO-GO decision.
+                You are a trader managing a real $1,000 account. One goal: MAKE MONEY.
+                Our system found a trade. Will this make us profit?
 
-                Stock: {{candidate.Ticker}}
-                Direction: {{candidate.WinningDirection}}
-                Timeframe: {{candidate.Timeframe}}
-                Confidence: {{candidate.ConfidenceScore}}
-                Expected Value: {{evDisplay}}
-                Entry price: ${{candidate.EntryPrice:F2}}
-                Target price: ${{candidate.TargetPrice:F2}}
-                Stop price: ${{candidate.StopPrice:F2}}
-                Live price: ${{livePrice:F2}}
-                Quality tier: {{candidate.QualityTier}}
-                Market regime: {{marketRegime ?? "unknown"}}
-                Candidate mode: {{candidate.CandidateMode}}
+                {{candidate.Ticker}} | {{candidate.WinningDirection}} | {{candidate.Timeframe}}
+                Entry: ${{candidate.EntryPrice:F2}} → Target: ${{candidate.TargetPrice:F2}} | Stop: ${{candidate.StopPrice:F2}}
+                Live price: ${{livePrice:F2}} | Confidence: {{candidate.ConfidenceScore}} | EV: {{evDisplay}}
+                Quality: {{candidate.QualityTier}} | Regime: {{marketRegime ?? "unknown"}}
 
-                Rules:
-                - APPROVE if the risk/reward makes sense and the setup looks clean
-                - REJECT if:
-                  * The stock has already moved significantly toward the target (chasing)
-                  * The confidence is borderline and the EV is thin
-                  * The quality tier is weak with low confidence
-                  * Something about the setup looks off (stop too wide, target too ambitious)
-                - Be selective — we want FEWER, BETTER trades, not more trades
-                - Default to APPROVE unless you see a clear reason to reject
+                {{portfolioBlock}}
+                {{(aiTrackRecord ?? "")}}
 
-                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence why"}
+                Think about P&L. Does the math work on this trade?
+                - How many dollars can we make vs how many can we lose?
+                - Is the stop tight enough that if we're wrong, the loss is small?
+                - Is the target realistic — can this stock actually move that much?
+                - Has the stock already made its move, or is the move still ahead?
+                - Any ticker is fine — small cap, large cap — as long as the P&L makes sense.
+
+                APPROVE if the trade has a clear path to profit with controlled downside.
+                REJECT if the math doesn't work: stop too wide relative to target,
+                stock already chasing, or we'd risk too much to make too little.
+
+                Set position_scale: 1.5 high conviction, 1.0 normal, 0.5 if you like it but want smaller size.
+
+                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence about the P&L math", "position_scale": 1.0}
                 """;
 
             var result = await _ai.CompleteAsync(new AiCompletionRequest
             {
                 Messages = [new AiChatMessageDto { Role = "user", Content = prompt }],
                 ResponseFormatJson = true,
-                MaxOutputTokens = 100,
+                MaxOutputTokens = 120,
                 ModelOverride = 5, // Terra for quality decisions
             }, CancellationToken.None);
 
@@ -1391,14 +1861,18 @@ public class PortfolioLifecycleService
             using var doc = JsonDocument.Parse(result.Text);
             var decision = doc.RootElement.GetProperty("decision").GetString() ?? "APPROVE";
             var reason = doc.RootElement.GetProperty("reason").GetString() ?? "";
+            var posScale = 1.0;
+            if (doc.RootElement.TryGetProperty("position_scale", out var scaleEl)
+                && scaleEl.TryGetDouble(out var scaleVal))
+                posScale = Math.Clamp(scaleVal, 0.5, 1.5);
 
             _logger.LogInformation(
-                "[ai-gate] {Ticker} — AI says {Decision}: {Reason}",
-                candidate.Ticker, decision, reason);
+                "[ai-gate] {Ticker} — AI says {Decision} (scale={Scale:F1}x): {Reason}",
+                candidate.Ticker, decision, posScale, reason);
 
             return new AiTradeGateResult(
                 decision.Equals("APPROVE", StringComparison.OrdinalIgnoreCase),
-                reason);
+                reason, posScale);
         }
         catch (Exception ex)
         {
@@ -1416,6 +1890,64 @@ public class PortfolioLifecycleService
             ExitPrice = exitPrice,
             ReasonExited = reason,
         });
+
+        // Evaluate any prior AI decisions for this position (fire-and-forget)
+        _ = EvaluateAiDecisionOutcomesAsync(pos.Id, pos.EntryPrice, exitPrice);
+    }
+
+    /// <summary>
+    /// When a position closes, look up all AI decisions that said HOLD for it
+    /// and evaluate whether that was the right call based on the final exit price.
+    /// A HOLD decision is "correct" if the position eventually recovered to break-even
+    /// or profit before closing. An EXIT decision is always "correct" if it was acted on.
+    /// </summary>
+    private async Task EvaluateAiDecisionOutcomesAsync(
+        string positionId, double entryPrice, double exitPrice)
+    {
+        try
+        {
+            var decisions = await _portfolioRepo.GetUnevaluatedDecisionsForPositionAsync(positionId);
+            if (decisions.Count == 0) return;
+
+            var exitPnl = (exitPrice - entryPrice) / entryPrice;
+
+            foreach (var d in decisions)
+            {
+                var id = d["id"]?.ToString();
+                if (id is null) continue;
+
+                var decision = d["decision"]?.ToString() ?? "";
+                var decisionPrice = double.TryParse(d["current_price"]?.ToString(), out var dp) ? dp : 0;
+                var decisionPnl = double.TryParse(d["pnl_percent"]?.ToString(), out var dpnl) ? dpnl : 0;
+
+                bool correct;
+                string notes;
+
+                if (decision == "HOLD")
+                {
+                    // HOLD was correct if the exit price is better than the price at the time of the HOLD decision
+                    correct = exitPrice > decisionPrice;
+                    notes = correct
+                        ? $"HOLD was correct: price recovered from ${decisionPrice:F2} to exit ${exitPrice:F2}"
+                        : $"HOLD was wrong: price fell from ${decisionPrice:F2} to exit ${exitPrice:F2}";
+                }
+                else // EXIT or APPROVE or REJECT
+                {
+                    // EXIT that was acted on = always correct (it was the decision)
+                    // APPROVE/REJECT for entry gate: correct if profit/loss aligns
+                    correct = decision == "APPROVE" ? exitPnl > 0 : exitPnl <= 0;
+                    notes = $"Entry {decision}: position closed at {exitPnl:P1}";
+                }
+
+                await _portfolioRepo.EvaluateAiDecisionAsync(
+                    id, correct, exitPrice, exitPnl, notes);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ai-decisions] Failed to evaluate AI outcomes for position {PositionId}",
+                positionId);
+        }
     }
 
     // ── Timeframes considered "swing" (multi-day holds) ──
@@ -1519,6 +2051,7 @@ public record RiskCheckResult
     public int PartialProfitsTaken { get; set; }
     public int AiHeldPositions { get; set; }
     public int AiExitPositions { get; set; }
+    public int AiOverrides { get; set; }
     public int TotalClosed => StopLossClosed + TakeProfitClosed + TrailingStopClosed + TimeStopClosed;
     /// <summary>Tickers closed this cycle — used to prevent immediate same-ticker reentry.</summary>
     public HashSet<string> ClosedTickers { get; set; } = new(StringComparer.OrdinalIgnoreCase);

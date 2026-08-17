@@ -2969,6 +2969,20 @@ public class LearningEngine
                 var newSl = Math.Clamp(medianLoss * 1.1, 0.02, 0.15); // 10% wider than median
                 var slKey = $"risk_sl_{tier}";
 
+                // ── R:R guard — never let learning widen stops beyond take-profit ──
+                // Without this, the learning engine pushed day SL to 4.3% while TP was 2%,
+                // creating a 0.47:1 R:R that guaranteed losses. Industry minimum is 1.5:1.
+                // Use the tier's default TP as the ceiling — stop must be smaller than target.
+                var tpDefault = tier == "day" ? 0.03 : tier == "swing" ? 0.05 : 0.15;
+                var maxAllowedSl = tpDefault * 0.67; // ensures minimum 1.5:1 R:R
+                if (newSl > maxAllowedSl)
+                {
+                    _logger.LogInformation(
+                        "[learning] R:R guard: capping {Tier} SL from {New:P1} to {Max:P1} (TP is {Tp:P1}, min R:R 1.5:1)",
+                        tier, newSl, maxAllowedSl, tpDefault);
+                    newSl = maxAllowedSl;
+                }
+
                 var slOverride = new ScoringWeightOverride
                 {
                     SignalName = slKey,

@@ -236,7 +236,8 @@ public class PortfolioBalanceEngine
         double? avgWinPercent = null,
         double? avgLossPercent = null,
         int statsSampleSize = 0,
-        double? currentMarketPrice = null)
+        double? currentMarketPrice = null,
+        double positionScaleOverride = 1.0)
     {
         var challenge = await _repo.GetChallengeAsync(portfolioId);
         if (challenge is null || challenge.Status != ChallengeStatus.active) return null;
@@ -245,6 +246,18 @@ public class PortfolioBalanceEngine
             challenge.CurrentCash, entryPrice, challenge.RiskProfile, assetType,
             confidence, expectedValuePercent, sizingConfig, atrPercent,
             winRate, avgWinPercent, avgLossPercent, statsSampleSize);
+
+        // Apply AI position scale override (0.5x–1.5x)
+        if (Math.Abs(positionScaleOverride - 1.0) > 0.01)
+        {
+            var scaledQuantity = assetType == PositionAssetType.option
+                ? Math.Floor(quantity * positionScaleOverride)
+                : Math.Round(quantity * positionScaleOverride, 2);
+            _logger.LogInformation(
+                "[balance-engine] AI position scale {Scale:F1}x: {Ticker} qty {OldQty} → {NewQty}",
+                positionScaleOverride, ticker, quantity, scaledQuantity);
+            quantity = scaledQuantity;
+        }
 
         if (quantity <= 0)
         {
