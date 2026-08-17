@@ -31,6 +31,8 @@ export interface BacktestRun {
   worst_trade: number | null;
   summary: string | null;
   error_message: string | null;
+  skipped_days: number | null;
+  regime_gate_active: boolean | null;
   created_at: string;
   completed_at: string | null;
 }
@@ -56,6 +58,9 @@ export interface BacktestTrade {
   score_debug: string | null;
   meta_probability: number | null;
   meta_model_version: number | null;
+  regime_adx: number | null;
+  regime_rv_ratio: number | null;
+  regime_hh_count: number | null;
   created_at: string;
 }
 

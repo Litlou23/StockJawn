@@ -51,7 +51,10 @@ public class SimulatedPortfolio
         string? sector = null,
         string? scoreDebug = null,
         double? metaProbability = null,
-        int? metaModelVersion = null)
+        int? metaModelVersion = null,
+        double? regimeAdx = null,
+        double? regimeRvRatio = null,
+        int? regimeHhCount = null)
     {
         // ── Cash check ──
         if (Cash < _config.MinPositionDollars)
@@ -142,6 +145,9 @@ public class SimulatedPortfolio
             ScoreDebug = scoreDebug,
             MetaProbability = metaProbability,
             MetaModelVersion = metaModelVersion,
+            RegimeAdx = regimeAdx,
+            RegimeRvRatio = regimeRvRatio,
+            RegimeHhCount = regimeHhCount,
         };
 
         Cash -= dollarsInvested;
@@ -373,6 +379,9 @@ public class SimulatedPortfolio
                 ScoreDebug = p.ScoreDebug,
                 MetaProbability = p.MetaProbability,
                 MetaModelVersion = p.MetaModelVersion,
+                RegimeAdx = p.RegimeAdx,
+                RegimeRvRatio = p.RegimeRvRatio,
+                RegimeHhCount = p.RegimeHhCount,
             };
         }).ToList();
     }
@@ -540,6 +549,11 @@ public class SimPosition
     // Meta-labeler advisory output (nullable when no model was loaded).
     public double? MetaProbability { get; init; }
     public int? MetaModelVersion { get; init; }
+
+    // SPY trend-quality snapshot at entry (Aug 2026 regime gate).
+    public double? RegimeAdx { get; init; }
+    public double? RegimeRvRatio { get; init; }
+    public int? RegimeHhCount { get; init; }
 
     // Risk params
     public double StopLossPct { get; init; }

@@ -29,6 +29,28 @@ public record MarketRegimeResult
     /// <summary>Deterministic summary (e.g. "Bull Trend (82%), Risk On (74%)").</summary>
     public string Summary { get; init; } = "";
     public DateTimeOffset ClassifiedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    // ── Trend-quality gate (Aug 2026, regime-conditional trading) ──
+    /// <summary>
+    /// True when the market shows characteristics that suit trend-following
+    /// systems: strong ADX, moderate volatility, clear directional sequence.
+    /// False means "sit out" — the scoring engine's signals won't follow through
+    /// today. Backtest + live pipelines short-circuit their scoring loop when
+    /// this is false.
+    /// </summary>
+    public bool IsTradeableRegime { get; init; } = true;
+
+    /// <summary>Human-readable reason IsTradeableRegime is what it is.</summary>
+    public string TradeableRegimeReason { get; init; } = "";
+
+    /// <summary>SPY ADX-14. Above ~25 = trending. Below ~20 = choppy. Null when unknown.</summary>
+    public double? SpyAdx { get; init; }
+
+    /// <summary>Ratio of 5-day realized vol to 20-day realized vol. Outside 0.7–1.3 = regime transition/chop.</summary>
+    public double? RealizedVolRatio { get; init; }
+
+    /// <summary>Count of higher-highs in last 10 SPY daily bars (0–10). Higher = cleaner uptrend.</summary>
+    public int? HigherHighCount { get; init; }
 }
 
 /// <summary>
@@ -89,4 +111,12 @@ public record MarketRegimeContext
     public double? SpyRsi { get; init; }
     /// <summary>SPY 20-day rate of change (percent).</summary>
     public double? SpyRateOfChange { get; init; }
+
+    // ── Trend quality (Aug 2026) ─────────────────────────────────
+    /// <summary>SPY ADX-14. Trend strength; above 25 = clear trend, below 20 = chop.</summary>
+    public double? SpyAdx { get; init; }
+    /// <summary>Ratio of 5-day to 20-day realized volatility on SPY.</summary>
+    public double? RealizedVolRatio { get; init; }
+    /// <summary>Higher-high count over last 10 SPY daily bars (0–10).</summary>
+    public int? HigherHighCount { get; init; }
 }

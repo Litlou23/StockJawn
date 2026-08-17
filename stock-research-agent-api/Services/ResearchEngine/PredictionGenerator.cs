@@ -301,6 +301,25 @@ public class PredictionGenerator
             var stressForRegime = await _stressDetector.EvaluateAsync();
             var qqqEma = await _marketData.GetEmaAsync("QQQ");
 
+            // Trend-quality signals from the last ~60 SPY daily bars — feeds
+            // the IsTradeableRegime gate. On days classified as chop/unstable,
+            // downstream code short-circuits scoring instead of generating
+            // signals that won't follow through.
+            Services.MarketRegime.TrendQualityCalculator.TrendQuality? spyTrendQuality = null;
+            try
+            {
+                var spyHistory = await _marketData.GetHistoricalBarsAsync(
+                    "SPY",
+                    DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-90),
+                    DateOnly.FromDateTime(DateTime.UtcNow));
+                if (spyHistory.Count >= 30)
+                    spyTrendQuality = Services.MarketRegime.TrendQualityCalculator.Evaluate(spyHistory);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "[prediction] SPY trend-quality fetch failed for {Ticker} — defaulting tradeable", ticker);
+            }
+
             var regimeCtx = new MarketRegimeContext
             {
                 // SPY price / EMA26 as short-term trend ratio (~50-day proxy)
@@ -315,9 +334,23 @@ public class PredictionGenerator
                     : null,
                 // VIX from stress detector (already cached)
                 Vix = stressForRegime.Vix,
+                SpyAdx = spyTrendQuality?.Adx,
+                RealizedVolRatio = spyTrendQuality?.RealizedVolRatio,
+                HigherHighCount = spyTrendQuality?.HigherHighCount,
             };
 
             regimeResult = _regimeEngine.Classify(regimeCtx);
+            if (spyTrendQuality is not null)
+            {
+                regimeResult = regimeResult with
+                {
+                    IsTradeableRegime = spyTrendQuality.IsTradeable,
+                    TradeableRegimeReason = spyTrendQuality.Reason,
+                    SpyAdx = spyTrendQuality.Adx,
+                    RealizedVolRatio = spyTrendQuality.RealizedVolRatio,
+                    HigherHighCount = spyTrendQuality.HigherHighCount,
+                };
+            }
 
             _logger.LogInformation(
                 "[prediction] Market regime: {Primary} ({Confidence:P0}) — {Summary}",

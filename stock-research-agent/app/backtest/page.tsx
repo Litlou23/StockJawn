@@ -219,7 +219,7 @@ function RunTab() {
             <table className="w-full text-left text-xs">
               <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
                 <tr>
-                  {['Started', 'Range', 'Status', 'Days', 'Trades', 'Win %', 'PnL %', 'Sharpe', 'Max DD', 'PF', ''].map(h => (
+                  {['Started', 'Range', 'Status', 'Days', 'Skipped', 'Trades', 'Win %', 'PnL %', 'Sharpe', 'Max DD', 'PF', ''].map(h => (
                     <th key={h} className="px-2 py-2 whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -231,6 +231,9 @@ function RunTab() {
                     <td className="px-2 py-2 text-zinc-300">{r.start_date} → {r.end_date}</td>
                     <td className="px-2 py-2"><StatusPill v={r.status} /></td>
                     <td className="px-2 py-2 text-zinc-300">{r.trading_days ?? '—'}</td>
+                    <td className={`px-2 py-2 ${r.skipped_days && r.skipped_days > 0 ? 'text-amber-300' : 'text-zinc-500'}`}>
+                      {r.skipped_days == null ? '—' : r.skipped_days}
+                    </td>
                     <td className="px-2 py-2 text-zinc-300">{r.trades_taken ?? '—'}</td>
                     <td className="px-2 py-2 text-zinc-300">{fmtNum(r.win_rate, 1)}</td>
                     <td className={`px-2 py-2 font-medium ${
@@ -314,7 +317,7 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
           <table className="w-full text-left text-xs">
             <thead className="border-b border-zinc-800 bg-zinc-900/80 uppercase text-zinc-400">
               <tr>
-                {['Ticker', 'Dir', 'Entry', 'Exit', 'Reason', 'PnL $', 'PnL %', 'MFE %', 'MAE %', 'Conf', 'Meta', 'EV', 'R/R'].map(h => (
+                {['Ticker', 'Dir', 'Entry', 'Exit', 'Reason', 'PnL $', 'PnL %', 'MFE %', 'MAE %', 'Conf', 'Meta', 'ADX', 'EV', 'R/R'].map(h => (
                   <th key={h} className="px-2 py-2 whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -351,6 +354,14 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
                           : 'text-red-300'
                   }`}>
                     {t.meta_probability == null ? '—' : t.meta_probability.toFixed(2)}
+                  </td>
+                  <td className={`px-2 py-1 font-mono ${
+                    t.regime_adx == null ? 'text-zinc-500'
+                      : t.regime_adx >= 25 ? 'text-emerald-300'
+                        : t.regime_adx >= 20 ? 'text-amber-300'
+                          : 'text-red-300'
+                  }`}>
+                    {t.regime_adx == null ? '—' : t.regime_adx.toFixed(1)}
                   </td>
                   <td className="px-2 py-1 text-zinc-300">{fmtNum(t.expected_value)}</td>
                   <td className="px-2 py-1 text-zinc-300">{fmtNum(t.risk_reward_ratio)}</td>

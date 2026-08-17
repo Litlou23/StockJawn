@@ -33,6 +33,7 @@ public class DynamicPickOrchestrator
     private readonly IOpportunityLearningService _opportunityLearning;
     private readonly NeutralOutcomeEvaluator _neutralEvaluator;
     private readonly OutcomeEvaluator _outcomeEvaluator;
+    private readonly Services.MarketData.MarketDataService _marketData;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
 
     public DynamicPickOrchestrator(
@@ -48,6 +49,7 @@ public class DynamicPickOrchestrator
         IOpportunityLearningService opportunityLearning,
         NeutralOutcomeEvaluator neutralEvaluator,
         OutcomeEvaluator outcomeEvaluator,
+        Services.MarketData.MarketDataService marketData,
         ILogger<DynamicPickOrchestrator> logger)
     {
         _dailyService = dailyService;
@@ -62,6 +64,7 @@ public class DynamicPickOrchestrator
         _opportunityLearning = opportunityLearning;
         _neutralEvaluator = neutralEvaluator;
         _outcomeEvaluator = outcomeEvaluator;
+        _marketData = marketData;
         _logger = logger;
     }
 
@@ -127,6 +130,38 @@ public class DynamicPickOrchestrator
         {
             _logger.LogWarning(ex, "[dynamic] Evidence recording failed (non-blocking)");
             errors.Add($"evidence-recording: {ex.Message}");
+        }
+
+        // 2c. Trend-quality gate: check if today's SPY looks tradeable.
+        // If not, log and skip candidate creation. This is the live counterpart
+        // to BacktestEngine's chop-day skip — same math, same decision.
+        try
+        {
+            var spyHistory = await _marketData.GetHistoricalBarsAsync(
+                "SPY",
+                DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-90),
+                DateOnly.FromDateTime(DateTime.UtcNow));
+            if (spyHistory.Count >= 30)
+            {
+                var tq = Services.MarketRegime.TrendQualityCalculator.Evaluate(spyHistory);
+                _logger.LogInformation("[dynamic] Trend-quality: {Reason}", tq.Reason);
+                if (!tq.IsTradeable)
+                {
+                    await _researchRepo.LogProgressAsync(scan.RunId, "skipped_regime",
+                        $"Trend-quality gate: {tq.Reason}");
+                    _logger.LogWarning("[dynamic] Skipping candidate creation for run {RunId} — untradeable regime: {Reason}",
+                        scan.RunId, tq.Reason);
+                    return new DynamicMorningResult
+                    {
+                        Report = $"{scan.Report}\n\nCandidate creation skipped — untradeable regime: {tq.Reason}",
+                        Errors = errors,
+                    };
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Trend-quality check failed (non-blocking) — proceeding");
         }
 
         await _researchRepo.LogProgressAsync(scan.RunId, "building_candidates",

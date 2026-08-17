@@ -130,6 +130,7 @@ public class BacktestEngine
             var portfolioConfig = SimPortfolioConfig.FromOverrides(config.ParameterOverrides);
             var portfolio = new SimulatedPortfolio(config.StartingBalance, portfolioConfig);
             var predictionsGenerated = 0;
+            var skippedDays = 0;
 
             progress?.Report($"[backtest] {tradingDays.Count} trading days, {tickers.Count} tickers, ${config.StartingBalance}");
 
@@ -144,10 +145,13 @@ public class BacktestEngine
                 // Step 2: Run exit checks on open positions first (SL/TP/trailing/time stop)
                 portfolio.ProcessDay(day, todaysCandles);
 
-                // Step 3: Score tickers and try to open new positions
-                var scored = await ProcessTradingDayWithPortfolioAsync(
+                // Step 3: Score tickers and try to open new positions.
+                // Also collect the day's regime signals so we can attribute
+                // trades and count skipped days.
+                var (scored, skipped) = await ProcessTradingDayWithPortfolioAsync(
                     day, tickers, weights, config, runId, portfolio, todaysCandles);
                 predictionsGenerated += scored;
+                if (skipped) skippedDays++;
 
                 if ((dayIdx + 1) % 10 == 0 || dayIdx == tradingDays.Count - 1)
                 {
@@ -196,6 +200,9 @@ public class BacktestEngine
                     score_debug = t.ScoreDebug,
                     meta_probability = t.MetaProbability,
                     meta_model_version = t.MetaModelVersion,
+                    regime_adx = t.RegimeAdx,
+                    regime_rv_ratio = t.RegimeRvRatio,
+                    regime_hh_count = t.RegimeHhCount,
                 }).ToArray();
                 await _db.InsertAsync("backtest_trades", rows);
             }
@@ -240,7 +247,10 @@ public class BacktestEngine
                 best_trade = metrics.BestTrade,
                 worst_trade = metrics.WorstTrade,
                 summary = $"${config.StartingBalance} → ${finalEquity:F2} ({portfolioPnl:+0.00;-0.00}%) | " +
-                          metrics.Summary,
+                          metrics.Summary +
+                          (skippedDays > 0 ? $" | Regime gate skipped {skippedDays}/{tradingDays.Count} days." : ""),
+                skipped_days = skippedDays,
+                regime_gate_active = !config.SkipRegimeGate,
                 completed_at = DateTimeOffset.UtcNow.ToString("o"),
             });
 
@@ -281,7 +291,7 @@ public class BacktestEngine
     /// SimulatedPortfolio, which enforces cash, position limits, and all rules.
     /// Returns the number of predictions scored.
     /// </summary>
-    private async Task<int> ProcessTradingDayWithPortfolioAsync(
+    private async Task<(int scored, bool skipped)> ProcessTradingDayWithPortfolioAsync(
         DateOnly day, IReadOnlyList<string> tickers,
         Dictionary<string, double> weights, BacktestConfig config, string runId,
         SimulatedPortfolio portfolio,
@@ -289,8 +299,20 @@ public class BacktestEngine
     {
         var scored = 0;
 
-        // Build SPY regime for this day
-        var regimeResult = await BuildHistoricalRegimeAsync(day);
+        // Build SPY regime for this day. Pass ParameterOverrides so the
+        // regime thresholds can be swept (regime_adx_floor etc.).
+        var regimeResult = await BuildHistoricalRegimeAsync(day, config.ParameterOverrides);
+
+        // Trend-quality gate: if today's SPY regime is choppy/unstable,
+        // skip scoring entirely. This is THE change that addresses the
+        // May-Aug losing sweep — we discovered the engine wins in trends and
+        // loses in chop, so don't paddle out on flat water.
+        // Bypass with config.SkipRegimeGate = true for A/B comparisons.
+        if (regimeResult is { IsTradeableRegime: false } && !config.SkipRegimeGate)
+        {
+            _logger.LogDebug("[backtest] Day {Day} skipped: {Reason}", day, regimeResult.TradeableRegimeReason);
+            return (scored, skipped: true);
+        }
 
         // Determine regime direction for entry gating
         string? regimeDirection = regimeResult?.PrimaryRegime switch
@@ -440,10 +462,13 @@ public class BacktestEngine
                 sector: sector,
                 scoreDebug: scoreDebug,
                 metaProbability: metaProb,
-                metaModelVersion: metaVersion);
+                metaModelVersion: metaVersion,
+                regimeAdx: regimeResult?.SpyAdx,
+                regimeRvRatio: regimeResult?.RealizedVolRatio,
+                regimeHhCount: regimeResult?.HigherHighCount);
         }
 
-        return scored;
+        return (scored, skipped: false);
     }
 
     /// <summary>
@@ -539,7 +564,8 @@ public class BacktestEngine
     }
 
     /// <summary>Build market regime from historical SPY data.</summary>
-    private async Task<MarketRegimeResult?> BuildHistoricalRegimeAsync(DateOnly day)
+    private async Task<MarketRegimeResult?> BuildHistoricalRegimeAsync(
+        DateOnly day, Dictionary<string, double>? paramOverrides = null)
     {
         try
         {
@@ -563,6 +589,15 @@ public class BacktestEngine
                 qqqEma26 = HistoricalMarketSnapshotBuilder.ComputeEma(qqqCloses, 26);
             }
 
+            // Trend-quality signals (ADX + realized-vol ratio + higher-high count).
+            // These drive the IsTradeableRegime gate so untradeable (chop) days
+            // skip scoring entirely — the fix for the May-Aug losing sweep.
+            // Thresholds come from ParameterOverrides so sweeps can vary them.
+            var trendQualityThresholds = Services.MarketRegime.TrendQualityCalculator
+                .ThresholdsFromOverrides(paramOverrides);
+            var trendQuality = Services.MarketRegime.TrendQualityCalculator
+                .Evaluate(spyCandles, trendQualityThresholds);
+
             var ctx = new MarketRegimeContext
             {
                 SpyTrendRatio = spyEma26 is not null && spyEma26 > 0
@@ -572,9 +607,20 @@ public class BacktestEngine
                 SpyLongTrendRatio = spyEma50 is not null && spyEma50 > 0
                     ? Math.Round(spyQuote.Price / spyEma50.Value, 4) : null,
                 Vix = null, // no historical VIX data
+                SpyAdx = trendQuality.Adx,
+                RealizedVolRatio = trendQuality.RealizedVolRatio,
+                HigherHighCount = trendQuality.HigherHighCount,
             };
 
-            return _regimeEngine.Classify(ctx);
+            var baseResult = _regimeEngine.Classify(ctx);
+            return baseResult with
+            {
+                IsTradeableRegime = trendQuality.IsTradeable,
+                TradeableRegimeReason = trendQuality.Reason,
+                SpyAdx = trendQuality.Adx,
+                RealizedVolRatio = trendQuality.RealizedVolRatio,
+                HigherHighCount = trendQuality.HigherHighCount,
+            };
         }
         catch (Exception ex)
         {
@@ -771,6 +817,14 @@ public class BacktestConfig
     /// </summary>
     public double? MetaProbabilityThreshold { get; init; }
 
+    /// <summary>
+    /// A/B testing hook — set true to bypass the trend-quality gate that
+    /// skips chop days. Default false (gate is active). Flip to true on the
+    /// same date range to see how many trades / how much P&amp;L the gate cost
+    /// you (or saved you).
+    /// </summary>
+    public bool SkipRegimeGate { get; init; }
+
     public double GetOverride(string key, double defaultValue)
         => ParameterOverrides is not null && ParameterOverrides.TryGetValue(key, out var v) ? v : defaultValue;
 }
@@ -825,6 +879,9 @@ public class BacktestTrade
     public string? ScoreDebug { get; init; }
     public double? MetaProbability { get; init; }
     public int? MetaModelVersion { get; init; }
+    public double? RegimeAdx { get; init; }
+    public double? RegimeRvRatio { get; init; }
+    public int? RegimeHhCount { get; init; }
 }
 
 internal record DayResult
