@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.TradeDecision;
+using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -29,6 +30,7 @@ public class PortfolioLifecycleService
     private readonly TradeStatsProvider _tradeStats;
     private readonly IOpenAiCompletionService _ai;
     private readonly FinnhubProvider _finnhub;
+    private readonly IBrokerAdapter _broker;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -42,6 +44,7 @@ public class PortfolioLifecycleService
         TradeStatsProvider tradeStats,
         IOpenAiCompletionService ai,
         FinnhubProvider finnhub,
+        IBrokerAdapter broker,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -54,6 +57,7 @@ public class PortfolioLifecycleService
         _tradeStats = tradeStats;
         _ai = ai;
         _finnhub = finnhub;
+        _broker = broker;
         _logger = logger;
     }
 
@@ -323,6 +327,50 @@ public class PortfolioLifecycleService
                 "[portfolio] Filtered out {Count} candidates below confidence threshold {Min}",
                 filteredByConfidence, minConfidence);
 
+        // ── Cross-challenge cooldown & blacklist — built once, shared across all challenges ──
+        // BX bug: ticker stopped out in Stock Growth (paper) then immediately re-entered in
+        // Broker Paper Trading because cooldown only checked the current challenge's history.
+        // Fix: aggregate stop-loss exits and repeat losers across ALL challenges.
+        var globalCooldownCutoff = DateTimeOffset.UtcNow.AddHours(-24);
+        var globalBlacklistDays = (int)weights.GetValueOrDefault("repeat_loser_blacklist_days", 30);
+        var globalBlacklistCutoff = DateTimeOffset.UtcNow.AddDays(-globalBlacklistDays);
+        var globalStoppedOutTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var globalRepeatLoserTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var allRecentClosedPositions = new List<PortfolioPosition>();
+
+        foreach (var ch in activeChallenges)
+        {
+            var closed = await _portfolioRepo.GetClosedPositionsAsync(ch.Id, limit: 100);
+            allRecentClosedPositions.AddRange(closed);
+        }
+
+        foreach (var p in allRecentClosedPositions
+            .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= globalCooldownCutoff)
+            .Where(p => p.ReasonExited is not null
+                && (p.ReasonExited.StartsWith("STOP-LOSS", StringComparison.OrdinalIgnoreCase)
+                 || p.ReasonExited.StartsWith("TRAILING-STOP", StringComparison.OrdinalIgnoreCase))))
+        {
+            globalStoppedOutTickers.Add(p.Ticker);
+        }
+
+        foreach (var ticker in allRecentClosedPositions
+            .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= globalBlacklistCutoff && p.ProfitLoss < 0)
+            .GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() >= 2)
+            .Select(g => g.Key))
+        {
+            globalRepeatLoserTickers.Add(ticker);
+        }
+
+        if (globalStoppedOutTickers.Count > 0)
+            _logger.LogInformation(
+                "[portfolio] Cross-challenge stop-loss cooldown: {Tickers}",
+                string.Join(", ", globalStoppedOutTickers));
+        if (globalRepeatLoserTickers.Count > 0)
+            _logger.LogInformation(
+                "[portfolio] Cross-challenge repeat loser blacklist: {Tickers} (2+ losses in {Days} days)",
+                string.Join(", ", globalRepeatLoserTickers), globalBlacklistDays);
+
         foreach (var challenge in activeChallenges)
         {
             // ── Drawdown circuit breaker ──
@@ -368,41 +416,13 @@ public class PortfolioLifecycleService
                 }
             }
 
-            // ── Stop-loss cooldown — don't re-enter tickers that just blew through stops ──
-            // A stock that triggered a stop-loss is falling for a reason. Re-entering the
-            // same ticker on the next scan (like AMAT on Aug 14) just compounds losses.
-            // Build a set of tickers stopped out in the last 24h and block them.
-            var recentClosed = await _portfolioRepo.GetClosedPositionsAsync(challenge.Id, limit: 100);
-            var cooldownCutoff = DateTimeOffset.UtcNow.AddHours(-24);
-            var stoppedOutTickers = new HashSet<string>(
-                recentClosed
-                    .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= cooldownCutoff)
-                    .Where(p => p.ReasonExited is not null
-                        && (p.ReasonExited.StartsWith("STOP-LOSS", StringComparison.OrdinalIgnoreCase)
-                         || p.ReasonExited.StartsWith("TRAILING-STOP", StringComparison.OrdinalIgnoreCase)))
-                    .Select(p => p.Ticker),
-                StringComparer.OrdinalIgnoreCase);
-            if (stoppedOutTickers.Count > 0)
-                _logger.LogInformation(
-                    "[portfolio] Stop-loss cooldown active for {Challenge}: {Tickers}",
-                    challenge.Name, string.Join(", ", stoppedOutTickers));
-
-            // ── Repeat loser blacklist — block tickers with 2+ losses recently ──
-            // AMAT lost $18.71 across 4 trades (46% of all losses). If a ticker keeps
-            // losing, stop trading it. The market is telling us something.
-            // Configurable via DB: repeat_loser_blacklist_days (default 30)
-            var blacklistDays = (int)weights.GetValueOrDefault("repeat_loser_blacklist_days", 30);
-            var blacklistCutoff = DateTimeOffset.UtcNow.AddDays(-blacklistDays);
-            var repeatLoserTickers = recentClosed
-                .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= blacklistCutoff && p.ProfitLoss < 0)
-                .GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
-                .Where(g => g.Count() >= 2)
-                .Select(g => g.Key)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (repeatLoserTickers.Count > 0)
-                _logger.LogInformation(
-                    "[portfolio] Repeat loser blacklist for {Challenge}: {Tickers} (2+ losses in {Days} days)",
-                    challenge.Name, string.Join(", ", repeatLoserTickers), blacklistDays);
+            // ── Stop-loss cooldown & repeat loser blacklist ──
+            // Now cross-challenge (built above the loop). A ticker stopped out in ANY
+            // challenge is blocked from ALL challenges for 24h. Repeat losers (2+ losses
+            // across any challenge in the blacklist window) are blocked everywhere.
+            var stoppedOutTickers = globalStoppedOutTickers;
+            var repeatLoserTickers = globalRepeatLoserTickers;
+            var blacklistDays = globalBlacklistDays;
 
             // ── Max open positions check ──
             var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
@@ -782,6 +802,56 @@ public class PortfolioLifecycleService
                         portfolioPositionsOpened++;
                         opened++;
                         brokerTickersOpened?.Add(c.Ticker);
+
+                        // ── Place server-side stop order on Alpaca ──
+                        // Eliminates stop-loss overshoot caused by periodic price checks.
+                        // Alpaca monitors the price and executes instantly when hit.
+                        if (challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
+                            && _broker.IsConfigured && pos.BrokerEntryOrderId is not null)
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var tier = ClassifyTimeframe(c.Timeframe);
+                                    var slPct = tier switch
+                                    {
+                                        RiskTier.Day => weights.GetValueOrDefault("risk_sl_day", 0.05),
+                                        RiskTier.Swing => weights.GetValueOrDefault("risk_sl_swing", 0.08),
+                                        _ => weights.GetValueOrDefault("risk_sl_longterm", 0.15),
+                                    };
+                                    var stopPrice = Math.Round(pos.EntryPrice * (1.0 - slPct), 2);
+
+                                    var stopResult = await _broker.PlaceStopOrderAsync(new BrokerOrderRequest
+                                    {
+                                        Ticker = pos.Ticker,
+                                        Quantity = pos.Quantity,
+                                        Side = BrokerOrderSide.sell,
+                                        TimeInForce = BrokerTimeInForce.gtc,
+                                        ClientOrderId = $"sj-sl-{pos.Id[..8]}",
+                                    }, stopPrice);
+
+                                    if (stopResult.Success && stopResult.BrokerOrderId is not null)
+                                    {
+                                        await _portfolioRepo.UpdateBrokerStopOrderIdAsync(pos.Id, stopResult.BrokerOrderId);
+                                        _logger.LogInformation(
+                                            "[portfolio] BROKER STOP ORDER placed for {Ticker}: stop=${Stop} ({Pct:P0} below ${Entry}), orderId={OrderId}",
+                                            pos.Ticker, stopPrice, slPct, pos.EntryPrice, stopResult.BrokerOrderId);
+                                    }
+                                    else
+                                    {
+                                        _logger.LogWarning(
+                                            "[portfolio] BROKER STOP ORDER FAILED for {Ticker}: {Error}. " +
+                                            "Periodic risk check will still enforce the stop, but with possible overshoot.",
+                                            pos.Ticker, stopResult.ErrorMessage);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "[portfolio] BROKER STOP ORDER exception for {Ticker}", pos.Ticker);
+                                }
+                            });
+                        }
 
                         // Backfill entry gate AI decision with actual position ID
                         // (saved with prediction_id before position existed)
@@ -1326,7 +1396,7 @@ public class PortfolioLifecycleService
                     // but not so tight that normal fluctuations trigger it.
                     var effectiveActivate = pos.PartialProfitTaken ? 0.0 : limits.TrailActivate;
                     var effectiveTrail = pos.PartialProfitTaken
-                        ? limits.TrailPercent * 0.85 // 15% tighter trail after partial TP
+                        ? limits.TrailPercent * 0.90 // 10% tighter trail after partial TP — was 15%, too aggressive
                         : limits.TrailPercent;
 
                     // Check if trailing stop has been activated (price rose above activation threshold)
@@ -1340,6 +1410,46 @@ public class PortfolioLifecycleService
                         var trailFloor = Math.Max(
                             hwm * (1 - effectiveTrail),
                             pos.EntryPrice * 1.001); // guarantee at least +0.1% gain
+
+                        // ── Update broker stop order to match trail floor ──
+                        // When the trailing stop activates or the HWM moves up, the broker-side
+                        // stop should ratchet up too. This ensures Alpaca executes at the
+                        // trailing floor even if our periodic check is late.
+                        if (isBrokerChallenge && _broker.IsConfigured
+                            && pos.BrokerStopOrderId is not null
+                            && currentPrice > trailFloor)
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    var replaceResult = await _broker.ReplaceStopOrderAsync(
+                                        pos.BrokerStopOrderId,
+                                        new BrokerOrderRequest
+                                        {
+                                            Ticker = pos.Ticker,
+                                            Quantity = pos.Quantity,
+                                            Side = BrokerOrderSide.sell,
+                                            TimeInForce = BrokerTimeInForce.gtc,
+                                            ClientOrderId = $"sj-ts-{pos.Id[..8]}",
+                                        },
+                                        trailFloor);
+
+                                    if (replaceResult.Success && replaceResult.BrokerOrderId is not null)
+                                    {
+                                        await _portfolioRepo.UpdateBrokerStopOrderIdAsync(pos.Id, replaceResult.BrokerOrderId);
+                                        _logger.LogInformation(
+                                            "[risk] BROKER STOP UPDATED for {Ticker}: new stop=${Stop} (trail floor, peak=${Peak})",
+                                            pos.Ticker, trailFloor, hwm);
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.LogWarning(ex, "[risk] Failed to update broker stop for {Ticker}", pos.Ticker);
+                                }
+                            });
+                        }
+
                         if (currentPrice <= trailFloor)
                         {
                             var suffix = pos.PartialProfitTaken ? " [post-partial, tightened trail]" : "";
@@ -1884,6 +1994,27 @@ public class PortfolioLifecycleService
 
     private async Task CloseWithReason(PortfolioPosition pos, double exitPrice, string reason)
     {
+        // Cancel any outstanding broker stop order before closing —
+        // otherwise Alpaca will try to fill the stop on a position we're
+        // already closing via market order.
+        if (pos.BrokerStopOrderId is not null && _broker.IsConfigured)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await _broker.CancelOrderAsync(pos.BrokerStopOrderId);
+                    await _portfolioRepo.UpdateBrokerStopOrderIdAsync(pos.Id, null);
+                    _logger.LogInformation("[risk] Cancelled broker stop order {OrderId} for {Ticker} (closing position)",
+                        pos.BrokerStopOrderId, pos.Ticker);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[risk] Failed to cancel broker stop order for {Ticker}", pos.Ticker);
+                }
+            });
+        }
+
         await _portfolio.ClosePositionAsync(new ClosePositionRequest
         {
             PositionId = pos.Id,

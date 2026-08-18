@@ -244,6 +244,15 @@ public class PortfolioChallengeRepository
         });
     }
 
+    public async Task<bool> UpdateBrokerStopOrderIdAsync(string positionId, string? brokerStopOrderId)
+    {
+        return await _db.UpdateAsync("portfolio_positions", $"id=eq.{positionId}", new
+        {
+            broker_stop_order_id = brokerStopOrderId,
+            updated_at = DateTimeOffset.UtcNow.ToString("o"),
+        });
+    }
+
     public async Task<List<PortfolioPosition>> GetOpenPositionsByPredictionIdAsync(string predictionId)
     {
         var rows = await _db.SelectAsync("portfolio_positions",
@@ -536,6 +545,7 @@ public class PortfolioChallengeRepository
         PartialProfitTaken = r["partial_profit_taken"]?.GetValue<bool>() ?? false,
         BrokerEntryOrderId = r["broker_entry_order_id"]?.ToString(),
         BrokerExitOrderId = r["broker_exit_order_id"]?.ToString(),
+        BrokerStopOrderId = r["broker_stop_order_id"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
         UpdatedAt = GetDateTimeOffset(r, "updated_at"),
     };

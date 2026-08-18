@@ -101,7 +101,29 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
     public Task<BrokerOrderResult> PlaceLimitOrderAsync(BrokerOrderRequest request)
         => PlaceOrderAsync(request, "limit");
 
-    private async Task<BrokerOrderResult> PlaceOrderAsync(BrokerOrderRequest request, string orderType)
+    public Task<BrokerOrderResult> PlaceStopOrderAsync(BrokerOrderRequest request, double stopPrice)
+        => PlaceOrderAsync(request, "stop", stopPrice);
+
+    public async Task<BrokerOrderResult> ReplaceStopOrderAsync(string existingOrderId, BrokerOrderRequest request, double newStopPrice)
+    {
+        EnsureConfigured();
+
+        // Alpaca supports PATCH /v2/orders/{id} for stop order replacement
+        // but cancel+replace is more reliable for paper trading
+        var cancelled = await CancelOrderAsync(existingOrderId);
+        if (!cancelled)
+        {
+            _logger.LogWarning("[alpaca] Could not cancel existing stop order {OrderId} — may already be filled/cancelled",
+                existingOrderId);
+        }
+
+        // Small delay to let cancel propagate
+        await Task.Delay(200);
+
+        return await PlaceStopOrderAsync(request, newStopPrice);
+    }
+
+    private async Task<BrokerOrderResult> PlaceOrderAsync(BrokerOrderRequest request, string orderType, double? stopPrice = null)
     {
         EnsureConfigured();
 
@@ -116,6 +138,9 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
 
         if (orderType == "limit" && request.LimitPrice.HasValue)
             body["limit_price"] = request.LimitPrice.Value.ToString("F2");
+
+        if (orderType == "stop" && stopPrice.HasValue)
+            body["stop_price"] = stopPrice.Value.ToString("F2");
 
         if (!string.IsNullOrEmpty(request.ClientOrderId))
             body["client_order_id"] = request.ClientOrderId;

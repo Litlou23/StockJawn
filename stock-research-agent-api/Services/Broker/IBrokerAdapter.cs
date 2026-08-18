@@ -32,6 +32,12 @@ public interface IBrokerAdapter
     /// <summary>Place a limit order. Returns the broker's order ID.</summary>
     Task<BrokerOrderResult> PlaceLimitOrderAsync(BrokerOrderRequest request);
 
+    /// <summary>Place a stop order (sell when price drops to stop_price). Returns the broker's order ID.</summary>
+    Task<BrokerOrderResult> PlaceStopOrderAsync(BrokerOrderRequest request, double stopPrice);
+
+    /// <summary>Replace an existing stop order with a new stop price (cancel + re-place). Returns the new order ID.</summary>
+    Task<BrokerOrderResult> ReplaceStopOrderAsync(string existingOrderId, BrokerOrderRequest request, double newStopPrice);
+
     /// <summary>Cancel an open order by broker order ID.</summary>
     Task<bool> CancelOrderAsync(string brokerOrderId);
 

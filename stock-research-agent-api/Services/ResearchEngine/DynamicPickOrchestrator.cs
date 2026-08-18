@@ -133,29 +133,32 @@ public class DynamicPickOrchestrator
         }
 
         // 2c. Trend-quality gate: check if today's SPY looks tradeable.
-        // If not, log and skip candidate creation. This is the live counterpart
-        // to BacktestEngine's chop-day skip — same math, same decision.
+        // If not, still create candidates (learning system needs data) but
+        // skip portfolio position opening. Matches the backtest engine's
+        // chop-day skip that produced the winning sweep results.
+        // Thresholds are DB-tunable via scoring_weight_overrides (regime_rv_low, etc.)
+        var regimeTradeable = true;
         try
         {
+            var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+            var thresholdWeights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+            var tqThresholds = Services.MarketRegime.TrendQualityCalculator.ThresholdsFromOverrides(thresholdWeights);
+
             var spyHistory = await _marketData.GetHistoricalBarsAsync(
                 "SPY",
                 DateOnly.FromDateTime(DateTime.UtcNow).AddDays(-90),
                 DateOnly.FromDateTime(DateTime.UtcNow));
             if (spyHistory.Count >= 30)
             {
-                var tq = Services.MarketRegime.TrendQualityCalculator.Evaluate(spyHistory);
+                var tq = Services.MarketRegime.TrendQualityCalculator.Evaluate(spyHistory, tqThresholds);
                 _logger.LogInformation("[dynamic] Trend-quality: {Reason}", tq.Reason);
                 if (!tq.IsTradeable)
                 {
-                    await _researchRepo.LogProgressAsync(scan.RunId, "skipped_regime",
-                        $"Trend-quality gate: {tq.Reason}");
-                    _logger.LogWarning("[dynamic] Skipping candidate creation for run {RunId} — untradeable regime: {Reason}",
+                    regimeTradeable = false;
+                    await _researchRepo.LogProgressAsync(scan.RunId, "regime_warning",
+                        $"Trend-quality gate: {tq.Reason} — candidates created, position opening skipped");
+                    _logger.LogWarning("[dynamic] Untradeable regime for run {RunId}: {Reason} — creating candidates but skipping position opening",
                         scan.RunId, tq.Reason);
-                    return new DynamicMorningResult
-                    {
-                        Report = $"{scan.Report}\n\nCandidate creation skipped — untradeable regime: {tq.Reason}",
-                        Errors = errors,
-                    };
                 }
             }
         }
@@ -263,18 +266,28 @@ public class DynamicPickOrchestrator
             $"Saved {savedStockCandidates.Count} paper stock candidates ({stockSaveFailures} failures)");
 
         // 5. Auto-open portfolio positions via extracted service
-        var actionableCandidates = savedStockCandidates
-            .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)
-            .ToList();
-        var portfolioPositionsOpened = await _portfolioLifecycle.OpenPositionsForCandidatesAsync(
-            actionableCandidates, errors);
+        //    Skip if trend-quality gate flagged regime as untradeable (matches backtest behavior).
+        var portfolioPositionsOpened = 0;
+        if (regimeTradeable)
+        {
+            var actionableCandidates = savedStockCandidates
+                .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)
+                .ToList();
+            portfolioPositionsOpened = await _portfolioLifecycle.OpenPositionsForCandidatesAsync(
+                actionableCandidates, errors);
+        }
+        else
+        {
+            _logger.LogInformation("[dynamic] Skipped position opening — untradeable regime (candidates saved for learning)");
+        }
 
         var optionEligible = savedStockCandidates.Count(c => c.QualifiesForOptions);
         var report = $"Generated {savedStockCandidates.Count} paper stock candidates from {runPredictions.Count} predictions" +
                      (stockSaveFailures > 0 ? $" (WARNING: {stockSaveFailures} FAILED TO SAVE)" : "") +
                      $". {optionEligible} were learning-eligible for options. " +
                      $"Saved {optionResult.OptionsGenerated} paper option candidates and blocked {optionResult.BlockedCandidates}." +
-                     (portfolioPositionsOpened > 0 ? $" Opened {portfolioPositionsOpened} portfolio positions." : "");
+                     (portfolioPositionsOpened > 0 ? $" Opened {portfolioPositionsOpened} portfolio positions." : "") +
+                     (!regimeTradeable ? " (regime: untradeable — positions skipped)" : "");
 
         await _researchRepo.LogProgressAsync(scan.RunId, "orchestrator_complete",
             $"Orchestrator done: {savedStockCandidates.Count} candidates, {portfolioPositionsOpened} positions opened, {optionResult.OptionsGenerated} options",

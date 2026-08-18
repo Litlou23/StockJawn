@@ -86,6 +86,8 @@ public record PortfolioPosition
     public string? BrokerEntryOrderId { get; init; }
     /// <summary>Broker order ID for the exit order (null for paper-only positions).</summary>
     public string? BrokerExitOrderId { get; init; }
+    /// <summary>Broker order ID for the server-side stop-loss order on Alpaca. Tracked so we can cancel/replace when trailing stop moves.</summary>
+    public string? BrokerStopOrderId { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
