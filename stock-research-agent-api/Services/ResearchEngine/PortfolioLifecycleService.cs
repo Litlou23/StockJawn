@@ -161,6 +161,8 @@ public class PortfolioLifecycleService
         var minBearishConfidence = (int)weights.GetValueOrDefault("min_bearish_confidence", 55);
         var bearishAllowed = weights.GetValueOrDefault("bearish_portfolio_allowed", 0.0) >= 1.0;
         var aiEntryGateEnabled = weights.GetValueOrDefault("ai_entry_gate_enabled", 1.0) >= 1.0;
+        var entryCutoffHourEt = (int)weights.GetValueOrDefault("entry_cutoff_hour_et", 13);
+        var entryCutoffEnabled = weights.GetValueOrDefault("entry_cutoff_enabled", 1.0) >= 1.0;
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
@@ -463,9 +465,24 @@ public class PortfolioLifecycleService
                 catch { /* best-effort — unknown sector won't block */ }
             }
 
+            // ── Time-of-day gate — block new entries after cutoff ──
+            // Data: entries after 1pm ET have 20-33% win rate vs 44-50% before.
+            // Late-day entries chase moves that already played out and leave
+            // no room for intraday recovery. DB-configurable via entry_cutoff_hour_et.
+            var etNow = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById("America/New_York")); // same pattern as line 122
+            var pastCutoff = entryCutoffEnabled && etNow.Hour >= entryCutoffHourEt;
+            if (pastCutoff)
+            {
+                _logger.LogInformation(
+                    "[portfolio] TIME GATE: Blocking new entries for {Challenge} — current ET hour {Hour} >= cutoff {Cutoff}",
+                    challenge.Name, etNow.Hour, entryCutoffHourEt);
+            }
+
             foreach (var c in eligible)
             {
                 if (opened >= slotsAvailable) break;
+                if (pastCutoff) break; // No new entries after cutoff — exit loop entirely
 
                 // ── Filter candidates by challenge PortfolioMode ──
                 var (allowed, assetType) = FilterByPortfolioMode(challenge, c);
@@ -725,6 +742,32 @@ public class PortfolioLifecycleService
                     var aiPositionScale = 1.0;
                     if (shouldRunAiGate)
                     {
+                        // ── Rejection memory — if AI rejected this ticker today, don't re-ask ──
+                        // BX bug: AI correctly rejected at 17:35 ("price below stop") then
+                        // approved 2 hours later at the same price. Respect same-day rejections.
+                        try
+                        {
+                            var recentDecisions = await _portfolioRepo.GetRecentAiDecisionsAsync(c.Ticker, limit: 5);
+                            var todayStart = DateTime.UtcNow.Date;
+                            var rejectedToday = recentDecisions.Any(d =>
+                                d["decision_type"]?.ToString() == "entry_gate"
+                                && d["decision"]?.ToString() == "REJECT"
+                                && DateTimeOffset.TryParse(d["created_at"]?.ToString(), out var dt)
+                                && dt.UtcDateTime.Date == todayStart);
+
+                            if (rejectedToday)
+                            {
+                                _logger.LogInformation(
+                                    "[portfolio] AI REJECTION MEMORY: Skipping {Ticker} for {Challenge} — " +
+                                    "AI already rejected this ticker's entry gate today. Respecting that decision.",
+                                    c.Ticker, challenge.Name);
+                                continue;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogDebug(ex, "[portfolio] Rejection memory check failed for {Ticker} — proceeding", c.Ticker);
+                        }
                         // Fetch AI track record for self-awareness
                         string? entryTrackRecord = null;
                         try
@@ -745,9 +788,12 @@ public class PortfolioLifecycleService
                         catch { /* non-critical */ }
 
                         // Build lightweight portfolio context for entry gate
+                        var challengeRecentClosed = allRecentClosedPositions
+                            .Where(p => p.PortfolioId == challenge.Id)
+                            .ToList();
                         var entryCtx = $"PORTFOLIO STATE: {challenge.Name} | Cash: ${challenge.CurrentCash:F2} | " +
                                        $"Open positions: {currentOpenCount}/{maxPositions} | " +
-                                       $"Recent trades: {recentClosed?.Count ?? 0} closed\n" +
+                                       $"Recent trades: {challengeRecentClosed.Count} closed\n" +
                                        (openPositions.Count > 0
                                            ? "Current holdings: " + string.Join(", ", openPositions.Select(p => p.Ticker))
                                            : "No open positions.") +
@@ -775,6 +821,22 @@ public class PortfolioLifecycleService
                             continue;
                         }
                         aiPositionScale = aiGate.PositionScale;
+                    }
+
+                    // ── Log entry decision for ALL modes (paper included) so we can review ──
+                    if (!shouldRunAiGate)
+                    {
+                        _ = _portfolioRepo.SaveAiDecisionAsync(
+                            c.PredictionId ?? c.Ticker, c.Ticker, challenge.Id,
+                            "entry_gate", "APPROVE",
+                            $"Mechanical entry (no AI gate for {challenge.TradingMode}). " +
+                            $"Conf={c.ConfidenceScore}, EV={evPercent:F1}%, tier={c.QualityTier}, " +
+                            $"entry=${entryPrice:F2}, live=${livePrice?.ToString("F2") ?? "n/a"}",
+                            positionScale: 1.0,
+                            entryPrice: entryPrice, currentPrice: livePrice ?? entryPrice,
+                            marketRegime: marketRegime,
+                            portfolioOpenCount: currentOpenCount,
+                            portfolioCash: challenge.CurrentCash);
                     }
 
                     var pos = await _portfolio.AutoOpenPositionAsync(
@@ -1946,15 +2008,17 @@ public class PortfolioLifecycleService
                 - Is the stop tight enough that if we're wrong, the loss is small?
                 - Is the target realistic — can this stock actually move that much?
                 - Has the stock already made its move, or is the move still ahead?
+                - Is the live price already past the stop price? If so, the setup is invalid — REJECT.
                 - Any ticker is fine — small cap, large cap — as long as the P&L makes sense.
 
                 APPROVE if the trade has a clear path to profit with controlled downside.
                 REJECT if the math doesn't work: stop too wide relative to target,
-                stock already chasing, or we'd risk too much to make too little.
+                stock already chasing, live price below stop, or we'd risk too much to make too little.
 
                 Set position_scale: 1.5 high conviction, 1.0 normal, 0.5 if you like it but want smaller size.
 
-                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence about the P&L math", "position_scale": 1.0}
+                IMPORTANT: You MUST include a reason for EVERY decision, including approvals.
+                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence explaining why — REQUIRED for both APPROVE and REJECT", "position_scale": 1.0}
                 """;
 
             var result = await _ai.CompleteAsync(new AiCompletionRequest

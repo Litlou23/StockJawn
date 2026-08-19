@@ -93,16 +93,11 @@ public class DynamicPickOrchestrator
         // 2. Load the just-saved predictions for this run.
         var allRunPredictions = await _researchRepo.GetPredictionsByRunAsync(scan.RunId);
 
-        // 2a. Resolve champion profile so we can filter predictions.
-        //     Paper stock candidates + portfolio positions only come from the champion.
-        //     Challenger predictions are stored for analysis but don't generate trades.
-        var championProfileId = await _researchRepo.GetChampionProfileIdAsync();
-        var runPredictions = championProfileId is not null
-            ? allRunPredictions.Where(p => p.ProfileId == championProfileId || p.ProfileId is null).ToList()
-            : allRunPredictions;
+        // 2a. All enabled profiles generate paper stock candidates and can trade.
+        var runPredictions = allRunPredictions;
 
-        _logger.LogInformation("[dynamic] Loaded {Total} predictions for run, {Champion} from champion profile",
-            allRunPredictions.Count, runPredictions.Count);
+        _logger.LogInformation("[dynamic] Loaded {Total} predictions for run from all enabled profiles",
+            allRunPredictions.Count);
 
         // 2b. Record evidence from ALL predictions (including challengers) into the Evidence Engine.
         try
@@ -168,10 +163,10 @@ public class DynamicPickOrchestrator
         }
 
         await _researchRepo.LogProgressAsync(scan.RunId, "building_candidates",
-            $"Building paper stock candidates from {runPredictions.Count} champion predictions");
-        _logger.LogInformation("[dynamic] Wrapping {Count} champion predictions as paper stock candidates", runPredictions.Count);
+            $"Building paper stock candidates from {runPredictions.Count} predictions");
+        _logger.LogInformation("[dynamic] Wrapping {Count} predictions as paper stock candidates", runPredictions.Count);
 
-        // 3. Build stock candidates from champion predictions, then batch-save
+        // 3. Build stock candidates from predictions, then batch-save
         var directionalRankings = StockCandidateService.BuildDirectionalRankings(runPredictions);
         var builtCandidates = new List<(PredictionCandidate Pred, PaperStockCandidate Candidate, StockCandidateService.DirectionalRanking? Ranking)>();
         foreach (var pred in runPredictions)

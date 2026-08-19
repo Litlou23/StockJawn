@@ -280,19 +280,22 @@ public class BacktestController : ControllerBase
     /// sweep id, poll /api/backtest/sweep-status or /api/backtest/sweeps/{id}.
     /// </summary>
     [HttpPost("sweep")]
-    public IActionResult StartSweep([FromBody] BacktestSweepRequest request)
+    public async Task<IActionResult> StartSweep([FromBody] BacktestSweepRequest request)
     {
         if (!ValidateJobSecret())
             return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         var jobName = "backtest-sweep";
         if (_jobs.GetStatus(jobName)?.State == "running")
-            return Conflict(new { error = "Parameter sweep already in progress" });
+        {
+            _jobs.Cancel(jobName);
+            await Task.Delay(500);
+        }
 
         if (request.ParameterSpace is null || request.ParameterSpace.Count == 0)
             return BadRequest(new { error = "parameterSpace is required and must have at least one entry" });
 
-        _jobs.MarkStarted(jobName);
+        var ct = _jobs.MarkStarted(jobName);
 
         _ = Task.Run(async () =>
         {
@@ -330,14 +333,20 @@ public class BacktestController : ControllerBase
                 };
 
                 var progress = new Progress<string>(msg => _jobs.UpdateProgress(jobName, msg));
-                var result = await sweeper.RunSweepAsync(config, progress);
+                var result = await sweeper.RunSweepAsync(config, progress, ct);
 
-                if (result.Error is not null)
+                if (ct.IsCancellationRequested)
+                    _jobs.MarkFailed(jobName, "Cancelled");
+                else if (result.Error is not null)
                     _jobs.MarkFailed(jobName, result.Error);
                 else
                     _jobs.MarkCompleted(jobName,
                         $"Sweep {result.SweepId}: {result.RunsCompleted} runs, best expectancy " +
                         $"{result.Best?.Expectancy:+0.00;-0.00}");
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("[backtest] Sweep cancelled");
             }
             catch (Exception ex)
             {
@@ -417,12 +426,25 @@ public class BacktestController : ControllerBase
     ///                   (ADX floor + realized-vol upper band). Uses the
     ///                   winning scoring params (conf=45, tp=0.06, sl=0.02).
     /// </summary>
+    /// <summary>Cancel a running sweep.</summary>
+    [HttpGet("dev/cancel-sweep")]
+    public IActionResult DevCancelSweep([FromQuery] string? token)
+    {
+        var expected = _configuration["JOB_RUN_SECRET"];
+        if (string.IsNullOrWhiteSpace(expected) || token != expected)
+            return Unauthorized(new { error = "Invalid or missing ?token=" });
+
+        var cancelled = _jobs.Cancel("backtest-sweep");
+        return Ok(new { cancelled, message = cancelled ? "Sweep cancelled" : "No running sweep to cancel" });
+    }
+
     [HttpGet("dev/start-sweep")]
-    public IActionResult DevStartSweep(
+    public async Task<IActionResult> DevStartSweep(
         [FromQuery] string? token,
         [FromQuery] string? preset,
         [FromQuery] string? startDate,
-        [FromQuery] string? endDate)
+        [FromQuery] string? endDate,
+        [FromQuery] int? maxTickers)
     {
         var expected = _configuration["JOB_RUN_SECRET"];
         if (string.IsNullOrWhiteSpace(expected) || token != expected)
@@ -460,6 +482,19 @@ public class BacktestController : ControllerBase
                 },
                 UseSetupHistory = true,
             },
+            "full2" => new BacktestSweepRequest
+            {
+                StartDate = start,
+                EndDate = end,
+                Tickers = null,
+                ParameterSpace = new Dictionary<string, double[]>
+                {
+                    ["min_confidence_threshold"] = new[] { 45.0 },
+                    ["risk_tp_swing"] = new[] { 0.04 },
+                    ["risk_sl_swing"] = new[] { 0.02, 0.03 },
+                },
+                UseSetupHistory = true,
+            },
             "regime_tune" => new BacktestSweepRequest
             {
                 // Tune the trend-quality gate thresholds — keep the winning
@@ -486,9 +521,14 @@ public class BacktestController : ControllerBase
         // Copy of StartSweep body — kept small so this stays a "single dev switch".
         var jobName = "backtest-sweep";
         if (_jobs.GetStatus(jobName)?.State == "running")
-            return Conflict(new { error = "Parameter sweep already in progress" });
+        {
+            // Cancel the running sweep so the new one can start
+            _jobs.Cancel(jobName);
+            // Brief pause to let the cancellation propagate
+            await Task.Delay(500);
+        }
 
-        _jobs.MarkStarted(jobName);
+        var ct = _jobs.MarkStarted(jobName);
         _ = Task.Run(async () =>
         {
             using var scope = _scopeFactory.CreateScope();
@@ -501,6 +541,10 @@ public class BacktestController : ControllerBase
                 List<string> tickers = req.Tickers is { Count: > 0 }
                     ? req.Tickers
                     : (await universeRepo.GetActiveTickerSetAsync()).ToList();
+
+                // Optional cap on ticker count (e.g. ?maxTickers=500)
+                if (maxTickers.HasValue && maxTickers.Value > 0 && tickers.Count > maxTickers.Value)
+                    tickers = tickers.Take(maxTickers.Value).ToList();
 
                 var config = new SweepConfig
                 {
@@ -516,13 +560,19 @@ public class BacktestController : ControllerBase
                 };
 
                 var progress = new Progress<string>(msg => _jobs.UpdateProgress(jobName, msg));
-                var result = await sweeper.RunSweepAsync(config, progress);
+                var result = await sweeper.RunSweepAsync(config, progress, ct);
 
-                if (result.Error is not null)
+                if (ct.IsCancellationRequested)
+                    _jobs.MarkFailed(jobName, "Cancelled");
+                else if (result.Error is not null)
                     _jobs.MarkFailed(jobName, result.Error);
                 else
                     _jobs.MarkCompleted(jobName,
                         $"Sweep {result.SweepId}: {result.RunsCompleted} runs, best expectancy {result.Best?.Expectancy:+0.00;-0.00}");
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("[backtest] Dev sweep cancelled");
             }
             catch (Exception ex)
             {

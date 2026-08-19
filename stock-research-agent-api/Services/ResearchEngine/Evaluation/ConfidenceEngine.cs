@@ -228,17 +228,118 @@ public class ConfidenceEngine : IConfidenceEngine
 
         var rawConfidence = winningScore * dataQualityFactor * confirmMult * riskAdj * calFactor * oppositionPenalty * regimePenalty * synergyMult;
 
-        // ── Bearish mean-reversion trap penalty ──
-        // Data: strong trend + strong momentum bearish = only 38% accuracy, +4.29% avg move
-        // against. When both evaluators strongly agree on bearish, the drop has likely
-        // already happened — we're chasing the end of the move, not the beginning.
-        if (winningDirection == "bearish"
-            && trend.BearishContribution >= 15
-            && momentum.BearishContribution >= 12)
+        // ── Momentum exhaustion vs fresh momentum detection ──
+        // Strong trend + strong momentum can mean two things:
+        //   (a) EXHAUSTION — stock already ran, RSI overbought/oversold, near extreme → penalize
+        //   (b) FRESH RUN  — breakout with room, RSI mid-range, volume confirming → reward
+        // We use RSI + distance from Donchian extremes + volume to distinguish.
+        // DB-configurable thresholds and penalties.
         {
-            var trapPenalty = 0.80; // 20% confidence reduction
-            rawConfidence *= trapPenalty;
-            debugSignals.Add($"Confidence: bearish mean-reversion trap penalty {trapPenalty:F2} — trend bear={trend.BearishContribution:F0}, momentum bear={momentum.BearishContribution:F0}");
+            var rsi = context.Indicators.Rsi14;
+            var volAssess = context.VolatilityAssessment;
+            var distFromResistance = volAssess?.DistanceFromResistance; // negative = below resistance
+            var distFromSupport = volAssess?.DistanceFromSupport;       // positive = above support
+            var volume = outputs.ContainsKey(EvaluatorKind.volume) ? outputs[EvaluatorKind.volume] : null;
+
+            var exhaustionPenalty = Math.Clamp(weights.GetValueOrDefault("momentum_exhaustion_penalty", 0.80), 0.5, 1.0);
+            var freshBonus = Math.Clamp(weights.GetValueOrDefault("momentum_fresh_bonus", 1.08), 1.0, 1.15);
+            var trendThreshold = weights.GetValueOrDefault("momentum_exhaustion_trend_threshold", 18.0);
+            var momThreshold = weights.GetValueOrDefault("momentum_exhaustion_momentum_threshold", 10.0);
+
+            // ── BULLISH direction ──
+            if (winningDirection == "bullish"
+                && trend.BullishContribution >= trendThreshold
+                && momentum.BullishContribution >= momThreshold)
+            {
+                // Exhaustion signals: RSI overbought (>70), near resistance (<1% away), weak volume
+                bool rsiOverbought = rsi is not null && rsi > 70;
+                bool nearResistance = distFromResistance is not null && distFromResistance > -1.0; // within 1% of high
+                bool weakVolume = volume is not null && volume.BullishContribution - volume.BearishContribution < 2;
+
+                int exhaustionFlags = (rsiOverbought ? 1 : 0) + (nearResistance ? 1 : 0) + (weakVolume ? 1 : 0);
+
+                if (exhaustionFlags >= 2)
+                {
+                    // Exhausted — stock is overbought, near resistance, or volume fading
+                    rawConfidence *= exhaustionPenalty;
+                    debugSignals.Add($"Confidence: bullish EXHAUSTION penalty {exhaustionPenalty:F2} — trend bull={trend.BullishContribution:F0}, mom bull={momentum.BullishContribution:F0}, RSI={rsi:F0}, flags={exhaustionFlags}. Chasing the top.");
+                }
+                else if (exhaustionFlags == 0 && rsi is not null && rsi >= 45 && rsi <= 65
+                         && volume is not null && volume.BullishContribution > volume.BearishContribution)
+                {
+                    // Fresh momentum — RSI mid-range with volume confirmation = breakout with room
+                    rawConfidence *= freshBonus;
+                    debugSignals.Add($"Confidence: bullish FRESH momentum bonus {freshBonus:F2} — trend bull={trend.BullishContribution:F0}, mom bull={momentum.BullishContribution:F0}, RSI={rsi:F0}. Healthy run, not exhausted.");
+                }
+                else
+                {
+                    // Ambiguous — mild penalty (half the exhaustion penalty distance from 1.0)
+                    var mildPenalty = 1.0 - (1.0 - exhaustionPenalty) * 0.5;
+                    rawConfidence *= mildPenalty;
+                    debugSignals.Add($"Confidence: bullish momentum caution {mildPenalty:F2} — strong signals but ambiguous exhaustion (RSI={rsi:F0}, flags={exhaustionFlags}).");
+                }
+            }
+
+            // ── BEARISH direction ──
+            // Mirror: strong bearish trend + momentum can be oversold bounce trap OR fresh breakdown
+            if (winningDirection == "bearish"
+                && trend.BearishContribution >= 15
+                && momentum.BearishContribution >= 12)
+            {
+                bool rsiOversold = rsi is not null && rsi < 30;
+                bool nearSupport = distFromSupport is not null && distFromSupport < 1.0; // within 1% of low
+                bool weakVolume2 = volume is not null && volume.BearishContribution - volume.BullishContribution < 2;
+
+                int exhaustionFlags = (rsiOversold ? 1 : 0) + (nearSupport ? 1 : 0) + (weakVolume2 ? 1 : 0);
+
+                if (exhaustionFlags >= 2)
+                {
+                    // Exhausted bearish — oversold, near support, mean-reversion likely
+                    rawConfidence *= exhaustionPenalty;
+                    debugSignals.Add($"Confidence: bearish EXHAUSTION (mean-reversion trap) {exhaustionPenalty:F2} — trend bear={trend.BearishContribution:F0}, mom bear={momentum.BearishContribution:F0}, RSI={rsi:F0}, flags={exhaustionFlags}. Chasing the bottom.");
+                }
+                else if (exhaustionFlags == 0 && rsi is not null && rsi >= 35 && rsi <= 55
+                         && volume is not null && volume.BearishContribution > volume.BullishContribution)
+                {
+                    // Fresh breakdown — RSI mid-range, volume confirming downside
+                    rawConfidence *= freshBonus;
+                    debugSignals.Add($"Confidence: bearish FRESH breakdown bonus {freshBonus:F2} — trend bear={trend.BearishContribution:F0}, mom bear={momentum.BearishContribution:F0}, RSI={rsi:F0}. Healthy selloff, not oversold.");
+                }
+                else
+                {
+                    // Ambiguous — original penalty
+                    var trapPenalty = 0.80;
+                    rawConfidence *= trapPenalty;
+                    debugSignals.Add($"Confidence: bearish mean-reversion trap {trapPenalty:F2} — trend bear={trend.BearishContribution:F0}, mom bear={momentum.BearishContribution:F0}. Likely chasing.");
+                }
+            }
+        }
+
+        // ── Gap-chasing penalty ──
+        // Data: AMAT gapped 4.47% and lost -7% to -8% across 5 trades. Entering after a
+        // large gap means chasing a move that already happened. Significant/Large/Extreme
+        // gaps in the winning direction get penalized.
+        // DB-configurable via gap_chase_penalty (default 0.85) and gap_chase_threshold (default 3.0%).
+        {
+            var volAssessment = context.VolatilityAssessment;
+            if (volAssessment?.GapPercent is double gapPct && gapPct > 0)
+            {
+                var gapThreshold = weights.GetValueOrDefault("gap_chase_threshold", 3.0);
+                var gapPenalty = Math.Clamp(weights.GetValueOrDefault("gap_chase_penalty", 0.85), 0.5, 1.0);
+
+                // Gap up + bullish = chasing upward move. Gap down + bearish = chasing downward move.
+                // GapPercent is signed: positive = gap up, negative = gap down.
+                var gapDirectionMatchesPrediction =
+                    (volAssessment.GapClassification >= GapType.Significant)
+                    && ((winningDirection == "bullish" && gapPct >= gapThreshold)
+                     || (winningDirection == "bearish" && gapPct <= -gapThreshold));
+
+                if (gapDirectionMatchesPrediction)
+                {
+                    rawConfidence *= gapPenalty;
+                    debugSignals.Add($"Confidence: gap-chasing penalty {gapPenalty:F2} — gap {gapPct:F1}% in predicted direction. Entry is chasing the move.");
+                }
+            }
         }
 
         string? capReason = null;

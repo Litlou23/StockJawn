@@ -7,12 +7,19 @@ namespace StockResearchAgent.Api.Services;
 public class JobStatusTracker
 {
     private readonly Dictionary<string, JobStatus> _statuses = new();
+    private readonly Dictionary<string, CancellationTokenSource> _cts = new();
     private readonly object _lock = new();
 
-    public void MarkStarted(string jobName)
+    public CancellationToken MarkStarted(string jobName)
     {
         lock (_lock)
         {
+            // Cancel any previous CTS for this job
+            if (_cts.TryGetValue(jobName, out var oldCts))
+                oldCts.Cancel();
+
+            var cts = new CancellationTokenSource();
+            _cts[jobName] = cts;
             _statuses[jobName] = new JobStatus
             {
                 JobName = jobName,
@@ -22,6 +29,29 @@ public class JobStatusTracker
                 Error = null,
                 Summary = null,
             };
+            return cts.Token;
+        }
+    }
+
+    public bool Cancel(string jobName)
+    {
+        lock (_lock)
+        {
+            if (_cts.TryGetValue(jobName, out var cts) && !cts.IsCancellationRequested)
+            {
+                cts.Cancel();
+                if (_statuses.TryGetValue(jobName, out var status))
+                {
+                    _statuses[jobName] = status with
+                    {
+                        State = "cancelled",
+                        CompletedAt = DateTimeOffset.UtcNow,
+                        Summary = "Cancelled by user",
+                    };
+                }
+                return true;
+            }
+            return false;
         }
     }
 
