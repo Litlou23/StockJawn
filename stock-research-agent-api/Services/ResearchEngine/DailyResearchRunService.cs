@@ -413,19 +413,18 @@ public class DailyResearchRunService
     /// </summary>
     private async Task<(string[] Tickers, Dictionary<string, ResearchAsset> AssetLookup)> GetResearchCandidatesAsync()
     {
+        // ── Load DB-configurable universe quality filters ──
+        var overrides = await _repo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var minInterestScore = (int)weights.GetValueOrDefault("universe_min_interest_score", 50);
+        var maxCandidates = (int)weights.GetValueOrDefault("universe_max_candidates", 60);
+
         var activeAssets = await _universe.GetActiveAssetsAsync(500);
         // Deduplicate by ticker (case-insensitive), keeping highest InterestScore
         var deduped = activeAssets
             .GroupBy(a => a.Ticker, StringComparer.OrdinalIgnoreCase)
             .Select(g => g.OrderByDescending(a => a.InterestScore).First())
             .ToList();
-
-        // Filter: skip low-value tickers that would waste API quota.
-        // Raise threshold high enough to exclude micro-cap noise but keep
-        // anything with real evidence. Also filter warrants/preferred shares
-        // by ticker pattern — they burn API calls and are untradeable.
-        const int minInterestScore = 30;
-        const int maxCandidates = 80;
 
         var qualified = deduped
             .Where(a => !IsUntradeable(a.Ticker))
