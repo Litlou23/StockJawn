@@ -333,7 +333,10 @@ public class PortfolioLifecycleService
         // BX bug: ticker stopped out in Stock Growth (paper) then immediately re-entered in
         // Broker Paper Trading because cooldown only checked the current challenge's history.
         // Fix: aggregate stop-loss exits and repeat losers across ALL challenges.
-        var globalCooldownCutoff = DateTimeOffset.UtcNow.AddHours(-24);
+        // Cooldown now covers ANY losing exit (not just stop-losses).
+        // 72h default instead of 24h — don't jump back into a losing ticker.
+        var cooldownHours = (int)weights.GetValueOrDefault("loser_cooldown_hours", 72);
+        var globalCooldownCutoff = DateTimeOffset.UtcNow.AddHours(-cooldownHours);
         var globalBlacklistDays = (int)weights.GetValueOrDefault("repeat_loser_blacklist_days", 30);
         var globalBlacklistCutoff = DateTimeOffset.UtcNow.AddDays(-globalBlacklistDays);
         var globalStoppedOutTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -346,19 +349,19 @@ public class PortfolioLifecycleService
             allRecentClosedPositions.AddRange(closed);
         }
 
+        // Any losing exit triggers cooldown — stop-loss, trailing-stop, time-stop, EOD, loser cut
         foreach (var p in allRecentClosedPositions
             .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= globalCooldownCutoff)
-            .Where(p => p.ReasonExited is not null
-                && (p.ReasonExited.StartsWith("STOP-LOSS", StringComparison.OrdinalIgnoreCase)
-                 || p.ReasonExited.StartsWith("TRAILING-STOP", StringComparison.OrdinalIgnoreCase))))
+            .Where(p => p.ProfitLoss < 0))
         {
             globalStoppedOutTickers.Add(p.Ticker);
         }
 
+        // Blacklist: even 1 loss in N days blocks re-entry (was 2+ losses)
         foreach (var ticker in allRecentClosedPositions
             .Where(p => p.ExitDate.HasValue && p.ExitDate.Value >= globalBlacklistCutoff && p.ProfitLoss < 0)
             .GroupBy(p => p.Ticker, StringComparer.OrdinalIgnoreCase)
-            .Where(g => g.Count() >= 2)
+            .Where(g => g.Count() >= 1)
             .Select(g => g.Key))
         {
             globalRepeatLoserTickers.Add(ticker);
@@ -366,11 +369,11 @@ public class PortfolioLifecycleService
 
         if (globalStoppedOutTickers.Count > 0)
             _logger.LogInformation(
-                "[portfolio] Cross-challenge stop-loss cooldown: {Tickers}",
-                string.Join(", ", globalStoppedOutTickers));
+                "[portfolio] Loser cooldown ({Hours}h): {Tickers}",
+                cooldownHours, string.Join(", ", globalStoppedOutTickers));
         if (globalRepeatLoserTickers.Count > 0)
             _logger.LogInformation(
-                "[portfolio] Cross-challenge repeat loser blacklist: {Tickers} (2+ losses in {Days} days)",
+                "[portfolio] Loser blacklist: {Tickers} (lost money in last {Days} days)",
                 string.Join(", ", globalRepeatLoserTickers), globalBlacklistDays);
 
         foreach (var challenge in activeChallenges)
@@ -984,11 +987,20 @@ public class PortfolioLifecycleService
 
                 foreach (var pos in portfolioPositions)
                 {
+                    // ── Options: stock quote ≠ option price. Close at entry (flat)
+                    // until we have a real option pricing path.
+                    var exitPrice = pos.AssetType == PositionAssetType.option
+                        ? pos.EntryPrice
+                        : quote.Price;
+                    var exitReason = pos.AssetType == PositionAssetType.option
+                        ? $"EOD auto-close. {c.Ticker} option position closed flat (no option quote available)."
+                        : $"EOD auto-close. {c.Ticker} current price ${quote.Price:F2}.";
+
                     var closed = await _portfolio.ClosePositionAsync(new ClosePositionRequest
                     {
                         PositionId = pos.Id,
-                        ExitPrice = quote.Price,
-                        ReasonExited = $"EOD auto-close. {c.Ticker} current price ${quote.Price:F2}.",
+                        ExitPrice = exitPrice,
+                        ReasonExited = exitReason,
                     });
 
                     if (closed is not null) portfolioPositionsClosed++;
@@ -1068,12 +1080,20 @@ public class PortfolioLifecycleService
                         continue;
                     }
 
+                    // ── Options: stock quote ≠ option price. Close at entry (flat)
+                    // until we have a real option pricing path.
+                    var exitPrice = pos.AssetType == PositionAssetType.option
+                        ? pos.EntryPrice
+                        : quote.Price;
+                    var exitReason = pos.AssetType == PositionAssetType.option
+                        ? $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Option closed flat (no option quote)."
+                        : $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Auto-closed at ${quote.Price:F2}.";
+
                     var result = await _portfolio.ClosePositionAsync(new ClosePositionRequest
                     {
                         PositionId = pos.Id,
-                        ExitPrice = quote.Price,
-                        ReasonExited =
-                            $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Auto-closed at ${quote.Price:F2}.",
+                        ExitPrice = exitPrice,
+                        ReasonExited = exitReason,
                     });
 
                     if (result is not null)
@@ -1094,6 +1114,84 @@ public class PortfolioLifecycleService
 
         if (closed > 0)
             _logger.LogInformation("[portfolio] Released {Count} stranded positions back to cash.", closed);
+
+        return closed;
+    }
+
+    /// <summary>
+    /// Next-day loser cut: close any position that is underwater after being
+    /// held for at least 1 trading day. Frees up capital for better picks
+    /// instead of letting losers bleed until the evaluation window expires.
+    ///
+    /// DB-configurable via scoring_weight_overrides:
+    ///   loser_cut_enabled        = 1 (on) or 0 (off, default on)
+    ///   loser_cut_min_age_hours  = minimum hours before eligible (default 20 — overnight hold)
+    ///   loser_cut_max_loss_pct   = close if loss exceeds this % (default 0 — any red position)
+    /// </summary>
+    public async Task<int> CloseNextDayLosersAsync(List<string> errors)
+    {
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+
+        var enabled = weights.GetValueOrDefault("loser_cut_enabled", 1) >= 1;
+        if (!enabled) return 0;
+
+        var minAgeHours = weights.GetValueOrDefault("loser_cut_min_age_hours", 20); // ~overnight
+        var maxLossPct = weights.GetValueOrDefault("loser_cut_max_loss_pct", 0);    // 0 = any red
+
+        var activeChallenges = await _portfolioRepo.GetActiveChallengesAsync();
+        if (activeChallenges.Count == 0) return 0;
+
+        var closed = 0;
+
+        foreach (var challenge in activeChallenges)
+        {
+            var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
+            if (openPositions.Count == 0) continue;
+
+            foreach (var pos in openPositions)
+            {
+                // Skip options — no reliable quote
+                if (pos.AssetType == PositionAssetType.option) continue;
+
+                var ageHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+                if (ageHours < minAgeHours) continue; // too young — not yet overnight
+
+                var quote = await _marketData.GetQuoteWithFallbackAsync(pos.Ticker);
+                if (quote is null || quote.Price <= 0) continue;
+
+                var pnlPct = (quote.Price - pos.EntryPrice) / pos.EntryPrice;
+
+                // Only close if losing (pnlPct < -maxLossPct threshold)
+                if (pnlPct >= -maxLossPct) continue; // green or within tolerance — keep
+
+                try
+                {
+                    var result = await _portfolio.ClosePositionAsync(new ClosePositionRequest
+                    {
+                        PositionId = pos.Id,
+                        ExitPrice = quote.Price,
+                        ReasonExited = $"Next-day loser cut. {pos.Ticker} down {pnlPct:P1} after {ageHours:F0}h. Freeing capital.",
+                    });
+
+                    if (result is not null)
+                    {
+                        closed++;
+                        _logger.LogInformation(
+                            "[portfolio] LOSER CUT: {Ticker} closed at ${Price:F2} ({Pnl:P1}) after {Age:F0}h for challenge {Challenge}",
+                            pos.Ticker, quote.Price, pnlPct, ageHours, challenge.Name);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[portfolio] Loser cut failed for {Ticker}", pos.Ticker);
+                    errors.Add($"loser-cut {pos.Ticker}: {ex.Message}");
+                }
+            }
+        }
+
+        if (closed > 0)
+            _logger.LogInformation("[portfolio] Next-day loser cut: closed {Count} losing positions.", closed);
 
         return closed;
     }

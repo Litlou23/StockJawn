@@ -358,6 +358,10 @@ public class DynamicPickOrchestrator
         var strandedClosed = await _portfolioLifecycle.CloseExpiredPositionsAsync(errors);
         portfolioPositionsClosed += strandedClosed;
 
+        // 5c. Next-day loser cut — close positions that are underwater after overnight hold
+        var losersCut = await _portfolioLifecycle.CloseNextDayLosersAsync(errors);
+        portfolioPositionsClosed += losersCut;
+
         // 6. Evaluate neutral predictions (parallel pipeline — does not touch directional evaluator)
         var neutralEvaluated = 0;
         try
