@@ -432,6 +432,42 @@ public class DailyResearchRunService
             .OrderByDescending(a => a.InterestScore)
             .ToList();
 
+        // ── Quality tier gate ──
+        // Tickers discovered ONLY from earnings calendars are low-quality (penny stocks,
+        // SPACs, etc. get identical treatment as blue chips). Prioritize tickers from
+        // quality discovery sources OR known large-cap names. Earnings-only junk fills
+        // remaining slots, capped.
+        var earningsOnlySources = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "finnhub-earnings", "fmp-earnings" };
+
+        // Known quality large-caps — mirrors BaseUniverse in UniverseDiscoveryService.
+        // These get quality treatment even when discovered via earnings calendar.
+        var knownQualityTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "TSLA", "AVGO", "ORCL", "CRM",
+            "SHOP", "PLTR", "TTD", "NFLX", "AMD", "UBER", "SQ", "SNOW", "DDOG", "NET",
+            "CRWD", "ZS", "PANW", "FTNT", "MDB", "COIN", "RBLX", "PINS", "SNAP", "APP",
+            "AXON", "CAT", "DE", "GE", "HON", "LMT", "RTX",
+            "COST", "WMT", "TGT", "NKE", "SBUX", "MCD", "CMG",
+            "LLY", "MRNA", "ABBV", "BMY", "GILD",
+            "MU", "QCOM", "MRVL", "KLAC", "LRCX", "AMAT",
+            "JPM", "GS", "MS", "V", "MA",
+        };
+
+        bool IsQuality(ResearchAsset a) =>
+            !earningsOnlySources.Contains(a.DiscoverySource)
+            || knownQualityTickers.Contains(a.Ticker);
+
+        var qualityTickers = qualified.Where(a => IsQuality(a)).ToList();
+        var earningsOnlyTickers = qualified.Where(a => !IsQuality(a)).ToList();
+
+        // DB-configurable: how many slots to reserve for earnings-discovered tickers
+        var maxEarningsSlots = (int)weights.GetValueOrDefault("universe_max_earnings_slots", 15);
+
+        _logger.LogInformation(
+            "[research-engine] Quality gate: {Quality} quality tickers, {EarningsOnly} earnings-only (cap {EarningsCap})",
+            qualityTickers.Count, earningsOnlyTickers.Count, maxEarningsSlots);
+
         // Always include active watchlist tickers first — these are the ones
         // the portfolio actually trades. Fill remaining slots from top universe tickers.
         var activeWatchlist = await _watchlistRepo.GetActiveWatchlistAsync();
@@ -440,16 +476,33 @@ public class DailyResearchRunService
             StringComparer.OrdinalIgnoreCase);
 
         var watchlistCandidates = qualified.Where(a => watchlistTickers.Contains(a.Ticker)).ToList();
-        var universeCandidates = qualified.Where(a => !watchlistTickers.Contains(a.Ticker)).ToList();
+
+        // Quality tickers (non-earnings sources) get priority for remaining slots
+        var qualityNonWatchlist = qualityTickers
+            .Where(a => !watchlistTickers.Contains(a.Ticker))
+            .ToList();
+        // Earnings-only tickers fill last, capped
+        var earningsNonWatchlist = earningsOnlyTickers
+            .Where(a => !watchlistTickers.Contains(a.Ticker))
+            .Take(maxEarningsSlots)
+            .ToList();
 
         // Watchlist tickers that aren't in the universe yet still get scanned
         var missingWatchlistTickers = watchlistTickers
             .Where(t => !watchlistCandidates.Any(a => a.Ticker.Equals(t, StringComparison.OrdinalIgnoreCase)))
             .ToList();
 
-        var remainingSlots = maxCandidates - watchlistCandidates.Count - missingWatchlistTickers.Count;
+        var reservedSlots = watchlistCandidates.Count + missingWatchlistTickers.Count;
+        var remainingSlots = maxCandidates - reservedSlots;
+
+        // Fill: quality first, then earnings-only
+        var universeFill = qualityNonWatchlist
+            .Concat(earningsNonWatchlist)
+            .Take(Math.Max(0, remainingSlots))
+            .ToList();
+
         var finalCandidates = watchlistCandidates
-            .Concat(universeCandidates.Take(Math.Max(0, remainingSlots)))
+            .Concat(universeFill)
             .ToList();
 
         var skipped = deduped.Count - finalCandidates.Count - missingWatchlistTickers.Count;

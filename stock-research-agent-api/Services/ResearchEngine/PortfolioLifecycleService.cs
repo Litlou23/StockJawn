@@ -614,6 +614,19 @@ public class PortfolioLifecycleService
                                 continue;
                             }
 
+                            // ── Minimum price gate — skip penny/micro-cap stocks ──
+                            // Stocks under $10 are volatile garbage with wide spreads.
+                            // The system's predictions on junk tickers are 27-33% accurate.
+                            // DB-configurable via min_stock_price (default $10).
+                            var minStockPrice = weights.GetValueOrDefault("min_stock_price", 10);
+                            if (currentQuote.Price < minStockPrice)
+                            {
+                                _logger.LogInformation(
+                                    "[portfolio] PRICE GATE: Skipping {Ticker} — price ${Price:F2} < ${Min} minimum",
+                                    c.Ticker, currentQuote.Price, minStockPrice);
+                                continue;
+                            }
+
                             // ── Spread estimate filter — skip wide-spread stocks ──
                             // Without L2 data, estimate spread from price and volume.
                             // Empirical formula: tighter spreads for higher-priced, higher-volume stocks.

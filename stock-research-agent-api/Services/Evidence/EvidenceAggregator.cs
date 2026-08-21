@@ -129,14 +129,16 @@ public class EvidenceAggregator : IEvidenceAggregator
         var maxImportance = decayed.Max(x => x.Record.Importance);
         var typeCount = decayed.Select(x => x.Record.EvidenceType).Distinct().Count();
 
-        // Weight volume: each 1.0 of absolute weight = ~15 points
-        var volumeScore = totalAbsWeight * 15.0;
+        // Weight volume: each 1.0 of absolute weight = ~3 points (was 15 — way too generous)
+        // Single earnings event (weight ~0.63) → ~2 pts. Needs 10+ weight to max this component.
+        var volumeScore = totalAbsWeight * 3.0;
 
-        // Peak importance: scale to 0–30 range
-        var peakScore = maxImportance * 0.3;
+        // Peak importance: scale to 0–15 range (was 0–30)
+        // Earnings importance=70 → 10.5 pts. Only importance=100 → 15 pts.
+        var peakScore = maxImportance * 0.15;
 
-        // Diversity bonus: each distinct type beyond 1 adds 5 points
-        var diversityBonus = (typeCount - 1) * 5.0;
+        // Diversity bonus: each distinct type beyond 1 adds 3 points (was 5)
+        var diversityBonus = (typeCount - 1) * 3.0;
 
         var raw = volumeScore + peakScore + diversityBonus;
         return Math.Clamp((int)raw, 0, 100);
