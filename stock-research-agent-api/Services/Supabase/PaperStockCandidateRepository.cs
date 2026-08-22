@@ -318,6 +318,13 @@ public class PaperStockCandidateRepository
         return rows.Select(MapLearningStat).ToList();
     }
 
+    public async Task<StockLearningStat?> GetTickerLearningStatAsync(string ticker)
+    {
+        var row = await _db.SelectSingleAsync("stock_learning_stats",
+            $"stat_type=eq.ticker&stat_key=eq.{ticker}");
+        return row is not null ? MapLearningStat(row) : null;
+    }
+
     // -----------------------------------------------------------------------
     // Link helper for options
     // -----------------------------------------------------------------------

@@ -95,15 +95,16 @@ public class StockCandidateService
     /// Meta-labeler advisory scoring. Returns (probability, model_version) or
     /// (null, null) when no model is loaded. Never throws — advisory only.
     /// </summary>
-    private (double? probability, int? version) ScoreMetaAdvisory(PredictionCandidate pred)
+    private (double? probability, int? version) ScoreMetaAdvisory(
+        PredictionCandidate pred, MetaLabelerContext? context = null)
     {
         if (!_metaLabeler.IsReady || string.IsNullOrWhiteSpace(pred.ScoreDebugJson))
             return (null, null);
         try
         {
-            var breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(pred.ScoreDebugJson);
+            var breakdown = ScoringBreakdownEnvelope.Parse(pred.ScoreDebugJson);
             if (breakdown is null) return (null, null);
-            var p = _metaLabeler.Score(breakdown, pred);
+            var p = _metaLabeler.Score(breakdown, pred, context: context);
             return (p, _metaLabeler.ActiveVersion);
         }
         catch (Exception ex)
@@ -111,6 +112,33 @@ public class StockCandidateService
             _logger.LogDebug(ex, "[meta-labeler] Advisory scoring failed for {Ticker}", pred.Ticker);
             return (null, null);
         }
+    }
+
+    /// <summary>
+    /// Build v2 context for meta-labeler scoring. Populates ticker historical
+    /// win rate from stock_learning_stats. SPY change and sector batch count
+    /// are not available in the single-candidate path — they'll be null (→ 0).
+    /// </summary>
+    private async Task<MetaLabelerContext> BuildMetaContextAsync(PredictionCandidate pred)
+    {
+        float? winRate = null;
+        int? sampleSize = null;
+        try
+        {
+            var stats = await _stockRepo.GetTickerLearningStatAsync(pred.Ticker);
+            if (stats is not null)
+            {
+                winRate = (float)stats.Accuracy;
+                sampleSize = stats.TotalCandidates;
+            }
+        }
+        catch { /* non-critical — features default to 0 */ }
+
+        return new MetaLabelerContext
+        {
+            TickerHistoricalWinRate = winRate,
+            TickerHistoricalSampleSize = sampleSize,
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -255,7 +283,12 @@ public class StockCandidateService
                      $"run percentile={percentileInRun:F1}. " +
                      $"{(qualifies ? "Qualifies" : "Does not qualify")} for learning-mode options.";
 
-        var (metaProb, metaVersion) = ScoreMetaAdvisory(pred);
+        // Build v2 meta-labeler context with available data.
+        // Time-of-day is derived inside the extractor from pred.CreatedAt.
+        // SPY change and sector batch count require batch-level data we don't
+        // have here (single-candidate path). Ticker stats are cheap to look up.
+        var metaCtx = await BuildMetaContextAsync(pred);
+        var (metaProb, metaVersion) = ScoreMetaAdvisory(pred, metaCtx);
 
         // Enforcement gate — if a threshold is configured (via
         // scoring_weight_overrides.meta_labeler_enforce_threshold) and the

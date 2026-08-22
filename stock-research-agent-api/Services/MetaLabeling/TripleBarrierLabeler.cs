@@ -75,6 +75,9 @@ public class TripleBarrierLabeler
         var alreadyLabeled = await GetAlreadyLabeledPredictionIdsAsync(
             outcomes.Select(o => o.PredictionId).ToList());
 
+        // 3. Pre-fetch ticker win rates from stock_learning_stats (v2 features).
+        var tickerStats = await LoadTickerStatsAsync();
+
         int labeled = 0, skipped = 0, failed = 0, wins = 0, losses = 0;
         var newRows = new List<object>();
 
@@ -107,11 +110,14 @@ public class TripleBarrierLabeler
                     continue;
                 }
 
-                var breakdown = JsonSerializer.Deserialize<ScoringBreakdown>(pred.ScoreDebugJson);
+                var breakdown = ScoringBreakdownEnvelope.Parse(pred.ScoreDebugJson);
                 if (breakdown is null) { failed++; continue; }
 
+                // Build v2 context — populate what we can, rest stays null → 0.
+                var ctx = BuildContext(pred, tickerStats);
+
                 var (label, barrier) = ClassifyBarrier(outcome);
-                var features = _features.Extract(breakdown, pred);
+                var features = _features.Extract(breakdown, pred, context: ctx);
                 var featuresJson = JsonSerializer.Serialize(features);
 
                 newRows.Add(new
@@ -160,6 +166,64 @@ public class TripleBarrierLabeler
             Wins = wins,
             Losses = losses,
         };
+    }
+
+    // ── v2 context helpers ────────────────────────────────────────
+
+    /// <summary>
+    /// Build a MetaLabelerContext from available data. Time-of-day comes from
+    /// the prediction itself. Ticker win rate from pre-fetched learning stats.
+    /// SPY change and sector batch count are not available during historical
+    /// labeling — they'll be null (→ 0 in the feature vector). New training
+    /// data generated after deployment will have all features populated.
+    /// </summary>
+    private static MetaLabelerContext BuildContext(
+        PredictionCandidate pred,
+        Dictionary<string, (float winRate, int sampleSize)> tickerStats)
+    {
+        float? tickerWr = null;
+        int? tickerSs = null;
+        if (tickerStats.TryGetValue(pred.Ticker, out var ts))
+        {
+            tickerWr = ts.winRate;
+            tickerSs = ts.sampleSize;
+        }
+
+        return new MetaLabelerContext
+        {
+            // SPY and sector batch not available for historical labeling
+            SpyDailyChangePct = null,
+            SectorBatchCount = null,
+            TickerHistoricalWinRate = tickerWr,
+            TickerHistoricalSampleSize = tickerSs,
+        };
+    }
+
+    /// <summary>
+    /// Pre-fetch all ticker-level stats so we don't hit the DB per prediction.
+    /// </summary>
+    private async Task<Dictionary<string, (float winRate, int sampleSize)>> LoadTickerStatsAsync()
+    {
+        var result = new Dictionary<string, (float, int)>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var rows = await _db.SelectAsync("stock_learning_stats",
+                filter: "stat_type=eq.ticker",
+                limit: 5000);
+            foreach (var r in rows)
+            {
+                var key = r["stat_key"]?.ToString();
+                if (string.IsNullOrEmpty(key)) continue;
+                var acc = r["accuracy"]?.GetValue<double>() ?? 0;
+                var total = r["total_candidates"]?.GetValue<int>() ?? 0;
+                result[key] = ((float)acc, total);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[meta-labeler] Failed to load ticker stats — features will be zero");
+        }
+        return result;
     }
 
     /// <summary>

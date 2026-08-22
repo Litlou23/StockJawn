@@ -3,6 +3,25 @@ using StockResearchAgent.Api.Models;
 namespace StockResearchAgent.Api.Services.MetaLabeling;
 
 /// <summary>
+/// Optional context for v2+ features that require data beyond ScoringBreakdown.
+/// Callers populate what they can; anything left null becomes 0 in the feature vector.
+/// </summary>
+public record MetaLabelerContext
+{
+    /// <summary>SPY daily % change on the prediction date (e.g. -1.2 = SPY fell 1.2%).</summary>
+    public float? SpyDailyChangePct { get; init; }
+
+    /// <summary>How many predictions in the same batch share this ticker's sector.</summary>
+    public int? SectorBatchCount { get; init; }
+
+    /// <summary>Historical win rate for this ticker from stock_learning_stats (0–1).</summary>
+    public float? TickerHistoricalWinRate { get; init; }
+
+    /// <summary>Number of historical samples backing TickerHistoricalWinRate.</summary>
+    public int? TickerHistoricalSampleSize { get; init; }
+}
+
+/// <summary>
 /// Turns a ScoringBreakdown (+ light optional context) into a fixed-length,
 /// fixed-order feature vector.
 ///
@@ -23,7 +42,7 @@ public class MetaLabelerFeatureExtractor
     /// trained against version N cannot be scored with a version-(N+1)
     /// extractor. Used by MetaLabelerService to guard version mismatch.
     /// </summary>
-    public const int FeatureVersion = 1;
+    public const int FeatureVersion = 2;
 
     /// <summary>
     /// Names in the exact order Extract() emits values. Persisted alongside
@@ -82,6 +101,13 @@ public class MetaLabelerFeatureExtractor
         "is_bearish_prediction",
         "is_neutral_prediction",
         "actionability_tier_int",
+
+        // ── v2: Market & ticker context ──
+        "prediction_hour_et",
+        "spy_daily_change_pct",
+        "sector_batch_count",
+        "ticker_historical_win_rate",
+        "ticker_historical_sample_size",
     };
 
     /// <summary>Feature vector length — enforced at extract time.</summary>
@@ -95,10 +121,22 @@ public class MetaLabelerFeatureExtractor
     public float[] Extract(
         ScoringBreakdown breakdown,
         PredictionCandidate? prediction = null,
-        int? daysUntilEarnings = null)
+        int? daysUntilEarnings = null,
+        MetaLabelerContext? context = null)
     {
         var b = breakdown;
         var p = prediction;
+        var ctx = context ?? new MetaLabelerContext();
+
+        // Derive prediction hour in ET (Eastern Time) — market behavior
+        // differs significantly morning vs afternoon.
+        float predictionHourEt = 0f;
+        if (p is not null)
+        {
+            var et = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(
+                p.CreatedAt, "America/New_York");
+            predictionHourEt = et.Hour + (et.Minute / 60f);
+        }
 
         var v = new List<float>(FeatureCount)
         {
@@ -148,6 +186,13 @@ public class MetaLabelerFeatureExtractor
             p?.PredictionType == PredictionType.bearish ? 1f : 0f,
             p?.PredictionType == PredictionType.neutral ? 1f : 0f,
             (int)(b.ActionabilityTier),
+
+            // ── v2: Market & ticker context ──
+            predictionHourEt,
+            ctx.SpyDailyChangePct ?? 0f,
+            ctx.SectorBatchCount ?? 0,
+            ctx.TickerHistoricalWinRate ?? 0f,
+            ctx.TickerHistoricalSampleSize ?? 0,
         };
 
         if (v.Count != FeatureCount)

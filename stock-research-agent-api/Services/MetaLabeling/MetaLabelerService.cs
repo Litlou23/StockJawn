@@ -67,7 +67,11 @@ public class MetaLabelerService
     /// callers should treat null as "no opinion" and fall back to their
     /// existing gate).
     /// </summary>
-    public float? Score(ScoringBreakdown breakdown, PredictionCandidate? prediction = null, int? daysUntilEarnings = null)
+    public float? Score(
+        ScoringBreakdown breakdown,
+        PredictionCandidate? prediction = null,
+        int? daysUntilEarnings = null,
+        MetaLabelerContext? context = null)
     {
         if (_model is null || _modelSchema is null) return null;
 
@@ -76,7 +80,7 @@ public class MetaLabelerService
             _engine ??= _ml.Model.CreatePredictionEngine<MetaLabelerTrainingService.TrainingRow, MetaLabelerPrediction>(_model);
             var input = new MetaLabelerTrainingService.TrainingRow
             {
-                Features = _features.Extract(breakdown, prediction, daysUntilEarnings),
+                Features = _features.Extract(breakdown, prediction, daysUntilEarnings, context),
                 Label = false, // unused at inference
             };
             var result = _engine.Predict(input);
