@@ -206,29 +206,28 @@ public class OptionContractFilterService
         switch (duration)
         {
             case DurationPreference.one_week:
-                // Short-term: tight DTE, higher delta for max responsiveness,
-                // narrower strike range (closer to ATM for better fills)
-                minDte = 3;
-                maxDte = 12;
+                // Short-term: still need 10+ DTE minimum to avoid theta trap.
+                // Learning data shows 3-5 DTE kills profits even when direction is right.
+                minDte = 10;
+                maxDte = 21;
                 minDelta = 0.40;   // higher floor — we need the contract to move with the stock
                 maxDelta = 0.70;   // allow slightly ITM for better delta exposure
                 strikeRange = 0.10; // ±10% strike range
                 durationBucket = "one_week";
                 break;
             case DurationPreference.two_week:
-                // Medium-term: moderate DTE with room for thesis to play out,
-                // standard delta range
-                minDte = 10;
-                maxDte = 25;
-                minDelta = 0.30;
-                maxDelta = 0.60;
+                // Medium-term: 14-30 DTE sweet spot from learning stats.
+                minDte = 14;
+                maxDte = 35;
+                minDelta = 0.35;
+                maxDelta = 0.65;
                 strikeRange = 0.12; // ±12% strike range
                 durationBucket = "two_week";
                 break;
-            default: // system_recommended — shouldn't hit often now that ChooseDuration maps timeframes
-                minDte = 7;
-                maxDte = 21;
-                minDelta = 0.35;
+            default: // system_recommended
+                minDte = 14;
+                maxDte = 30;
+                minDelta = 0.40;
                 maxDelta = 0.65;
                 strikeRange = 0.12;
                 durationBucket = "system_recommended";
@@ -302,17 +301,18 @@ public class OptionContractFilterService
                 _ => 20,
             });
 
-            // DTE: prefer shorter DTE that's still safe — don't overpay for time.
-            // Short DTE = less theta drag, more capital-efficient.
-            // But too short (<3) risks expiring before the thesis plays out.
+            // DTE: prefer 14-30 DTE — enough time for the thesis to play out
+            // without bleeding premium daily. Short DTE (<7) is a theta trap
+            // that kills profits even when direction is correct.
             var dteScore = (double)(c.Dte switch
             {
-                >= 5 and <= 14 => 100,   // sweet spot: enough time, minimal waste
-                >= 3 and < 5 => 80,      // tight but workable
-                > 14 and <= 25 => 80,    // fine for 1-2 week holds
-                > 25 and <= 45 => 50,    // paying for time you probably don't need
-                > 45 => 20,              // way too much theta drag
-                _ => 10,                 // <3 DTE too risky
+                >= 14 and <= 30 => 100,  // sweet spot: thesis has time, theta manageable
+                > 30 and <= 45 => 80,    // fine — extra cushion
+                >= 7 and < 14 => 60,     // tight but workable
+                > 45 and <= 60 => 50,    // paying for time you probably don't need
+                >= 3 and < 7 => 20,      // theta trap — direction right, still lose money
+                > 60 => 20,              // too much time value
+                _ => 5,                  // <3 DTE is a lottery ticket
             });
 
             // Direction fit: does the contract side match the prediction?
@@ -322,14 +322,17 @@ public class OptionContractFilterService
             else if (predictionType == "bullish" && c.Side == OptionSide.put) directionFit = 10;
             else if (predictionType == "bearish" && c.Side == OptionSide.call) directionFit = 10;
 
-            // Price fit: prefer speculative/main_research buckets
+            // Price fit: prefer ATM/near-ATM contracts with real delta.
+            // "expensive" contracts (mid >= $4) have higher delta and
+            // actually win — learning stats show 67% win rate vs 0% for "lotto".
+            // Cheap contracts feel capital-efficient but theta eats them alive.
             var priceBucket = GetPriceBucket(c.Mid);
             var priceFit = priceBucket switch
             {
-                "main_research" => 100.0,
-                "speculative" => 80.0,
-                "lotto" => 30.0,
-                "expensive" => 40.0,
+                "expensive" => 100.0,       // highest delta, best win rate historically
+                "main_research" => 85.0,    // good balance of cost and delta
+                "speculative" => 40.0,      // low delta, theta risk
+                "lotto" => 10.0,            // lottery ticket — 0% win rate in learning stats
                 _ => 50.0,
             };
 

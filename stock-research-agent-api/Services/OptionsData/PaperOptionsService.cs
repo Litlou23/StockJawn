@@ -21,7 +21,11 @@ public class PaperOptionsService
 {
     private const int DefaultTopN = 5;
     private const double EstContractMultiplier = 100.0; // 1 option contract = 100 shares
-    private const double DefaultMaxContractCost = 200.0; // used when no portfolio budget is supplied
+    private const double DefaultMaxContractCost = 500.0; // used when no portfolio budget is supplied; $200 was too low for quality contracts
+
+    // Portfolio IDs for the Claude vs System A/B competition
+    private const string ClaudeOptionsPortfolioId = "41cc5a32-2e6e-4c92-b255-b884de7e13cb";  // "Broker Paper Trading" — Claude's picks, will execute via Alpaca
+    private const string SystemOptionsPortfolioId = "e2c8238b-0475-4547-8249-edd5995b2411";  // "System Options" portfolio
 
     private readonly MarketDataOptionsProvider _provider;
     private readonly OptionContractFilterService _filterService;
@@ -54,13 +58,13 @@ public class PaperOptionsService
         var championId = await _researchRepo.GetChampionProfileIdAsync();
         var recent = await _researchRepo.GetRecentPredictionsAsync(limit, profileId: championId);
         // Eligible = open, bullish/bearish (no naked C/P on neutral), and confidence
-        // high enough that option premium isn't pure noise. Lowered from 30 to 15
-        // because current research runs produce modest confidence scores.
+        // high enough that option premium isn't pure noise. Raised to 40 —
+        // sub-40 confidence predictions have terrible options track record.
         return recent
             .Where(p => p.Status == "open"
                      && (p.PredictionType == PredictionType.bullish
                          || p.PredictionType == PredictionType.bearish)
-                     && p.ConfidenceScore >= 15)
+                     && p.ConfidenceScore >= 40)
             .ToList();
     }
 
@@ -184,11 +188,11 @@ public class PaperOptionsService
                 MaxDte = filter.MaxDte,
                 MinStrike = filter.MinStrike,
                 MaxStrike = filter.MaxStrike,
-                MinOpenInterest = 1,          // was 10 — accept any listed contract
-                MinVolume = 0,                // was 1 — some valid contracts have 0 volume intraday
-                MaxBidAskSpreadPercent = 50,  // was 40 — wider tolerance for less-liquid names
-                MinDelta = 0.15,              // was 0.20 — allow slightly OTM for cheaper contracts
-                MaxDelta = 0.75,              // was 0.70 — allow slightly ITM
+                MinOpenInterest = 10,         // need minimum liquidity to exit
+                MinVolume = 0,                // some valid contracts have 0 volume intraday
+                MaxBidAskSpreadPercent = 30,  // 50% spread = guaranteed loss on entry
+                MinDelta = 0.25,              // below 0.25 delta the contract barely moves
+                MaxDelta = 0.75,              // allow slightly ITM
             };
 
             var relaxedPass = _filterService.Filter(chain.Contracts, relaxedFilter)
@@ -293,6 +297,7 @@ public class PaperOptionsService
                 InclusionReason = req.InclusionReason,
                 ExclusionReason = req.ExclusionReason,
                 ScorePercentileInRun = req.ScorePercentileInRun,
+                PortfolioId = SystemOptionsPortfolioId,
             };
         }).ToList();
 
@@ -318,6 +323,226 @@ public class PaperOptionsService
         };
 
         return resp;
+    }
+
+    // -----------------------------------------------------------------------
+    // 2b. Generate candidates from a direct pick (no prediction required)
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Generates option candidates from a direct ticker + direction pick
+    /// (e.g. from a Claude morning analysis). Fetches current price via
+    /// MarketData.app, then runs the same contract selection pipeline.
+    /// </summary>
+    public async Task<GenerateCandidatesResponse?> GenerateFromDirectPickAsync(DirectOptionPickRequest pick)
+    {
+        if (string.IsNullOrWhiteSpace(pick.Ticker))
+            return null;
+
+        if (!_provider.IsConfigured)
+        {
+            return new GenerateCandidatesResponse
+            {
+                Ticker = pick.Ticker,
+                PredictionType = pick.Direction,
+                Warnings = ["MarketData.app token not configured — cannot generate candidates."],
+                BlockReason = "missing_option_chain",
+            };
+        }
+
+        // Fetch current price
+        var quote = await _provider.GetStockQuoteAsync(pick.Ticker);
+        var refPrice = quote?.Last ?? quote?.Mid ?? 0;
+
+        if (refPrice <= 0)
+        {
+            return new GenerateCandidatesResponse
+            {
+                Ticker = pick.Ticker,
+                PredictionType = pick.Direction,
+                Warnings = [$"Could not fetch current price for {pick.Ticker}."],
+                BlockReason = "missing_market_data",
+            };
+        }
+
+        if (refPrice < 15)
+        {
+            return new GenerateCandidatesResponse
+            {
+                Ticker = pick.Ticker,
+                PredictionType = pick.Direction,
+                UnderlyingPrice = refPrice,
+                Warnings = [$"{pick.Ticker} at ${refPrice:F2} is below $15 minimum for options."],
+                BlockReason = "stock_price_too_low",
+            };
+        }
+
+        // Map duration preference from pick
+        var duration = pick.Timeframe?.ToLowerInvariant() switch
+        {
+            "1_day" or "2_day" or "scalp" => DurationPreference.one_week,
+            "1_week" or "one_week" => DurationPreference.one_week,
+            "2_week" or "two_week" => DurationPreference.two_week,
+            _ => DurationPreference.system_recommended,
+        };
+
+        // Use the same filter logic as prediction-driven flow
+        var predictionType = pick.Direction.ToLowerInvariant();
+        var (filter, targetDte, durationBucket) = OptionContractFilterService.DefaultFilterForDuration(
+            predictionType, refPrice, duration, 70, 30); // high confidence, low risk for direct picks
+
+        var warnings = new List<string>();
+        warnings.Add($"Direct pick by {pick.Source ?? "claude"}: {pick.Reason ?? "no reason given"}");
+
+        // Fetch chain
+        var chain = await _provider.GetOptionsChainAsync(
+            pick.Ticker,
+            minDte: filter.MinDte,
+            maxDte: filter.MaxDte,
+            side: filter.Side?.ToString());
+        warnings.AddRange(chain.Warnings);
+
+        var underlyingPrice = chain.UnderlyingPrice > 0 ? chain.UnderlyingPrice : refPrice;
+
+        if (chain.Contracts.Count == 0)
+        {
+            warnings.Add("No option contracts returned from MarketData.app.");
+            return new GenerateCandidatesResponse
+            {
+                Ticker = pick.Ticker,
+                PredictionType = predictionType,
+                UnderlyingPrice = underlyingPrice,
+                DurationBucket = durationBucket,
+                TargetDte = targetDte,
+                Warnings = warnings,
+                MarketDataAvailable = true,
+                OptionChainAvailable = false,
+                BlockReason = "missing_option_chain",
+            };
+        }
+
+        var costCap = pick.MaxContractCost ?? DefaultMaxContractCost;
+
+        // Filter and score
+        var strict = _filterService.Filter(chain.Contracts, filter)
+            .Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol))
+            .ToList();
+        var filtered = strict.Where(c => c.Mid * EstContractMultiplier <= costCap).ToList();
+
+        if (filtered.Count == 0)
+        {
+            // Relaxed pass
+            var relaxedFilter = new OptionContractFilter
+            {
+                Side = filter.Side,
+                MinDte = filter.MinDte,
+                MaxDte = filter.MaxDte,
+                MinStrike = filter.MinStrike,
+                MaxStrike = filter.MaxStrike,
+                MinOpenInterest = 10,
+                MinVolume = 0,
+                MaxBidAskSpreadPercent = 30,
+                MinDelta = 0.25,
+                MaxDelta = 0.75,
+            };
+            var relaxedPass = _filterService.Filter(chain.Contracts, relaxedFilter)
+                .Where(c => c.Bid > 0 && c.Ask > 0 && !string.IsNullOrWhiteSpace(c.OptionSymbol))
+                .ToList();
+            filtered = relaxedPass.Where(c => c.Mid * EstContractMultiplier <= costCap).ToList();
+
+            if (filtered.Count > 0)
+                warnings.Add("Strict filters returned nothing — showing relaxed results.");
+        }
+
+        if (filtered.Count == 0)
+        {
+            return new GenerateCandidatesResponse
+            {
+                Ticker = pick.Ticker,
+                PredictionType = predictionType,
+                UnderlyingPrice = underlyingPrice,
+                DurationBucket = durationBucket,
+                TargetDte = targetDte,
+                Warnings = warnings,
+                MarketDataAvailable = true,
+                OptionChainAvailable = true,
+                BlockReason = "liquidity_filter_failed",
+            };
+        }
+
+        var ranked = _filterService.ScoreAndRankEnhanced(filtered, predictionType, DefaultTopN);
+
+        var delayLabel = chain.Warnings.Any(w => w.Contains("203") || w.Contains("delayed"))
+            ? "delayed" : "real-time";
+
+        var candidates = ranked.Select((s, i) =>
+        {
+            var c = s.Contract;
+            var contractCost = Math.Round(c.Mid * EstContractMultiplier, 2);
+            var reason = $"Direct pick: {pick.Reason ?? predictionType}. " +
+                         $"Score {s.OverallScore:F1}: {s.ScoreExplanation}. " +
+                         $"DTE {c.Dte}, Δ {c.Delta:F2}, IV {c.Iv * 100:F0}%.";
+
+            return new PaperCandidateEnhanced
+            {
+                Ticker = pick.Ticker,
+                OptionSymbol = c.OptionSymbol,
+                Side = c.Side,
+                Strike = c.Strike,
+                Expiration = c.Expiration,
+                DteAtEntry = c.Dte,
+                EntryUnderlyingPrice = underlyingPrice,
+                EntryBid = c.Bid,
+                EntryAsk = c.Ask,
+                EntryMid = c.Mid,
+                EntryLast = c.Last,
+                EntryIv = c.Iv,
+                EntryDelta = c.Delta,
+                EntryGamma = c.Gamma,
+                EntryTheta = c.Theta,
+                EntryVega = c.Vega,
+                EntryOpenInterest = c.OpenInterest,
+                EntryVolume = c.Volume,
+                ContractScore = s.OverallScore,
+                SelectionReason = reason,
+                Provider = "marketdata",
+                EstimatedContractCost = contractCost,
+                SpreadPercent = Math.Round(c.BidAskSpreadPercent, 2),
+                DurationBucket = durationBucket,
+                PriceBucket = OptionContractFilterService.GetPriceBucket(c.Mid),
+                DataDelayLabel = delayLabel,
+                Rank = i + 1,
+                Status = PaperCandidateStatus.open,
+                CandidateMode = CandidateMode.live_eligible,
+                QualityTier = QualityTier.production_candidate,
+                IsActionable = true,
+                ThresholdPolicyVersion = "claude_direct_pick_v1",
+                InclusionReason = $"Direct pick by {pick.Source ?? "claude"}: {pick.Reason}",
+                PortfolioId = ClaudeOptionsPortfolioId,
+            };
+        }).ToList();
+
+        PaperCandidateEnhanced? savedCandidate = null;
+        if (pick.AutoSave && candidates.Count > 0)
+        {
+            savedCandidate = await _repo.SavePaperCandidateEnhancedAsync(candidates[0]);
+            _logger.LogInformation("[paper-options] Saved direct pick: {Ticker} {Side} {Strike} DTE={DTE} by {Source}",
+                pick.Ticker, savedCandidate?.Side, savedCandidate?.Strike, savedCandidate?.DteAtEntry, pick.Source);
+        }
+
+        return new GenerateCandidatesResponse
+        {
+            Ticker = pick.Ticker,
+            PredictionType = predictionType,
+            UnderlyingPrice = underlyingPrice,
+            DurationBucket = durationBucket,
+            TargetDte = targetDte,
+            Candidates = candidates,
+            Warnings = warnings,
+            MarketDataAvailable = true,
+            OptionChainAvailable = true,
+            SavedCandidate = savedCandidate,
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -435,6 +660,7 @@ public class PaperOptionsService
                 OutcomeScore = 0,
                 Lesson = "Contract expired worthless. Full premium lost. Consider earlier exit or longer DTE.",
                 Warnings = warnings,
+                PortfolioId = candidate.PortfolioId,
             };
 
             await _repo.SavePaperOutcomeEnhancedAsync(missingOutcome);
@@ -505,6 +731,7 @@ public class PaperOptionsService
                              $"Underlying {(underlyingMovePct >= 0 ? "+" : "")}{underlyingMovePct:F2}%. " +
                              $"Direction {(directionCorrect ? "correct" : "wrong")}.",
             Warnings = warnings,
+            PortfolioId = candidate.PortfolioId,
         };
 
         // Determine whether the candidate should be closed or left open.

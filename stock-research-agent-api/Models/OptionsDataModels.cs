@@ -410,6 +410,23 @@ public enum DurationPreference { system_recommended, one_week, two_week }
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum PriceBucket { lotto, speculative, main_research, expensive }
 
+/// <summary>
+/// Direct option pick request — bypasses the prediction system entirely.
+/// Used by Claude's morning picks scheduled task to feed tickers + direction
+/// directly into the options pipeline for contract selection.
+/// </summary>
+public class DirectOptionPickRequest
+{
+    public string Ticker { get; set; } = "";
+    public string Direction { get; set; } = "bullish"; // bullish or bearish
+    public string? Source { get; set; } = "claude_morning_pick";
+    public string? Reason { get; set; }
+    public string? Timeframe { get; set; } // scalp, 1_week, 2_week, etc.
+    public string? Conviction { get; set; } // high, medium, low
+    public bool AutoSave { get; set; } = true;
+    public double? MaxContractCost { get; set; }
+}
+
 public class GenerateCandidatesRequest
 {
     public string PredictionId { get; set; } = "";
@@ -480,6 +497,7 @@ public record PaperCandidateEnhanced
     public string InclusionReason { get; init; } = "";
     public string? ExclusionReason { get; init; }
     public double ScorePercentileInRun { get; init; }
+    public string? PortfolioId { get; init; }
 }
 
 public record GenerateCandidatesResponse
@@ -530,6 +548,7 @@ public record PaperOutcomeEnhanced
     public double OutcomeScore { get; init; }
     public string? Lesson { get; init; }
     public List<string> Warnings { get; init; } = [];
+    public string? PortfolioId { get; init; }
 }
 
 public record OptionLearningStat

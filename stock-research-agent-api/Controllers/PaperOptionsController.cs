@@ -122,6 +122,35 @@ public class PaperOptionsController : ControllerBase
         });
     }
 
+    /// <summary>
+    /// POST /api/paper-options/direct-pick — generate option candidates from a direct
+    /// ticker + direction pick (no prediction required). Protected by JOB_SECRET.
+    /// Used by Claude's scheduled morning options task.
+    /// </summary>
+    [HttpPost("direct-pick")]
+    public async Task<IActionResult> DirectPick([FromBody] DirectOptionPickRequest req)
+    {
+        var secret = Request.Headers["X-Job-Secret"].FirstOrDefault();
+        var expected = Environment.GetEnvironmentVariable("JOB_RUN_SECRET") ?? "";
+        if (string.IsNullOrEmpty(expected) || secret != expected)
+            return Unauthorized(new { error = "Invalid or missing X-Job-Secret header" });
+
+        if (req is null || string.IsNullOrWhiteSpace(req.Ticker))
+            return BadRequest(new { error = "ticker is required" });
+
+        if (req.Direction is not "bullish" and not "bearish")
+            return BadRequest(new { error = "direction must be 'bullish' or 'bearish'" });
+
+        _logger.LogInformation("[paper-options] Direct pick: {Ticker} {Direction} by {Source} — {Reason}",
+            req.Ticker, req.Direction, req.Source, req.Reason);
+
+        var resp = await _service.GenerateFromDirectPickAsync(req);
+        if (resp is null)
+            return BadRequest(new { error = "Failed to generate candidates" });
+
+        return Ok(resp);
+    }
+
     /// <summary>GET /api/paper-options/debug — counts, learning stats, provider config.</summary>
     [HttpGet("debug")]
     public async Task<IActionResult> Debug()

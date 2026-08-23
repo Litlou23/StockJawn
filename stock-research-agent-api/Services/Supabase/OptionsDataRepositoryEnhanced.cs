@@ -58,6 +58,7 @@ public partial class OptionsDataRepository
             inclusion_reason = c.InclusionReason,
             exclusion_reason = c.ExclusionReason,
             score_percentile_in_run = c.ScorePercentileInRun,
+            portfolio_id = c.PortfolioId,
         };
 
         var rows = await _db.InsertAsync("paper_option_candidates", new[] { row });
@@ -141,6 +142,7 @@ public partial class OptionsDataRepository
             outcome_score = o.OutcomeScore,
             lesson = o.Lesson,
             warnings_json = JsonSerializer.SerializeToNode(o.Warnings),
+            portfolio_id = o.PortfolioId,
         };
 
         await _db.InsertAsync("paper_option_outcomes", new[] { row }, returnRows: false);
@@ -268,6 +270,7 @@ public partial class OptionsDataRepository
         InclusionReason = r["inclusion_reason"]?.ToString() ?? "",
         ExclusionReason = r["exclusion_reason"]?.ToString(),
         ScorePercentileInRun = GetDouble(r, "score_percentile_in_run"),
+        PortfolioId = r["portfolio_id"]?.ToString(),
     };
 
     private static PaperOutcomeEnhanced MapPaperOutcomeEnhanced(JsonObject r) => new()
@@ -301,6 +304,7 @@ public partial class OptionsDataRepository
         OutcomeScore = GetDouble(r, "outcome_score"),
         Lesson = r["lesson"]?.ToString(),
         Warnings = GetWarnings(r, "warnings_json"),
+        PortfolioId = r["portfolio_id"]?.ToString(),
     };
 
     private static OptionLearningStat MapOptionLearningStat(JsonObject r) => new()

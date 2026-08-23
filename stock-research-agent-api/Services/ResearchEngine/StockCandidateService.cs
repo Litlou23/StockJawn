@@ -18,8 +18,9 @@ public class StockCandidateService
     // Constants
     // -----------------------------------------------------------------------
 
-    public const int LearningMinConfidenceForOptions = 15;
-    public const int LearningMaxRiskForOptions = 90;
+    public const int LearningMinConfidenceForOptions = 40;
+    public const int LearningMaxRiskForOptions = 75;
+    public const double MinStockPriceForOptions = 15.0; // sub-$15 stocks rarely have liquid options
     public const int ActionableShadowMinConfidence = 40;
     public const int ActionableShadowMaxRisk = 75;
     public const int LiveEligibleMinConfidence = 45;
@@ -259,7 +260,7 @@ public class StockCandidateService
         var isActionable = candidateMode != CandidateMode.learning;
         var qualifies = PredictionCategoryHelper.IsDirectional(pred.PredictionType)
                      && _optionsProvider.IsConfigured
-                     && entry is double entryVal && entryVal > 0
+                     && entry is double entryVal && entryVal >= MinStockPriceForOptions
                      && pred.RiskScore <= LearningMaxRiskForOptions
                      && (pred.ConfidenceScore >= LearningMinConfidenceForOptions || isTopQuartileDirectional);
 
@@ -273,7 +274,8 @@ public class StockCandidateService
             pred,
             hasMarketData: entry is > 0,
             isTopQuartileDirectional: isTopQuartileDirectional,
-            optionsProviderConfigured: _optionsProvider.IsConfigured);
+            optionsProviderConfigured: _optionsProvider.IsConfigured,
+            entryPrice: entry);
 
         var reason = $"Prediction conf={pred.ConfidenceScore}, risk={pred.RiskScore}. " +
                      $"Bull={pred.BullishScore:F1}, Bear={pred.BearishScore:F1}, dir={pred.WinningDirection ?? "n/a"}. " +
@@ -854,7 +856,8 @@ public class StockCandidateService
         PredictionCandidate pred,
         bool hasMarketData,
         bool isTopQuartileDirectional,
-        bool optionsProviderConfigured)
+        bool optionsProviderConfigured,
+        double? entryPrice = null)
     {
         if (!PredictionCategoryHelper.IsDirectional(pred.PredictionType))
             return "non_directional_prediction";
@@ -862,6 +865,8 @@ public class StockCandidateService
             return "missing_market_data";
         if (!optionsProviderConfigured)
             return "missing_option_chain";
+        if (entryPrice.HasValue && entryPrice.Value < MinStockPriceForOptions)
+            return "stock_price_too_low";
         if (pred.RiskScore > LearningMaxRiskForOptions)
             return "risk_too_high";
         if (pred.ConfidenceScore < LearningMinConfidenceForOptions && !isTopQuartileDirectional)
