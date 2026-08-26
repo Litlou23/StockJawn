@@ -2771,19 +2771,12 @@ public class LearningEngine
             await WriteWeightUpdateAsync(rec.SignalName, blended, pairOverride, profileId, isChampion);
         }
 
-        // Also save as insights for visibility in the learning report
-        if (regimeRecs.Count > 0 && isChampion)
+        // Log regime adjustments — no longer spamming insights table with identical daily entries.
+        // The weight changes are tracked in scoring_weight_overrides with full audit trail.
+        if (regimeRecs.Count > 0)
         {
-            var insights = regimeRecs.Select(r => new
-            {
-                insight_type = "pattern_detection",
-                summary = r.Reason,
-                evidence = $"{r.Evidence} failures in cluster. Applied confidence penalty: {r.RecommendedAdjustment * 100:F1}%.",
-                action_recommendation = "Regime-aware confidence penalty written to scoring weights.",
-                confidence = r.Confidence,
-            }).Cast<object>().ToList();
-
-            await _repo.SaveLearningInsightsAsync(insights);
+            _logger.LogInformation("[learning-engine] Applied {Count} regime pattern adjustments: {Details}",
+                regimeRecs.Count, string.Join("; ", regimeRecs.Select(r => $"{r.SignalName}: {r.RecommendedAdjustment * 100:F1}%")));
         }
 
         return (changes.Count, changes);
@@ -3555,229 +3548,336 @@ INSTRUCTIONS:
 
     public async Task<List<object>> GenerateLearningInsightsAsync(string? profileId = null)
     {
-        var perfStats = await _repo.GetAllSignalPerformanceAsync();
-        var predictions = await _repo.GetRecentPredictionsAsync(300, status: "evaluated", profileId: profileId);
-        // Unified outcome map not needed here — outcomeMap built after perfStats section
+        var predictions = await _repo.GetRecentPredictionsAsync(500, status: "evaluated", profileId: profileId);
+        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
         var insights = new List<object>();
 
-        // 1. Reliable signals (direction-aware)
-        var reliable = perfStats.Where(s => s.TotalPredictions >= 10 && s.Accuracy > 0.6).ToList();
-        if (reliable.Count > 0)
-        {
-            insights.Add(new
-            {
-                insight_type = "signal",
-                summary = $"Reliable signals: {string.Join(", ", reliable.Select(s => $"{s.SignalName}[{s.Direction}] ({s.Accuracy * 100:F0}%, n={s.TotalPredictions})"))}",
-                evidence = $"Based on {reliable.Sum(s => s.TotalPredictions)} total observations.",
-                action_recommendation = "These signals are driving wins. Weight overrides have been adjusted accordingly.",
-                confidence = Math.Min((double)reliable[0].TotalPredictions / 50, 1),
-            });
-        }
-
-        // 2. Unreliable signals
-        var unreliable = perfStats.Where(s => s.TotalPredictions >= 10 && s.Accuracy < 0.4).ToList();
-        if (unreliable.Count > 0)
-        {
-            insights.Add(new
-            {
-                insight_type = "signal",
-                summary = $"Underperforming signals: {string.Join(", ", unreliable.Select(s => $"{s.SignalName}[{s.Direction}] ({s.Accuracy * 100:F0}%, n={s.TotalPredictions})"))}",
-                evidence = $"Based on {unreliable.Sum(s => s.TotalPredictions)} total observations.",
-                action_recommendation = "Weights are being gradually reduced for these signals.",
-                confidence = Math.Min((double)unreliable[0].TotalPredictions / 50, 1),
-            });
-        }
-
-        // 3. Direction asymmetry
-        var directionPairs = perfStats
-            .Where(s => s.Direction is "bullish" or "bearish" && s.TotalPredictions >= 10)
-            .GroupBy(s => s.SignalName)
-            .Where(g => g.Count() == 2)
+        // Build resolved list: predictions with outcomes we can judge
+        var resolved = predictions
+            .Where(p => outcomeMap.TryGetValue(p.Id, out var o) && ResolveCorrectness(p, o) is not null)
+            .Select(p => (Pred: p, Outcome: outcomeMap[p.Id], Correct: ResolveCorrectness(p, outcomeMap[p.Id])!.Value))
             .ToList();
-        foreach (var pair in directionPairs)
-        {
-            var bull = pair.First(s => s.Direction == "bullish");
-            var bear = pair.First(s => s.Direction == "bearish");
-            var gap = Math.Abs(bull.Accuracy - bear.Accuracy);
-            if (gap >= 0.15)
-            {
-                var better = bull.Accuracy > bear.Accuracy ? "bullish" : "bearish";
-                insights.Add(new
-                {
-                    insight_type = "direction_asymmetry",
-                    summary = $"{pair.Key} works better for {better} predictions ({(better == "bullish" ? bull : bear).Accuracy * 100:F0}% vs {(better != "bullish" ? bull : bear).Accuracy * 100:F0}%).",
-                    evidence = $"Bull n={bull.TotalPredictions}, Bear n={bear.TotalPredictions}.",
-                    action_recommendation = $"Direction-specific weight adjustments are being applied.",
-                    confidence = Math.Min((double)Math.Min(bull.TotalPredictions, bear.TotalPredictions) / 30, 1),
-                });
-            }
-        }
 
-        // 4. Per-ticker patterns (includes directional and neutral predictions)
-        var outcomeMap = await BuildUnifiedOutcomeMapAsync(predictions, profileId);
-        var tickerStats = new Dictionary<string, (int Correct, int Wrong, int Total)>();
-        foreach (var pred in predictions)
-        {
-            if (!outcomeMap.TryGetValue(pred.Id, out var outcome)) continue;
-            var isNeutral = !PredictionCategoryHelper.IsDirectional(pred.PredictionType);
-            bool? isCorrect;
-            if (isNeutral)
-            {
-                if (outcome.PercentMove is null) continue;
-                isCorrect = Math.Abs(outcome.PercentMove.Value) < 2.0;
-            }
-            else
-            {
-                if (outcome.DirectionCorrect is null) continue;
-                isCorrect = outcome.DirectionCorrect;
-            }
-            var (correct, wrong, total) = tickerStats.GetValueOrDefault(pred.Ticker);
-            total++;
-            if (isCorrect == true) correct++; else wrong++;
-            tickerStats[pred.Ticker] = (correct, wrong, total);
-        }
-        foreach (var (ticker, (correct, wrong, total)) in tickerStats)
-        {
-            if (total < 3) continue;
-            var accuracy = (double)correct / total;
-            if (accuracy < 0.3)
-                insights.Add(new
-                {
-                    insight_type = "ticker",
-                    summary = $"{ticker}: only {correct}/{total} correct ({accuracy * 100:F0}%).",
-                    evidence = $"{wrong} wrong predictions vs {correct} correct.",
-                    action_recommendation = $"Consider requiring higher confidence threshold for {ticker}.",
-                    confidence = Math.Min((double)total / 10, 1),
-                });
-            else if (accuracy > 0.7 && total >= 5)
-                insights.Add(new
-                {
-                    insight_type = "ticker",
-                    summary = $"{ticker}: {correct}/{total} correct ({accuracy * 100:F0}%) — strong track record.",
-                    evidence = $"Consistent across {total} predictions.",
-                    action_recommendation = $"{ticker} is a reliable prediction target.",
-                    confidence = Math.Min((double)total / 10, 1),
-                });
-        }
+        if (resolved.Count < 10) return insights;
 
-        // 5. Setup-level insights — which combinations of signals work?
+        // ── 1. Weekly accuracy trend ──
+        // Compare this week vs last week to show direction of change
         try
         {
-            var setupStats = await _repo.GetAllSetupLearningStatsAsync();
-            var topSetups = setupStats
-                .Where(s => s.TotalOccurrences >= 8 && s.ExpectedValuePercent > 0.5)
-                .OrderByDescending(s => s.ExpectedValuePercent)
+            var now = DateTimeOffset.UtcNow;
+            var thisWeekStart = now.AddDays(-7);
+            var lastWeekStart = now.AddDays(-14);
+
+            var thisWeek = resolved.Where(r => r.Pred.CreatedAt >= thisWeekStart).ToList();
+            var lastWeek = resolved.Where(r => r.Pred.CreatedAt >= lastWeekStart && r.Pred.CreatedAt < thisWeekStart).ToList();
+
+            if (thisWeek.Count >= 5)
+            {
+                var thisAcc = (double)thisWeek.Count(r => r.Correct) / thisWeek.Count;
+                var thisStopHits = thisWeek.Count(r => !r.Correct && r.Outcome.StopHit == true);
+                var thisDirectionRight = thisWeek.Count(r => !r.Correct && r.Outcome.StopHit == true
+                    && r.Outcome.MaxFavorablePercent > 1.0);
+
+                var trendText = "";
+                if (lastWeek.Count >= 5)
+                {
+                    var lastAcc = (double)lastWeek.Count(r => r.Correct) / lastWeek.Count;
+                    var delta = thisAcc - lastAcc;
+                    trendText = delta > 0.03 ? $" (up from {lastAcc * 100:F0}% last week)"
+                        : delta < -0.03 ? $" (down from {lastAcc * 100:F0}% last week)"
+                        : $" (flat vs {lastAcc * 100:F0}% last week)";
+                }
+
+                var summary = $"This week: {thisAcc * 100:F0}% accuracy ({thisWeek.Count(r => r.Correct)}/{thisWeek.Count}){trendText}.";
+                if (thisStopHits > 0)
+                    summary += $" {thisStopHits} predictions killed by stop-loss";
+                if (thisDirectionRight > 0)
+                    summary += $", {thisDirectionRight} of those were directionally right (moved 1%+ in our favor first)";
+                summary += ".";
+
+                insights.Add(new
+                {
+                    insight_type = "accuracy_trend",
+                    summary,
+                    evidence = $"This week: {thisWeek.Count} evaluated. Last week: {lastWeek.Count} evaluated.",
+                    action_recommendation = thisStopHits > thisWeek.Count * 0.3
+                        ? "Stop-loss hits are the primary accuracy drag. Wider stops or faster profit-taking would help."
+                        : thisAcc >= 0.55 ? "Accuracy is healthy. Focus on position sizing and profit capture."
+                        : "Accuracy below target. Review signal quality and prediction filters.",
+                    confidence = Math.Min((double)thisWeek.Count / 30, 1.0),
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate accuracy trend insight");
+        }
+
+        // ── 2. Stop-loss casualty report ──
+        // Find predictions that were directionally right but killed by stops
+        try
+        {
+            var stopCasualties = resolved
+                .Where(r => !r.Correct && r.Outcome.StopHit == true && r.Outcome.MaxFavorablePercent > 1.5)
+                .OrderByDescending(r => r.Outcome.MaxFavorablePercent)
+                .ToList();
+
+            if (stopCasualties.Count >= 2)
+            {
+                var topExamples = stopCasualties.Take(5)
+                    .Select(r => $"{r.Pred.Ticker} (+{r.Outcome.MaxFavorablePercent:F1}% before reversal)")
+                    .ToList();
+
+                var totalPotentialProfit = stopCasualties
+                    .Where(r => r.Outcome.MaxFavorablePercent.HasValue)
+                    .Sum(r => r.Outcome.MaxFavorablePercent!.Value);
+
+                insights.Add(new
+                {
+                    insight_type = "stop_loss_casualties",
+                    summary = $"{stopCasualties.Count} predictions hit stops after moving significantly in our favor: {string.Join(", ", topExamples)}.",
+                    evidence = $"Combined peak favorable move: +{totalPotentialProfit:F1}% across {stopCasualties.Count} predictions, all marked as losses.",
+                    action_recommendation = $"These {stopCasualties.Count} predictions got the direction right. Reversal detection and take-profit exits would capture these gains instead of letting them reverse to stops.",
+                    confidence = Math.Min((double)stopCasualties.Count / 10, 1.0),
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate stop-loss casualty insight");
+        }
+
+        // ── 3. Time window performance breakdown ──
+        // Which prediction horizons work best?
+        try
+        {
+            var byTimeWindow = resolved
+                .Where(r => PredictionCategoryHelper.IsDirectional(r.Pred.PredictionType))
+                .GroupBy(r => r.Pred.TimeWindow)
+                .Where(g => g.Count() >= 5)
+                .Select(g => new
+                {
+                    Window = g.Key,
+                    Total = g.Count(),
+                    Correct = g.Count(r => r.Correct),
+                    Accuracy = (double)g.Count(r => r.Correct) / g.Count(),
+                    AvgMoveCorrect = g.Where(r => r.Correct && r.Outcome.PercentMove.HasValue)
+                        .Select(r => Math.Abs(r.Outcome.PercentMove!.Value))
+                        .DefaultIfEmpty(0).Average(),
+                    StopHits = g.Count(r => r.Outcome.StopHit == true),
+                })
+                .OrderByDescending(tw => tw.Accuracy)
+                .ToList();
+
+            if (byTimeWindow.Count >= 2)
+            {
+                var best = byTimeWindow.First();
+                var worst = byTimeWindow.Last();
+                var breakdown = string.Join(", ", byTimeWindow.Select(tw =>
+                    $"{tw.Window}: {tw.Accuracy * 100:F0}% ({tw.Correct}/{tw.Total})"));
+
+                insights.Add(new
+                {
+                    insight_type = "time_window_performance",
+                    summary = $"Best time window: {best.Window} at {best.Accuracy * 100:F0}% ({best.Correct}/{best.Total}). " +
+                              $"Worst: {worst.Window} at {worst.Accuracy * 100:F0}% ({worst.Correct}/{worst.Total}). Full: {breakdown}.",
+                    evidence = $"Best avg correct move: +{best.AvgMoveCorrect:F1}%. " +
+                               $"Worst stop-hit rate: {worst.Window} with {worst.StopHits}/{worst.Total} ({(worst.Total > 0 ? worst.StopHits * 100.0 / worst.Total : 0):F0}%).",
+                    action_recommendation = worst.Accuracy < 0.35
+                        ? $"Consider reducing {worst.Window} prediction volume or tightening filters for that horizon."
+                        : best.Accuracy > 0.6
+                        ? $"The {best.Window} window is working well. Prioritize it in position sizing."
+                        : "All time windows performing similarly. No rebalancing needed.",
+                    confidence = Math.Min((double)byTimeWindow.Sum(tw => tw.Total) / 50, 1.0),
+                });
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate time window insight");
+        }
+
+        // ── 4. Biggest missed opportunities ──
+        // Predictions that moved 3%+ in our favor but we didn't capture
+        try
+        {
+            var missedGains = resolved
+                .Where(r => !r.Correct && r.Outcome.MaxFavorablePercent >= 3.0)
+                .OrderByDescending(r => r.Outcome.MaxFavorablePercent)
                 .Take(5)
                 .ToList();
 
-            foreach (var s in topSetups)
+            if (missedGains.Count >= 1)
             {
+                var examples = missedGains.Select(r =>
+                    $"{r.Pred.Ticker} ({r.Pred.PredictionType} {r.Pred.TimeWindow}): peaked at +{r.Outcome.MaxFavorablePercent:F1}%, " +
+                    $"ended at {r.Outcome.PercentMove:+0.0;-0.0}%").ToList();
+
                 insights.Add(new
                 {
-                    insight_type = "setup",
-                    summary = $"Setup [{s.Description}] has {s.WinRate * 100:F0}% win rate with {(s.ExpectedValuePercent >= 0 ? "+" : "")}{s.ExpectedValuePercent:F2}% EV over {s.TotalOccurrences} occurrences.",
-                    evidence = $"Avg win: +{s.AverageWinPercent:F2}%, avg loss: {s.AverageLossPercent:F2}%. Confidence: {s.Confidence:F2}. Risk rating: {s.RiskRating}/100.",
-                    action_recommendation = s.IsTrusted
-                        ? "This setup is trusted and historically favorable. Boost confidence when detected."
-                        : "This setup shows historical promise but recent degradation. Monitor closely.",
-                    confidence = s.Confidence,
+                    insight_type = "missed_opportunities",
+                    summary = $"{missedGains.Count} predictions moved 3%+ in our favor but ended as losses: {string.Join("; ", examples)}.",
+                    evidence = $"These predictions got the direction right and had significant favorable moves before reversing.",
+                    action_recommendation = "These are prime candidates for trailing take-profit exits. The system correctly predicted direction but failed to capture the gain.",
+                    confidence = Math.Min((double)missedGains.Count / 5, 1.0),
                 });
             }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate missed opportunities insight");
+        }
 
-            var degradedSetups = setupStats
-                .Where(s => s.TotalOccurrences >= 8 && !s.IsTrusted)
+        // ── 5. Ticker standouts — only extreme performers, not everything ──
+        try
+        {
+            var tickerStats = new Dictionary<string, (int Correct, int Wrong, int Total, double MaxFavorable)>();
+            foreach (var r in resolved)
+            {
+                var (correct, wrong, total, maxFav) = tickerStats.GetValueOrDefault(r.Pred.Ticker);
+                total++;
+                if (r.Correct) correct++; else wrong++;
+                var fav = r.Outcome.MaxFavorablePercent ?? 0;
+                if (fav > maxFav) maxFav = fav;
+                tickerStats[r.Pred.Ticker] = (correct, wrong, total, maxFav);
+            }
+
+            // Best tickers (>=5 predictions, >70% accuracy)
+            var bestTickers = tickerStats
+                .Where(kvp => kvp.Value.Total >= 5 && (double)kvp.Value.Correct / kvp.Value.Total > 0.7)
+                .OrderByDescending(kvp => (double)kvp.Value.Correct / kvp.Value.Total)
+                .Take(5)
                 .ToList();
 
-            if (degradedSetups.Count > 0)
+            if (bestTickers.Count > 0)
             {
+                var list = string.Join(", ", bestTickers.Select(kvp =>
+                    $"{kvp.Key}: {kvp.Value.Correct}/{kvp.Value.Total} ({(double)kvp.Value.Correct / kvp.Value.Total * 100:F0}%)"));
                 insights.Add(new
                 {
-                    insight_type = "setup_degradation",
-                    summary = $"{degradedSetups.Count} setup(s) showing recent degradation: {string.Join(", ", degradedSetups.Select(s => $"[{s.Description}]"))}.",
-                    evidence = $"Recent win rates have dropped >15% below all-time averages.",
-                    action_recommendation = "These setups should no longer boost confidence until performance recovers.",
-                    confidence = 0.8,
+                    insight_type = "top_tickers",
+                    summary = $"Strongest tickers: {list}.",
+                    evidence = $"These tickers consistently match our predictions across {bestTickers.Sum(t => t.Value.Total)} evaluations.",
+                    action_recommendation = "These are high-conviction tickers. Consider increased position sizes when they appear.",
+                    confidence = Math.Min((double)bestTickers.Min(t => t.Value.Total) / 10, 1.0),
+                });
+            }
+
+            // Worst tickers (>=4 predictions, <25% accuracy)
+            var worstTickers = tickerStats
+                .Where(kvp => kvp.Value.Total >= 4 && (double)kvp.Value.Correct / kvp.Value.Total < 0.25)
+                .OrderBy(kvp => (double)kvp.Value.Correct / kvp.Value.Total)
+                .Take(5)
+                .ToList();
+
+            if (worstTickers.Count > 0)
+            {
+                var list = string.Join(", ", worstTickers.Select(kvp =>
+                    $"{kvp.Key}: {kvp.Value.Correct}/{kvp.Value.Total} ({(double)kvp.Value.Correct / kvp.Value.Total * 100:F0}%)"));
+                insights.Add(new
+                {
+                    insight_type = "problem_tickers",
+                    summary = $"Avoid these tickers: {list}.",
+                    evidence = $"Persistent poor accuracy across {worstTickers.Sum(t => t.Value.Total)} predictions.",
+                    action_recommendation = $"Add to cooldown or blacklist: {string.Join(", ", worstTickers.Select(t => t.Key))}. " +
+                        "The system cannot predict these stocks reliably.",
+                    confidence = Math.Min((double)worstTickers.Min(t => t.Value.Total) / 8, 1.0),
                 });
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[learning-engine] Failed to generate setup insights");
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate ticker insights");
         }
 
-        // 6. Supersession insights — which prediction revisions improve accuracy?
+        // ── 6. Bullish vs bearish breakdown ──
         try
         {
-            var supAnalytics = await GetSupersessionAnalyticsAsync();
-            if (supAnalytics.TotalSupersessions >= 3)
-            {
-                foreach (var (label, stats) in supAnalytics.ByTransition)
-                {
-                    if (stats.Count < 3) continue;
+            var directional = resolved.Where(r => PredictionCategoryHelper.IsDirectional(r.Pred.PredictionType)).ToList();
+            var bullish = directional.Where(r => r.Pred.PredictionType == PredictionType.bullish).ToList();
+            var bearish = directional.Where(r => r.Pred.PredictionType == PredictionType.bearish).ToList();
 
-                    var assessmentVerb = stats.IsImprovement ? "improves" : "does not clearly improve";
+            if (bullish.Count >= 10 && bearish.Count >= 5)
+            {
+                var bullAcc = (double)bullish.Count(r => r.Correct) / bullish.Count;
+                var bearAcc = (double)bearish.Count(r => r.Correct) / bearish.Count;
+                var gap = Math.Abs(bullAcc - bearAcc);
+
+                if (gap >= 0.10) // Only report if there's a meaningful difference
+                {
+                    var better = bullAcc > bearAcc ? "Bullish" : "Bearish";
+                    var worse = bullAcc > bearAcc ? "Bearish" : "Bullish";
+                    var betterAcc = Math.Max(bullAcc, bearAcc);
+                    var worseAcc = Math.Min(bullAcc, bearAcc);
+
                     insights.Add(new
                     {
-                        insight_type = "supersession",
-                        summary = $"Transition {label}: {stats.Count} occurrences, replacement accuracy {stats.Accuracy * 100:F0}% ({stats.CorrectCount}/{stats.EvaluatedCount}). Revision {assessmentVerb} predictions.",
-                        evidence = $"Avg {stats.AvgHoursBetween:F1}h between predictions. Confidence delta: {stats.AvgConfidenceDelta:+0;-0}, risk delta: {stats.AvgRiskDelta:+0;-0}.",
-                        action_recommendation = stats.IsImprovement
-                            ? $"The {label} transition is effective. Consider being more aggressive about superseding."
-                            : $"The {label} transition shows marginal improvement. More data needed.",
-                        confidence = Math.Min((double)stats.EvaluatedCount / 20, 1.0),
+                        insight_type = "direction_performance",
+                        summary = $"{better} predictions: {betterAcc * 100:F0}% accuracy. {worse}: {worseAcc * 100:F0}%. " +
+                                  $"({bullish.Count} bullish, {bearish.Count} bearish evaluated).",
+                        evidence = $"Gap of {gap * 100:F0}% between directions.",
+                        action_recommendation = worseAcc < 0.35
+                            ? $"{worse} predictions are underperforming badly. Consider raising min_confidence for {worse.ToLower()} calls."
+                            : $"Lean into {better.ToLower()} predictions when conviction is marginal.",
+                        confidence = Math.Min((double)Math.Min(bullish.Count, bearish.Count) / 20, 1.0),
                     });
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[learning-engine] Failed to generate supersession insights");
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate direction performance insight");
         }
 
-        // 7. Volatility opportunity insights
+        // ── 7. Calibration snapshot — is confidence calibrated? ──
         try
         {
-            var voeRecords = await _repo.GetAllVolatilityLearningStatsAsync(limit: 500, windowDays: 90);
-            var voeResolved = voeRecords.Where(r => r.DirectionCorrect is not null).ToList();
+            var highConf = resolved.Where(r => r.Pred.ConfidenceScore >= 60).ToList();
+            var lowConf = resolved.Where(r => r.Pred.ConfidenceScore < 45).ToList();
 
-            if (voeResolved.Count >= 20)
+            if (highConf.Count >= 5 && lowConf.Count >= 5)
             {
-                var byType = voeResolved
-                    .Where(r => !string.IsNullOrEmpty(r.OpportunityType) && r.OpportunityType != "None")
-                    .GroupBy(r => r.OpportunityType!)
-                    .Where(g => g.Count() >= 5)
-                    .OrderByDescending(g => (double)g.Count(r => r.DirectionCorrect == true) / g.Count())
-                    .ToList();
+                var highAcc = (double)highConf.Count(r => r.Correct) / highConf.Count;
+                var lowAcc = (double)lowConf.Count(r => r.Correct) / lowConf.Count;
 
-                if (byType.Count > 0)
+                // Confidence should correlate with accuracy: high conf = higher accuracy
+                var inverted = lowAcc > highAcc + 0.05; // low conf beats high conf
+
+                if (inverted)
                 {
-                    var best = byType.First();
-                    var bestWin = (double)best.Count(r => r.DirectionCorrect == true) / best.Count();
-                    var worst = byType.Last();
-                    var worstWin = (double)worst.Count(r => r.DirectionCorrect == true) / worst.Count();
-
                     insights.Add(new
                     {
-                        insight_type = "volatility_opportunity",
-                        summary = $"Best VOE type: {best.Key} ({bestWin * 100:F0}% win, n={best.Count()}). " +
-                                  $"Worst: {worst.Key} ({worstWin * 100:F0}% win, n={worst.Count()}).",
-                        evidence = $"Based on {voeResolved.Count} resolved VOE-tagged predictions over 90 days.",
-                        action_recommendation = worstWin < 0.4
-                            ? $"Consider reducing confidence for {worst.Key} opportunities."
-                            : "All opportunity types are performing adequately.",
-                        confidence = Math.Min((double)voeResolved.Count / 100, 1.0),
+                        insight_type = "confidence_calibration",
+                        summary = $"Confidence is INVERTED: high-conf (≥60) accuracy is {highAcc * 100:F0}% ({highConf.Count(r => r.Correct)}/{highConf.Count}) " +
+                                  $"but low-conf (<45) accuracy is {lowAcc * 100:F0}% ({lowConf.Count(r => r.Correct)}/{lowConf.Count}). " +
+                                  "The system's most confident predictions are less reliable than its least confident.",
+                        evidence = $"High confidence: {highConf.Count} predictions. Low confidence: {lowConf.Count} predictions.",
+                        action_recommendation = "Reduce calibration_factor to dampen high-confidence scores. The confidence model is not working.",
+                        confidence = Math.Min((double)(highConf.Count + lowConf.Count) / 30, 1.0),
+                    });
+                }
+                else if (highAcc > lowAcc + 0.15 && highAcc >= 0.55)
+                {
+                    insights.Add(new
+                    {
+                        insight_type = "confidence_calibration",
+                        summary = $"Confidence is well-calibrated: high-conf (≥60) at {highAcc * 100:F0}% vs low-conf (<45) at {lowAcc * 100:F0}%.",
+                        evidence = $"High-confidence predictions reliably outperform by {(highAcc - lowAcc) * 100:F0}pp.",
+                        action_recommendation = "Confidence scores are working as intended. Trust them for position sizing.",
+                        confidence = Math.Min((double)(highConf.Count + lowConf.Count) / 30, 1.0),
                     });
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[learning-engine] Failed to generate VOE insights");
+            _logger.LogWarning(ex, "[learning-engine] Failed to generate calibration insight");
         }
 
         if (insights.Count > 0)
             await _repo.SaveLearningInsightsAsync(insights);
 
+        _logger.LogInformation("[learning-engine] Generated {Count} learning insights", insights.Count);
         return insights;
     }
 

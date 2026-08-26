@@ -277,6 +277,12 @@ public class ResearchRepository
         return await _db.UpdateAsync("prediction_candidates", $"id=eq.{id}", new { status });
     }
 
+    public async Task<bool> UpdatePeakFavorablePriceAsync(string id, double peakPrice)
+    {
+        return await _db.UpdateAsync("prediction_candidates", $"id=eq.{id}",
+            new { peak_favorable_price = peakPrice });
+    }
+
     public async Task<bool> SupersedePredictionAsync(string id, string supersededBy, string reason)
     {
         return await _db.UpdateAsync("prediction_candidates", $"id=eq.{id}",
@@ -1236,6 +1242,7 @@ public class ResearchRepository
         SupersededBy = r["superseded_by"]?.ToString(),
         SupersessionReason = r["supersession_reason"]?.ToString(),
         ProfileId = r["profile_id"]?.ToString(),
+        PeakFavorablePrice = GetNullableDouble(r, "peak_favorable_price"),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };
 

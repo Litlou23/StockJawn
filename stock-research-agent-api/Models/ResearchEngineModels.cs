@@ -492,6 +492,12 @@ public record PredictionCandidate
     public string? SupersededBy { get; init; }
     public string? SupersessionReason { get; init; }
     public string? ProfileId { get; init; }
+    /// <summary>
+    /// Tracks the most favorable price seen during intraday risk checks.
+    /// Used for reversal detection — if the stock was up and starts dropping
+    /// from its peak, exit early rather than waiting for a stop-loss hit.
+    /// </summary>
+    public double? PeakFavorablePrice { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
 }
 

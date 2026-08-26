@@ -842,8 +842,20 @@ public class PredictionGenerator
         // Track within-batch additions to prevent intra-batch duplicates
         var batchTracker = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
+        // ── Min stock price gate: skip cheap stocks at prediction level ──
+        var minStockPrice = sharedContext.Weights.GetValueOrDefault("min_stock_price", 10.0);
+
         foreach (var snapshot in snapshots)
         {
+            // Filter out stocks below min_stock_price before wasting an API call
+            var quotePrice = snapshot.Quote?.Price ?? 0;
+            if (quotePrice > 0 && quotePrice < minStockPrice)
+            {
+                _logger.LogDebug("[prediction] Skipping {Ticker}: price ${Price:F2} < min ${Min:F2}",
+                    snapshot.Ticker, quotePrice, minStockPrice);
+                continue;
+            }
+
             ResearchAsset? asset = null;
             assetLookup?.TryGetValue(snapshot.Ticker, out asset);
             var (pred, inputs) = await GeneratePredictionForTickerAsync(
@@ -1535,14 +1547,27 @@ public class PredictionGenerator
             var rawTarget = ep + expectedMove;
             result.TargetPrice = Math.Round(rawTarget, 2);
 
-            // Tighten stop proportionally when scalp dampener is active so R:R
-            // stays balanced and EV doesn't go negative on valid scalp candidates.
-            var stopAtr = atr14 * effectiveScalpDampener;
+            // Scale stop distance by time window so multi-day predictions aren't
+            // stopped out by normal intraday noise. DB-configurable per time window:
+            //   prediction_stop_atr_mult_intraday (default 0.8)
+            //   prediction_stop_atr_mult_1day     (default 1.0)
+            //   prediction_stop_atr_mult_3day     (default 1.5)
+            //   prediction_stop_atr_mult_1week    (default 2.0)
+            var stopTimeWindowMult = timeWindow switch
+            {
+                "intraday" => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_intraday", 0.8) ?? 0.8,
+                "1_day"    => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_1day", 1.0) ?? 1.0,
+                "3_day"    => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_3day", 1.5) ?? 1.5,
+                "1_week"   => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_1week", 2.0) ?? 2.0,
+                "1_month"  => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_1month", 3.0) ?? 3.0,
+                _          => 1.0,
+            };
+            var stopAtr = atr14 * effectiveScalpDampener * stopTimeWindowMult;
             var atrStop = ep - stopAtr;
             var supportStop = support - 0.25 * stopAtr;
             result.StopPrice = Math.Round(Math.Max(atrStop, supportStop), 2);
 
-            result.InvalidationPrice = Math.Round(ep - 1.5 * atr14, 2);
+            result.InvalidationPrice = Math.Round(ep - 1.5 * atr14 * stopTimeWindowMult, 2);
         }
         else
         {
@@ -1555,12 +1580,21 @@ public class PredictionGenerator
             var rawTarget = ep - expectedMove;
             result.TargetPrice = Math.Round(rawTarget, 2);
 
-            var stopAtr = atr14 * effectiveScalpDampener;
+            var stopTimeWindowMult = timeWindow switch
+            {
+                "intraday" => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_intraday", 0.8) ?? 0.8,
+                "1_day"    => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_1day", 1.0) ?? 1.0,
+                "3_day"    => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_3day", 1.5) ?? 1.5,
+                "1_week"   => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_1week", 2.0) ?? 2.0,
+                "1_month"  => configWeights?.GetValueOrDefault("prediction_stop_atr_mult_1month", 3.0) ?? 3.0,
+                _          => 1.0,
+            };
+            var stopAtr = atr14 * effectiveScalpDampener * stopTimeWindowMult;
             var atrStop = ep + stopAtr;
             var resistanceStop = resistance + 0.25 * stopAtr;
             result.StopPrice = Math.Round(Math.Min(atrStop, resistanceStop), 2);
 
-            result.InvalidationPrice = Math.Round(ep + 1.5 * atr14, 2);
+            result.InvalidationPrice = Math.Round(ep + 1.5 * atr14 * stopTimeWindowMult, 2);
         }
 
         // --- Risk/reward ratio ---

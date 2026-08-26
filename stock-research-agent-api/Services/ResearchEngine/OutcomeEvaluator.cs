@@ -965,32 +965,19 @@ public class OutcomeEvaluator
         });
         await Task.WhenAll(tasks);
 
+        // ── Load DB config weights for risk thresholds ──
+        var overrides = await _repo.GetActiveWeightOverridesAsync();
+        var cfgWeights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+
+        // ── DB-configurable prediction take-profit threshold ──
+        // When a prediction's current favorable move exceeds this %, close it
+        // as correct immediately — don't wait for the full target. This captures
+        // wins that would otherwise reverse and hit the stop (e.g. SOFI +4%, RIOT +11%).
+        var predTakeProfitPct = cfgWeights.GetValueOrDefault("prediction_take_profit_pct", 2.0);
+
         foreach (var prediction in directional)
         {
             result.PredictionsChecked++;
-
-            // ── Minimum hold period ──
-            // Don't close predictions same-day. Multi-day predictions need
-            // time to play out; intraday noise shouldn't trigger stops on
-            // 3-day or 1-week positions. Minimum hold = 1 trading day for
-            // any non-intraday prediction.
-            var ageHours = (DateTimeOffset.UtcNow - prediction.CreatedAt).TotalHours;
-            var minHoldHours = prediction.TimeWindow switch
-            {
-                "intraday" => 1,   // intraday can close same session
-                "1_day"    => 20,  // at least next trading session
-                "3_day"    => 20,  // at least overnight
-                "1_week"   => 44,  // at least 2 trading days
-                "1_month"  => 120, // at least a week
-                _ => 20,           // default: overnight
-            };
-
-            if (ageHours < minHoldHours)
-            {
-                result.Details.Add($"HOLD: {prediction.Ticker} ({prediction.TimeWindow}) " +
-                    $"age={ageHours:F1}h < min={minHoldHours}h, skipping risk check");
-                continue;
-            }
 
             if (!quoteMap.TryGetValue(prediction.Ticker, out var quote))
             {
@@ -1001,38 +988,13 @@ public class OutcomeEvaluator
             var currentPrice = quote.Price;
             var entryPrice = prediction.EntryReferencePrice!.Value;
             var isBullish = prediction.PredictionType == PredictionType.bullish;
+            var favorableMovePct = isBullish
+                ? ((currentPrice - entryPrice) / entryPrice) * 100
+                : ((entryPrice - currentPrice) / entryPrice) * 100;
 
-            // ── Stop-loss check ──
-            if (prediction.StopPrice is double stopPrice and > 0)
-            {
-                var stopHit = isBullish
-                    ? currentPrice <= stopPrice
-                    : currentPrice >= stopPrice;
-
-                if (stopHit)
-                {
-                    var pctMove = ((currentPrice - entryPrice) / entryPrice) * 100;
-                    _logger.LogWarning(
-                        "[prediction-risk] STOP-LOSS: {Ticker} {Direction} entry ${Entry:F2} → ${Current:F2} ({Pct:+0.0;-0.0}%), stop ${Stop:F2}",
-                        prediction.Ticker, prediction.PredictionType, entryPrice, currentPrice, pctMove, stopPrice);
-
-                    try
-                    {
-                        var evalResult = await EvaluatePredictionAsync(prediction);
-                        if (evalResult is not null)
-                        {
-                            result.StopLossEvaluated++;
-                            result.Details.Add($"STOP-LOSS: {prediction.Ticker} ({prediction.PredictionType}) " +
-                                $"${entryPrice:F2}→${currentPrice:F2} ({pctMove:+0.0;-0.0}%), stop=${stopPrice:F2}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after stop-loss", prediction.Ticker);
-                    }
-                    continue;
-                }
-            }
+            // ── Upside checks run IMMEDIATELY — no min hold ──
+            // If the stock is currently up big, capture the win right away.
+            // Don't let a min hold period prevent us from locking in profit.
 
             // ── Target-hit check ──
             if (prediction.TargetPrice is double targetPrice and > 0)
@@ -1061,6 +1023,150 @@ public class OutcomeEvaluator
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after target-hit", prediction.Ticker);
+                    }
+                    continue;
+                }
+            }
+
+            // ── Take-profit check (trailing profit gate) ──
+            // If favorable move exceeds threshold but hasn't hit the full target,
+            // close as correct. This is the prediction equivalent of a trailing stop
+            // on the upside — captures gains before they reverse.
+            if (favorableMovePct >= predTakeProfitPct)
+            {
+                var pctMove = ((currentPrice - entryPrice) / entryPrice) * 100;
+                _logger.LogInformation(
+                    "[prediction-risk] TAKE-PROFIT: {Ticker} {Direction} entry ${Entry:F2} → ${Current:F2} ({Pct:+0.0;-0.0}%), threshold {Thresh}%",
+                    prediction.Ticker, prediction.PredictionType, entryPrice, currentPrice, pctMove, predTakeProfitPct);
+
+                try
+                {
+                    var evalResult = await EvaluatePredictionAsync(prediction);
+                    if (evalResult is not null)
+                    {
+                        result.TargetHitEvaluated++;
+                        result.Details.Add($"TAKE-PROFIT: {prediction.Ticker} ({prediction.PredictionType}) " +
+                            $"${entryPrice:F2}→${currentPrice:F2} ({pctMove:+0.0;-0.0}%), threshold={predTakeProfitPct}%");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after take-profit", prediction.Ticker);
+                }
+                continue;
+            }
+
+            // ── Peak price tracking & reversal detection ──
+            // Track the best price seen (highest for bullish, lowest for bearish).
+            // If the stock was up meaningfully and now reverses, exit early —
+            // the direction was right, lock it in before it turns into a loss.
+            var reversalExitPct = cfgWeights.GetValueOrDefault("prediction_reversal_exit_pct", 1.0);
+            var peakPrice = prediction.PeakFavorablePrice ?? entryPrice;
+
+            // Update peak if current price is more favorable than previous peak
+            var isNewPeak = isBullish ? (currentPrice > peakPrice) : (currentPrice < peakPrice);
+            if (isNewPeak)
+            {
+                peakPrice = currentPrice;
+                try
+                {
+                    await _repo.UpdatePeakFavorablePriceAsync(prediction.Id, currentPrice);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[prediction-risk] Failed to update peak price for {Ticker}", prediction.Ticker);
+                }
+            }
+
+            // Check for reversal: peak was above entry by at least take-profit threshold,
+            // and price has now dropped from peak by more than reversal threshold
+            var peakGainPct = isBullish
+                ? ((peakPrice - entryPrice) / entryPrice) * 100
+                : ((entryPrice - peakPrice) / entryPrice) * 100;
+
+            if (peakGainPct >= predTakeProfitPct) // peak was a meaningful gain
+            {
+                var dropFromPeakPct = isBullish
+                    ? ((peakPrice - currentPrice) / peakPrice) * 100
+                    : ((currentPrice - peakPrice) / peakPrice) * 100;
+
+                if (dropFromPeakPct >= reversalExitPct)
+                {
+                    var pctMove = isBullish
+                        ? ((currentPrice - entryPrice) / entryPrice) * 100
+                        : ((entryPrice - currentPrice) / entryPrice) * 100;
+                    _logger.LogInformation(
+                        "[prediction-risk] REVERSAL-EXIT: {Ticker} {Direction} entry ${Entry:F2}, peak ${Peak:F2} (+{PeakPct:F1}%), now ${Current:F2} ({Pct:+0.0;-0.0}%), dropped {Drop:F1}% from peak",
+                        prediction.Ticker, prediction.PredictionType, entryPrice, peakPrice, peakGainPct, currentPrice, pctMove, dropFromPeakPct);
+
+                    try
+                    {
+                        var evalResult = await EvaluatePredictionAsync(prediction);
+                        if (evalResult is not null)
+                        {
+                            result.TargetHitEvaluated++;
+                            result.Details.Add($"REVERSAL-EXIT: {prediction.Ticker} ({prediction.PredictionType}) " +
+                                $"peak=${peakPrice:F2} (+{peakGainPct:F1}%), now=${currentPrice:F2} ({pctMove:+0.0;-0.0}%), drop={dropFromPeakPct:F1}%");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after reversal-exit", prediction.Ticker);
+                    }
+                    continue;
+                }
+            }
+
+            // ── Minimum hold period (downside checks only) ──
+            // Don't trigger stop-loss or invalidation too early. Multi-day
+            // predictions need time to play out; intraday noise shouldn't
+            // trigger stops on 3-day or 1-week positions.
+            // Upside checks (target-hit, take-profit, reversal-exit) run above without this gate.
+            var ageHours = (DateTimeOffset.UtcNow - prediction.CreatedAt).TotalHours;
+            var minHoldHours = prediction.TimeWindow switch
+            {
+                "intraday" => 1,   // intraday can close same session
+                "1_day"    => 20,  // at least next trading session
+                "3_day"    => 20,  // at least overnight
+                "1_week"   => 44,  // at least 2 trading days
+                "1_month"  => 120, // at least a week
+                _ => 20,           // default: overnight
+            };
+
+            if (ageHours < minHoldHours)
+            {
+                result.Details.Add($"HOLD: {prediction.Ticker} ({prediction.TimeWindow}) " +
+                    $"age={ageHours:F1}h < min={minHoldHours}h, skipping downside checks");
+                continue;
+            }
+
+            // ── Stop-loss check ──
+            if (prediction.StopPrice is double stopPrice and > 0)
+            {
+                var stopHit = isBullish
+                    ? currentPrice <= stopPrice
+                    : currentPrice >= stopPrice;
+
+                if (stopHit)
+                {
+                    var pctMove = ((currentPrice - entryPrice) / entryPrice) * 100;
+                    _logger.LogWarning(
+                        "[prediction-risk] STOP-LOSS: {Ticker} {Direction} entry ${Entry:F2} → ${Current:F2} ({Pct:+0.0;-0.0}%), stop ${Stop:F2}",
+                        prediction.Ticker, prediction.PredictionType, entryPrice, currentPrice, pctMove, stopPrice);
+
+                    try
+                    {
+                        var evalResult = await EvaluatePredictionAsync(prediction);
+                        if (evalResult is not null)
+                        {
+                            result.StopLossEvaluated++;
+                            result.Details.Add($"STOP-LOSS: {prediction.Ticker} ({prediction.PredictionType}) " +
+                                $"${entryPrice:F2}→${currentPrice:F2} ({pctMove:+0.0;-0.0}%), stop=${stopPrice:F2}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "[prediction-risk] Failed to evaluate {Ticker} after stop-loss", prediction.Ticker);
                     }
                     continue;
                 }
