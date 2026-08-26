@@ -5,6 +5,7 @@ using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.TradeDecision;
 using StockResearchAgent.Api.Services.Broker;
+using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -31,6 +32,7 @@ public class PortfolioLifecycleService
     private readonly IOpenAiCompletionService _ai;
     private readonly FinnhubProvider _finnhub;
     private readonly IBrokerAdapter _broker;
+    private readonly ResearchSignalService _signalService;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -45,6 +47,7 @@ public class PortfolioLifecycleService
         IOpenAiCompletionService ai,
         FinnhubProvider finnhub,
         IBrokerAdapter broker,
+        ResearchSignalService signalService,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -58,6 +61,7 @@ public class PortfolioLifecycleService
         _ai = ai;
         _finnhub = finnhub;
         _broker = broker;
+        _signalService = signalService;
         _logger = logger;
     }
 
@@ -167,6 +171,30 @@ public class PortfolioLifecycleService
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
 
+        // ── Congress signal lookup — fetch once, reuse for all candidates ──
+        // Congressional trades are high-conviction insider signals. When a member
+        // of Congress buys $500K+ of a stock, that candidate gets exemptions from
+        // regime gate, quality filter, cooldown/blacklist, and lower confidence floor.
+        var congressBackedTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var candidateTickers = actionableCandidates.Select(c => c.Ticker).Distinct();
+            var signalsByTicker = await _signalService.GetActiveSignalsAsync(candidateTickers);
+            foreach (var (ticker, signals) in signalsByTicker)
+            {
+                if (signals.Any(s => s.SignalType is "congressional_buy" or "congressional_cluster"))
+                    congressBackedTickers.Add(ticker);
+            }
+            if (congressBackedTickers.Count > 0)
+                _logger.LogInformation(
+                    "[portfolio] CONGRESS EXEMPTION: {Count} tickers backed by congressional buys: {Tickers}",
+                    congressBackedTickers.Count, string.Join(", ", congressBackedTickers));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[portfolio] Congress signal lookup failed (non-blocking)");
+        }
+
         // ── Market regime gate ──
         // Don't open bullish positions in a bearish market or vice versa.
         // Uses SPY price vs EMA26 (proxy for 20-day) — same signal the scoring
@@ -214,7 +242,8 @@ public class PortfolioLifecycleService
                 && c.Timeframe != StockTimeframe.one_day // 1-day predictions are 34% accurate — pure noise
                 && c.Timeframe != StockTimeframe.one_month // 1-month predictions are 12.5% accurate — catastrophic
                 && PredictionCategoryHelper.IsDirectional(c.PredictionType)
-                && c.ConfidenceScore >= minConfidence) // EXP-005: filter low-confidence noise
+                && (c.ConfidenceScore >= minConfidence
+                    || congressBackedTickers.Contains(c.Ticker))) // Congress exemption: bypass confidence floor
             .ToList();
 
         // ── Bearish filter ─────────────────────────────────────────────
@@ -229,6 +258,8 @@ public class PortfolioLifecycleService
                 {
                     if (!PredictionCategoryHelper.IsBullish(c.PredictionType))
                     {
+                        // Congress exemption: congressional sells bypass bearish filters
+                        if (congressBackedTickers.Contains(c.Ticker)) return true;
                         // This is a bearish candidate
                         if (!bearishAllowed) return false;
                         if (c.ConfidenceScore < minBearishConfidence) return false;
@@ -273,7 +304,8 @@ public class PortfolioLifecycleService
         {
             var beforeQuality = eligible.Count;
             eligible = eligible
-                .Where(c => c.QualityTier != QualityTier.weak && c.QualityTier != QualityTier.very_weak)
+                .Where(c => congressBackedTickers.Contains(c.Ticker) // Congress exemption: bypass quality filter
+                    || (c.QualityTier != QualityTier.weak && c.QualityTier != QualityTier.very_weak))
                 .ToList();
 
             var filteredByQuality = beforeQuality - eligible.Count;
@@ -499,7 +531,9 @@ public class PortfolioLifecycleService
                 // ── Broker confidence floor — real money demands higher conviction ──
                 // Paper trades can experiment at conf=55, but broker_paper/live trades
                 // need conf>=60 to avoid wasting capital on weak setups like CCK (51) or UCB (55).
-                if (challenge.TradingMode is TradingMode.broker_paper or TradingMode.live)
+                // Congress exemption: congressional buys bypass broker confidence floor
+                if (challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
+                    && !congressBackedTickers.Contains(c.Ticker))
                 {
                     var brokerMinConf = (int)weights.GetValueOrDefault("broker_min_confidence", 60);
                     if (c.ConfidenceScore < brokerMinConf)
@@ -514,7 +548,14 @@ public class PortfolioLifecycleService
                 // ── Regime gate — don't trade against the market trend ──
                 // Bullish picks in a bearish market get slaughtered (data shows 4-23% accuracy).
                 // Bearish picks in a bullish market face a rising tide.
-                if (marketRegime is not null)
+                // Congress exemption: if a member of Congress is buying, trust their insider knowledge.
+                if (marketRegime is not null && congressBackedTickers.Contains(c.Ticker))
+                {
+                    _logger.LogInformation(
+                        "[portfolio] CONGRESS EXEMPTION: {Ticker} bypassing regime gate ({Regime}) — backed by congressional buy",
+                        c.Ticker, marketRegime);
+                }
+                else if (marketRegime is not null)
                 {
                     var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
                     var blocked = (isBullish && marketRegime == "bearish")
@@ -538,7 +579,8 @@ public class PortfolioLifecycleService
                 }
 
                 // ── Stop-loss cooldown — don't re-enter tickers that just got stopped out ──
-                if (stoppedOutTickers.Contains(c.Ticker))
+                // Congress exemption: fresh congressional buy signal overrides previous losses
+                if (stoppedOutTickers.Contains(c.Ticker) && !congressBackedTickers.Contains(c.Ticker))
                 {
                     _logger.LogInformation(
                         "[portfolio] COOLDOWN: Skipping {Ticker} for {Challenge} — stopped out in last 24h. " +
@@ -548,7 +590,8 @@ public class PortfolioLifecycleService
                 }
 
                 // ── Repeat loser blacklist — block tickers that keep losing ──
-                if (repeatLoserTickers.Contains(c.Ticker))
+                // Congress exemption: congressional buys override blacklist
+                if (repeatLoserTickers.Contains(c.Ticker) && !congressBackedTickers.Contains(c.Ticker))
                 {
                     _logger.LogInformation(
                         "[portfolio] BLACKLISTED: Skipping {Ticker} for {Challenge} — 2+ losses in last {Days} days. " +

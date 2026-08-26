@@ -6,6 +6,7 @@ using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.OpportunityLearning;
 using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Portfolio;
+using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -33,6 +34,7 @@ public class DynamicPickOrchestrator
     private readonly IOpportunityLearningService _opportunityLearning;
     private readonly NeutralOutcomeEvaluator _neutralEvaluator;
     private readonly OutcomeEvaluator _outcomeEvaluator;
+    private readonly ResearchSignalService _signalService;
     private readonly Services.MarketData.MarketDataService _marketData;
     private readonly ILogger<DynamicPickOrchestrator> _logger;
 
@@ -49,6 +51,7 @@ public class DynamicPickOrchestrator
         IOpportunityLearningService opportunityLearning,
         NeutralOutcomeEvaluator neutralEvaluator,
         OutcomeEvaluator outcomeEvaluator,
+        ResearchSignalService signalService,
         Services.MarketData.MarketDataService marketData,
         ILogger<DynamicPickOrchestrator> logger)
     {
@@ -64,6 +67,7 @@ public class DynamicPickOrchestrator
         _opportunityLearning = opportunityLearning;
         _neutralEvaluator = neutralEvaluator;
         _outcomeEvaluator = outcomeEvaluator;
+        _signalService = signalService;
         _marketData = marketData;
         _logger = logger;
     }
@@ -76,6 +80,23 @@ public class DynamicPickOrchestrator
     {
         _logger.LogInformation("[dynamic] Starting dynamic morning picks...");
         var errors = new List<string>();
+
+        // 0. Collect research signals (congress trades, etc.) so they're
+        //    available in the DB for scoring and candidate evaluation.
+        try
+        {
+            var signalResult = await _signalService.CollectAllSignalsAsync();
+            _logger.LogInformation(
+                "[dynamic] Research signals collected: {Persisted} persisted, {Expired} expired, {Errors} errors",
+                signalResult.Persisted, signalResult.Expired, signalResult.Errors.Count);
+            foreach (var err in signalResult.Errors)
+                errors.Add($"signal-collection: {err}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[dynamic] Research signal collection failed (non-blocking)");
+            errors.Add($"signal-collection: {ex.Message}");
+        }
 
         // 1. Existing morning scan generates predictions
         var scan = await _dailyService.RunMorningScanAsync(cancellationToken: cancellationToken);

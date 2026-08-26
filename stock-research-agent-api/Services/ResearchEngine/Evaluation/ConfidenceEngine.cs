@@ -124,15 +124,24 @@ public class ConfidenceEngine : IConfidenceEngine
                 weightedConflicting += signalWeight;
         }
 
+        // DB-configurable confirmation multiplier max — default 1.12 (was hardcoded 1.25).
+        // Data shows 70+ confidence band (driven by max confirmMult 1.25) had 46.7% accuracy
+        // while 50-59 band had 60% accuracy. The compound inflation from confirmMult × calFactor
+        // × dataQuality was pushing "everything agrees" stocks (that already moved) too high.
+        var maxConfirmMult = Math.Clamp(
+            context.LearningData.Weights.GetValueOrDefault("confirmation_multiplier_max", 1.12),
+            0.80, 1.25);
+        var boostRange = maxConfirmMult - 1.0;
+
         double confirmMult = weightedAligned switch
         {
-            >= 2.5 => 1.25,  // 2-3 predictive signals aligned
-            >= 1.8 => 1.15,  // 2 predictive signals aligned
-            >= 1.0 => 1.05,  // 1 predictive signal aligned
-            _ => 1.00,       // only noise signals aligned
+            >= 2.5 => maxConfirmMult,                    // 2-3 predictive signals aligned → full boost
+            >= 1.8 => 1.0 + boostRange * 0.60,           // 2 predictive signals aligned → 60% of boost
+            >= 1.0 => 1.0 + boostRange * 0.20,           // 1 predictive signal aligned → 20% of boost
+            _ => 1.00,                                    // only noise signals aligned
         };
         confirmMult -= weightedConflicting * 0.15;
-        confirmMult = Math.Clamp(confirmMult, 0.75, 1.25);
+        confirmMult = Math.Clamp(confirmMult, 0.75, maxConfirmMult);
 
         var weights = context.LearningData.Weights;
 

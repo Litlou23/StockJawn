@@ -20,8 +20,9 @@ public static class TrendQualityCalculator
 {
     /// <summary>ADX above this = trend regime.</summary>
     public const double AdxTrendingFloor = 25.0;
-    /// <summary>ADX below this = chop regime.</summary>
-    public const double AdxChoppyCeiling = 20.0;
+    /// <summary>ADX below this = chop regime. Lowered from 20→15: ADX 18-20 is mild chop,
+    /// not worth sitting in 100% cash for a week.</summary>
+    public const double AdxChoppyCeiling = 15.0;
     /// <summary>Realized-vol ratio outside this band = regime transition / instability.</summary>
     public const double RvRatioLow = 0.7;
     public const double RvRatioHigh = 1.3;
@@ -41,7 +42,7 @@ public static class TrendQualityCalculator
     ///   regime_adx_floor, regime_rv_low, regime_rv_high, regime_hh_min.
     /// </summary>
     public record TrendQualityThresholds(
-        double AdxChoppyCeiling = 20.0,
+        double AdxChoppyCeiling = 15.0,
         double RvRatioLow = 0.7,
         double RvRatioHigh = 1.3,
         int HhCountMin = 6);
@@ -56,7 +57,7 @@ public static class TrendQualityCalculator
             => overrides.TryGetValue(key, out var v) ? (int)Math.Round(v) : defaultValue;
 
         return new TrendQualityThresholds(
-            AdxChoppyCeiling: Get("regime_adx_floor", 20.0),
+            AdxChoppyCeiling: Get("regime_adx_floor", 15.0),
             RvRatioLow: Get("regime_rv_low", 0.7),
             RvRatioHigh: Get("regime_rv_high", 1.3),
             HhCountMin: GetInt("regime_hh_min", 6));

@@ -969,6 +969,29 @@ public class OutcomeEvaluator
         {
             result.PredictionsChecked++;
 
+            // ── Minimum hold period ──
+            // Don't close predictions same-day. Multi-day predictions need
+            // time to play out; intraday noise shouldn't trigger stops on
+            // 3-day or 1-week positions. Minimum hold = 1 trading day for
+            // any non-intraday prediction.
+            var ageHours = (DateTimeOffset.UtcNow - prediction.CreatedAt).TotalHours;
+            var minHoldHours = prediction.TimeWindow switch
+            {
+                "intraday" => 1,   // intraday can close same session
+                "1_day"    => 20,  // at least next trading session
+                "3_day"    => 20,  // at least overnight
+                "1_week"   => 44,  // at least 2 trading days
+                "1_month"  => 120, // at least a week
+                _ => 20,           // default: overnight
+            };
+
+            if (ageHours < minHoldHours)
+            {
+                result.Details.Add($"HOLD: {prediction.Ticker} ({prediction.TimeWindow}) " +
+                    $"age={ageHours:F1}h < min={minHoldHours}h, skipping risk check");
+                continue;
+            }
+
             if (!quoteMap.TryGetValue(prediction.Ticker, out var quote))
             {
                 result.QuotesFailed++;
