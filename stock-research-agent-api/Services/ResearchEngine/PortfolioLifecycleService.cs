@@ -167,6 +167,7 @@ public class PortfolioLifecycleService
         var aiEntryGateEnabled = weights.GetValueOrDefault("ai_entry_gate_enabled", 1.0) >= 1.0;
         var entryCutoffHourEt = (int)weights.GetValueOrDefault("entry_cutoff_hour_et", 13);
         var entryCutoffEnabled = weights.GetValueOrDefault("entry_cutoff_enabled", 1.0) >= 1.0;
+        var maxDailyEntries = (int)weights.GetValueOrDefault("max_daily_entries", 3);
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
@@ -473,7 +474,28 @@ public class PortfolioLifecycleService
                 continue;
             }
 
-            var slotsAvailable = maxPositions - currentOpenCount;
+            // ── Daily entry cap — prevent correlated drawdowns ──
+            // 8/17: 7 broker entries in one day, market dipped, all lost together.
+            // Spreading entries across days avoids correlated exposure.
+            // Count positions opened today in this challenge.
+            var todayOpenedCount = openPositions.Count(p =>
+                p.EntryDate.UtcDateTime.Date == DateTime.UtcNow.Date);
+            // Also count from closed positions opened today (they might've been stopped out already)
+            todayOpenedCount += allRecentClosedPositions
+                .Count(p => p.PortfolioId == challenge.Id
+                    && p.EntryDate.UtcDateTime.Date == DateTime.UtcNow.Date);
+
+            var dailySlotsRemaining = maxDailyEntries - todayOpenedCount;
+            if (dailySlotsRemaining <= 0)
+            {
+                _logger.LogInformation(
+                    "[portfolio] DAILY CAP: Challenge {Name} already opened {Count} positions today (max {Max}). " +
+                    "Spreading entries across days to avoid correlated drawdowns.",
+                    challenge.Name, todayOpenedCount, maxDailyEntries);
+                continue;
+            }
+
+            var slotsAvailable = Math.Min(maxPositions - currentOpenCount, dailySlotsRemaining);
             var opened = 0;
             // For broker challenges, track tickers opened this run to prevent
             // duplicate positions on the same stock from different profiles.
@@ -481,6 +503,20 @@ public class PortfolioLifecycleService
             var brokerTickersOpened = challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
                 ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
                 : null;
+
+            // ── Prediction-level dedup — one position per prediction per challenge ──
+            // AMAT 8/14: 11 positions opened from same prediction across runs and challenges.
+            // After a position closes (stop-loss), the same prediction re-entered on the next scan.
+            // Fix: collect all prediction_ids that already have open OR closed positions in this challenge,
+            // and block re-entry. A prediction that failed once won't work the second time.
+            var usedPredictionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in openPositions.Where(p => !string.IsNullOrEmpty(p.PredictionId)))
+                usedPredictionIds.Add(p.PredictionId!);
+            // Also check recently closed positions — don't re-enter predictions that already failed
+            var recentClosed = allRecentClosedPositions
+                .Where(p => p.PortfolioId == challenge.Id && !string.IsNullOrEmpty(p.PredictionId));
+            foreach (var p in recentClosed)
+                usedPredictionIds.Add(p.PredictionId!);
 
             // ── Fetch real trade stats for Kelly criterion position sizing ──
             var tradeStats = await _tradeStats.GetStatsAsync();
@@ -575,6 +611,15 @@ public class PortfolioLifecycleService
                 {
                     _logger.LogDebug("[portfolio] Skipping {Ticker} — already held in challenge {Challenge}",
                         c.Ticker, challenge.Name);
+                    continue;
+                }
+
+                // ── Prediction-level dedup — never re-enter a prediction that already traded ──
+                if (!string.IsNullOrEmpty(c.PredictionId) && usedPredictionIds.Contains(c.PredictionId))
+                {
+                    _logger.LogInformation(
+                        "[portfolio] PREDICTION DEDUP: Skipping {Ticker} — prediction {PredId} already has a position in {Challenge}",
+                        c.Ticker, c.PredictionId, challenge.Name);
                     continue;
                 }
 
@@ -850,15 +895,49 @@ public class PortfolioLifecycleService
                         var challengeRecentClosed = allRecentClosedPositions
                             .Where(p => p.PortfolioId == challenge.Id)
                             .ToList();
+
+                        // ── Ticker-specific history for AI gate ──
+                        // Show how this specific ticker has performed in our portfolio
+                        var tickerHistory = challengeRecentClosed
+                            .Where(p => p.Ticker.Equals(c.Ticker, StringComparison.OrdinalIgnoreCase))
+                            .OrderByDescending(p => p.ExitDate)
+                            .Take(5)
+                            .ToList();
+                        var tickerHistoryBlock = "";
+                        if (tickerHistory.Count > 0)
+                        {
+                            var tickerWins = tickerHistory.Count(p => (p.ExitPrice ?? p.EntryPrice) > p.EntryPrice);
+                            var tickerLosses = tickerHistory.Count - tickerWins;
+                            var tickerPnlSum = tickerHistory.Sum(p => p.ProfitLoss ?? 0);
+                            tickerHistoryBlock = $"\nTICKER HISTORY for {c.Ticker}: " +
+                                $"{tickerHistory.Count} recent trades — {tickerWins}W/{tickerLosses}L, " +
+                                $"net ${tickerPnlSum:F2}. " +
+                                string.Join(" | ", tickerHistory.Select(p =>
+                                {
+                                    var exit = p.ExitPrice ?? p.EntryPrice;
+                                    var pct = (exit - p.EntryPrice) / p.EntryPrice * 100;
+                                    return $"{(pct >= 0 ? "+" : "")}{pct:F1}% ({p.ReasonExited?.Split(':')[0] ?? "closed"})";
+                                }));
+                            if (tickerLosses > tickerWins)
+                                tickerHistoryBlock += $"\n⚠ WARNING: We have a LOSING record on {c.Ticker}. Be extra skeptical.";
+                        }
+
+                        // Overall portfolio recent performance
+                        var recentWins = challengeRecentClosed.Count(p => (p.ExitPrice ?? p.EntryPrice) > p.EntryPrice);
+                        var recentLosses = challengeRecentClosed.Count - recentWins;
+                        var recentWinRate = challengeRecentClosed.Count > 0
+                            ? (double)recentWins / challengeRecentClosed.Count * 100 : 0;
+
                         var entryCtx = $"PORTFOLIO STATE: {challenge.Name} | Cash: ${challenge.CurrentCash:F2} | " +
                                        $"Open positions: {currentOpenCount}/{maxPositions} | " +
-                                       $"Recent trades: {challengeRecentClosed.Count} closed\n" +
+                                       $"Recent trades: {challengeRecentClosed.Count} closed ({recentWinRate:F0}% win rate)\n" +
                                        (openPositions.Count > 0
                                            ? "Current holdings: " + string.Join(", ", openPositions.Select(p => p.Ticker))
                                            : "No open positions.") +
                                        (stoppedOutTickers.Count > 0
                                            ? $"\nRecently stopped out (24h cooldown): {string.Join(", ", stoppedOutTickers)}"
-                                           : "");
+                                           : "") +
+                                       tickerHistoryBlock;
                         var aiGate = await GetAiTradeGateDecisionAsync(
                             c, livePrice ?? entryPrice, evPercent, marketRegime, aiEntryGateEnabled, entryCtx, entryTrackRecord);
                         // Persist AI decision (fire-and-forget)
@@ -923,6 +1002,8 @@ public class PortfolioLifecycleService
                         portfolioPositionsOpened++;
                         opened++;
                         brokerTickersOpened?.Add(c.Ticker);
+                        if (!string.IsNullOrEmpty(c.PredictionId))
+                            usedPredictionIds.Add(c.PredictionId);
 
                         // ── Place server-side stop order on Alpaca ──
                         // Eliminates stop-loss overshoot caused by periodic price checks.
@@ -1043,6 +1124,24 @@ public class PortfolioLifecycleService
 
                 foreach (var pos in portfolioPositions)
                 {
+                    // ── Position-age guard — don't EOD-close positions opened today ──
+                    // Bug: candidate created Mon, position opened Thu → candidate is 72h old
+                    // (passes 48h gate) but the position only existed 2h. BX, WMT, WFC, BAC
+                    // all lost money because positions were EOD-closed within hours of entry
+                    // instead of getting their full 3-day window. Fix: require the POSITION
+                    // itself to be old enough, using half the candidate's min eval window.
+                    var positionAgeHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+                    var minPositionHours = minHours * 0.5; // position gets at least half the prediction window
+                    if (positionAgeHours < minPositionHours)
+                    {
+                        _logger.LogInformation(
+                            "[portfolio] {Ticker}: position too young for EOD close ({PosAge:F1}h < {Min:F0}h). " +
+                            "Candidate is {CandAge:F0}h old but position opened recently — letting trade play out.",
+                            c.Ticker, positionAgeHours, minPositionHours, ageHours);
+                        portfolioPositionsSkipped++;
+                        continue;
+                    }
+
                     // ── Options: stock quote ≠ option price. Close at entry (flat)
                     // until we have a real option pricing path.
                     var exitPrice = pos.AssetType == PositionAssetType.option
@@ -2146,8 +2245,10 @@ public class PortfolioLifecycleService
                 : "";
 
             var prompt = $$"""
-                You are a trader managing a real $1,000 account. One goal: MAKE MONEY.
-                Our system found a trade. Will this make us profit?
+                You are a skeptical risk manager for a real $1,000 account. Your job is to PROTECT CAPITAL.
+                Our system auto-approves too many trades. You are the last line of defense.
+
+                You should REJECT roughly 30-50% of trades. If in doubt, REJECT.
 
                 {{candidate.Ticker}} | {{candidate.WinningDirection}} | {{candidate.Timeframe}}
                 Entry: ${{candidate.EntryPrice:F2}} → Target: ${{candidate.TargetPrice:F2}} | Stop: ${{candidate.StopPrice:F2}}
@@ -2157,29 +2258,29 @@ public class PortfolioLifecycleService
                 {{portfolioBlock}}
                 {{(aiTrackRecord ?? "")}}
 
-                Think about P&L. Does the math work on this trade?
-                - How many dollars can we make vs how many can we lose?
-                - Is the stop tight enough that if we're wrong, the loss is small?
-                - Is the target realistic — can this stock actually move that much?
-                - Has the stock already made its move, or is the move still ahead?
-                - Is the live price already past the stop price? If so, the setup is invalid — REJECT.
-                - Any ticker is fine — small cap, large cap — as long as the P&L makes sense.
+                REJECTION CHECKLIST — REJECT if ANY of these are true:
+                1. Live price is already past the stop price → setup is INVALID
+                2. Risk/reward ratio < 1.5:1 (distance to stop vs distance to target)
+                3. Quality tier is "medium" AND confidence < 65 → not enough edge
+                4. We already have a LOSING record on this ticker (check TICKER HISTORY above)
+                5. The stock has already moved significantly toward the target → chasing
+                6. Live price has drifted >1.5% from planned entry → slippage risk
+                7. We already hold 3+ open positions → concentration risk
+                8. The stop is wider than 3% from entry → too much downside per trade
 
-                APPROVE if the trade has a clear path to profit with controlled downside.
-                REJECT if the math doesn't work: stop too wide relative to target,
-                stock already chasing, live price below stop, or we'd risk too much to make too little.
+                APPROVE ONLY if the trade passes ALL checks above AND has compelling R:R math.
 
-                Set position_scale: 1.5 high conviction, 1.0 normal, 0.5 if you like it but want smaller size.
+                Set position_scale: 1.5 high conviction, 1.0 normal, 0.5 marginal but acceptable.
 
                 IMPORTANT: You MUST include a reason for EVERY decision, including approvals.
-                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence explaining why — REQUIRED for both APPROVE and REJECT", "position_scale": 1.0}
+                Respond in JSON: {"decision": "APPROVE" or "REJECT", "reason": "one sentence — REQUIRED", "position_scale": 1.0}
                 """;
 
             var result = await _ai.CompleteAsync(new AiCompletionRequest
             {
                 Messages = [new AiChatMessageDto { Role = "user", Content = prompt }],
                 ResponseFormatJson = true,
-                MaxOutputTokens = 120,
+                MaxOutputTokens = 200,
                 ModelOverride = 5, // Terra for quality decisions
             }, CancellationToken.None);
 

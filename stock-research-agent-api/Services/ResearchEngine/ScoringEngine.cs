@@ -196,7 +196,8 @@ public class ScoringEngine : IScoringEngine
             catalystScore: catalyst.BullishContribution - catalyst.BearishContribution,
             marketContextScore: market.BullishContribution - market.BearishContribution,
             dataQualityFactor: confidence.DataQualityFactor,
-            confidenceCap: confidence.ConfidenceCap);
+            confidenceCap: confidence.ConfidenceCap,
+            weights: context.LearningData.Weights);
 
         return new ScoringResult
         {
@@ -479,18 +480,32 @@ public class ScoringEngine : IScoringEngine
         double catalystScore,
         double marketContextScore,
         double dataQualityFactor,
-        string? confidenceCap)
+        string? confidenceCap,
+        IReadOnlyDictionary<string, double>? weights = null)
     {
         var reasons = new List<string>();
 
-        ActionabilityTier tier = confidence switch
-        {
-            < 35 => ActionabilityTier.scan,
-            < 55 => ActionabilityTier.watch_only,
-            < 70 => ActionabilityTier.actionable,
-            < 85 => ActionabilityTier.strong,
-            _ => ActionabilityTier.strongest,
-        };
+        // Thresholds DB-configurable to match confidence formula changes.
+        // Compressed confidence range (post diminishing-returns fix) means
+        // most scores land 25-55 instead of old 20-70+. Adjust tiers to match.
+        var w = weights ?? new Dictionary<string, double>();
+        var tierScan = (int)w.GetValueOrDefault("actionability_scan_max", 25.0);
+        var tierWatch = (int)w.GetValueOrDefault("actionability_watch_max", 38.0);
+        var tierActionable = (int)w.GetValueOrDefault("actionability_actionable_max", 48.0);
+        var tierStrong = (int)w.GetValueOrDefault("actionability_strong_max", 58.0);
+
+        ActionabilityTier tier;
+        if (confidence < tierScan)
+            tier = ActionabilityTier.scan;
+        else if (confidence < tierWatch)
+            tier = ActionabilityTier.watch_only;
+        else if (confidence < tierActionable)
+            tier = ActionabilityTier.actionable;
+        else if (confidence < tierStrong)
+            tier = ActionabilityTier.strong;
+        else
+            tier = ActionabilityTier.strongest;
+
         reasons.Add($"Base tier from confidence {confidence}: {tier}");
 
         if (riskReward is double rr and > 0)
@@ -532,7 +547,7 @@ public class ScoringEngine : IScoringEngine
 
     internal static (string WinningDirection, string PredictionType) DeterminePredictionType(
         double bullishScore, double bearishScore, MarketSnapshot snapshot, TechnicalIndicators ind,
-        Dictionary<string, double>? weights = null)
+        IReadOnlyDictionary<string, double>? weights = null)
     {
         if (!snapshot.DataAvailability.MarketDataAvailable && !snapshot.DataAvailability.NewsAvailable)
             return ("neutral", "unavailable");

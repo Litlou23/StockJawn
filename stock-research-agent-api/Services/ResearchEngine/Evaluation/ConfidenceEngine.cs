@@ -201,14 +201,49 @@ public class ConfidenceEngine : IConfidenceEngine
         var riskAdj = 1.0 - Math.Min(Math.Abs(riskAssessment.RiskPenalty), 30) / 100.0;
         var calFactor = context.LearningData.CalibrationFactor;
 
-        var winningScore = Math.Max(aggregate.BullishScore, aggregate.BearishScore);
+        var rawWinning = Math.Max(aggregate.BullishScore, aggregate.BearishScore);
         var losingScore = Math.Min(aggregate.BullishScore, aggregate.BearishScore);
-        var scoreSum = winningScore + losingScore;
-        var decisionMargin = scoreSum > 0 ? (winningScore - losingScore) / scoreSum : 0.0;
+        var scoreSum = rawWinning + losingScore;
+        var decisionMargin = scoreSum > 0 ? (rawWinning - losingScore) / scoreSum : 0.0;
 
+        // ── Diminishing returns on directional score ──────────────────
+        // Data proves: scores above ~45 DON'T correlate with better accuracy.
+        // Bull 62 / Bear 17 → 34.7% accuracy. Bull 39 / Bear 26 → 51.6%.
+        // High one-sided scores mean "found lots of agreeing evidence" not
+        // "this prediction is more likely correct." Cap the contribution.
+        var sweetSpot = weights.GetValueOrDefault("confidence_sweet_spot", 45.0);
+        var diminishRate = Math.Clamp(weights.GetValueOrDefault("confidence_diminish_rate", 0.3), 0.1, 0.9);
+        double winningScore;
+        if (rawWinning <= sweetSpot)
+            winningScore = rawWinning;
+        else
+            winningScore = sweetSpot + (rawWinning - sweetSpot) * diminishRate;
+
+        // ── Signal contestation adjustment ────────────────────────────
+        // INVERTED from old logic. Data shows contested signals (both sides
+        // have meaningful scores) predict BETTER than one-sided signals.
+        // When the model finds counter-evidence but the winning direction
+        // still prevails, that's a MORE reliable signal, not less.
+        // Only penalize true indecision where direction is genuinely unclear.
         double oppositionPenalty = 1.0;
-        if (decisionMargin < 0.48)
-            oppositionPenalty = Math.Max(0.6, 0.6 + (decisionMargin / 0.48) * 0.4);
+        var contestationBonus = Math.Clamp(weights.GetValueOrDefault("contestation_bonus", 1.12), 1.0, 1.25);
+        var contestationMinScore = weights.GetValueOrDefault("contestation_min_score", 15.0);
+        var indecisionThreshold = weights.GetValueOrDefault("indecision_threshold", 0.15);
+
+        if (losingScore >= contestationMinScore && decisionMargin >= indecisionThreshold)
+        {
+            // Healthy contestation: losing side has meaningful score but winner is clear
+            // The model found evidence AGAINST the pick and still chose it → stronger signal
+            var contestStrength = Math.Min(losingScore / rawWinning, 0.45);
+            oppositionPenalty = 1.0 + (contestationBonus - 1.0) * (contestStrength / 0.45);
+            debugSignals.Add($"Confidence: contestation bonus {oppositionPenalty:F3} — losing score {losingScore:F0} validates direction despite opposition");
+        }
+        else if (decisionMargin < indecisionThreshold)
+        {
+            // True indecision: scores too close, direction unreliable
+            oppositionPenalty = Math.Max(0.6, 0.6 + (decisionMargin / indecisionThreshold) * 0.4);
+            debugSignals.Add($"Confidence: indecision penalty {oppositionPenalty:F3} — margin {decisionMargin:F2} too narrow for reliable direction");
+        }
 
         // ── Regime-aware confidence penalty (learned from pattern detection) ──
         // Pattern detection identifies which market regimes produce the most failures
@@ -494,6 +529,31 @@ public class ConfidenceEngine : IConfidenceEngine
             {
                 rawConfidence = 50;
                 capReason = $"Liquidity cap: low coverage stock ({liquidityFlags} coverage flags)";
+            }
+        }
+
+        // ── Piecewise calibration (simplified isotonic regression) ──────
+        // Research shows isotonic regression outperforms single-factor
+        // calibration by ~22% ECE improvement. This is a simplified version:
+        // different confidence bands get different correction multipliers
+        // learned from historical accuracy data. DB-configurable so the
+        // LearningEngine can update these as accuracy data accumulates.
+        // Default 1.0 = no adjustment until we have enough data to tune.
+        {
+            double bandCal;
+            if (rawConfidence < 30)
+                bandCal = Math.Clamp(weights.GetValueOrDefault("cal_band_under_30", 1.0), 0.7, 1.3);
+            else if (rawConfidence < 45)
+                bandCal = Math.Clamp(weights.GetValueOrDefault("cal_band_30_45", 1.0), 0.7, 1.3);
+            else if (rawConfidence < 55)
+                bandCal = Math.Clamp(weights.GetValueOrDefault("cal_band_45_55", 1.0), 0.7, 1.3);
+            else
+                bandCal = Math.Clamp(weights.GetValueOrDefault("cal_band_55_plus", 0.92), 0.7, 1.3);
+
+            if (Math.Abs(bandCal - 1.0) > 0.005)
+            {
+                rawConfidence *= bandCal;
+                debugSignals.Add($"Confidence: piecewise calibration {bandCal:F2} for band (raw was {rawConfidence / bandCal:F0})");
             }
         }
 

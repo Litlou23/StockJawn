@@ -681,6 +681,93 @@ public class PredictionGenerator
             _logger.LogDebug(ex, "[prediction] Ticker reliability lookup skipped for {Ticker}", ticker);
         }
 
+        // ── Time window confidence adjustment ─────────────────────────
+        // Data: 1-day predictions have 33.3% accuracy vs 52.7% for 3-day.
+        // 1-week has 43.3%. Apply DB-configurable penalties to suppress
+        // time windows that historically underperform.
+        {
+            var twPenalty1Day = Math.Clamp(weights.GetValueOrDefault("tw_penalty_1day", 0.85), 0.5, 1.0);
+            var twPenalty1Week = Math.Clamp(weights.GetValueOrDefault("tw_penalty_1week", 0.93), 0.5, 1.0);
+
+            if (timeWindow == PredictionTimeWindows.OneDay)
+            {
+                var prevConf = confidence;
+                confidence = (int)Math.Round(confidence * twPenalty1Day);
+                _logger.LogInformation(
+                    "[prediction] {Ticker}: 1-day time window penalty {Penalty:F2} → conf {Prev}→{New} (33% historical accuracy)",
+                    ticker, twPenalty1Day, prevConf, confidence);
+            }
+            else if (timeWindow == PredictionTimeWindows.OneWeek)
+            {
+                var prevConf = confidence;
+                confidence = (int)Math.Round(confidence * twPenalty1Week);
+                if (confidence != prevConf)
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: 1-week time window penalty {Penalty:F2} → conf {Prev}→{New}",
+                        ticker, twPenalty1Week, prevConf, confidence);
+            }
+        }
+
+        // ── Expected move sweet-spot adjustment ──────────────────────
+        // Data: 4-7% expected move = 54.2% accuracy (best).
+        //       2-4% = 41.3% (worst). <2% = 47.4%.
+        // Stocks that need to move a meaningful but not extreme amount
+        // are the most predictable. Penalize small expected moves where
+        // the stock doesn't have enough room to hit targets.
+        if (priceCalc.ExpectedMovePercent is double expMove && expMove > 0)
+        {
+            var smallMovePenalty = Math.Clamp(weights.GetValueOrDefault("exp_move_small_penalty", 0.90), 0.5, 1.0);
+            var smallMoveThreshold = weights.GetValueOrDefault("exp_move_small_threshold", 3.0);
+            var sweetSpotBonus = Math.Clamp(weights.GetValueOrDefault("exp_move_sweet_bonus", 1.05), 1.0, 1.15);
+            var sweetSpotLow = weights.GetValueOrDefault("exp_move_sweet_low", 4.0);
+            var sweetSpotHigh = weights.GetValueOrDefault("exp_move_sweet_high", 7.0);
+
+            if (expMove < smallMoveThreshold)
+            {
+                var prevConf = confidence;
+                confidence = (int)Math.Round(confidence * smallMovePenalty);
+                if (confidence != prevConf)
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: small expected move {Move:F1}% < {Thresh}% → conf {Prev}→{New}",
+                        ticker, expMove, smallMoveThreshold, prevConf, confidence);
+            }
+            else if (expMove >= sweetSpotLow && expMove <= sweetSpotHigh)
+            {
+                var prevConf = confidence;
+                confidence = (int)Math.Round(confidence * sweetSpotBonus);
+                if (confidence != prevConf)
+                    _logger.LogInformation(
+                        "[prediction] {Ticker}: sweet-spot expected move {Move:F1}% → conf {Prev}→{New}",
+                        ticker, expMove, prevConf, confidence);
+            }
+        }
+
+        // ── Direction bias adjustment ────────────────────────────────
+        // Data: bearish predictions at high confidence have 25.9% accuracy
+        // vs bullish at 49.3%. Bearish signals tend to be overconfident.
+        // Apply DB-configurable multipliers per direction.
+        {
+            var bearishMult = Math.Clamp(weights.GetValueOrDefault("direction_bearish_mult", 0.90), 0.5, 1.2);
+            var bullishMult = Math.Clamp(weights.GetValueOrDefault("direction_bullish_mult", 1.0), 0.5, 1.2);
+
+            if (winningDirection == "bearish" && Math.Abs(bearishMult - 1.0) > 0.005)
+            {
+                var prevConf = confidence;
+                confidence = (int)Math.Round(confidence * bearishMult);
+                _logger.LogInformation(
+                    "[prediction] {Ticker}: bearish direction bias {Mult:F2} → conf {Prev}→{New}",
+                    ticker, bearishMult, prevConf, confidence);
+            }
+            else if (winningDirection == "bullish" && Math.Abs(bullishMult - 1.0) > 0.005)
+            {
+                var prevConf = confidence;
+                confidence = (int)Math.Round(confidence * bullishMult);
+                _logger.LogInformation(
+                    "[prediction] {Ticker}: bullish direction bias {Mult:F2} → conf {Prev}→{New}",
+                    ticker, bullishMult, prevConf, confidence);
+            }
+        }
+
         // Track downgrade reasons for watch_only calibration learning.
         // Start with ScoringEngine's actionability reasons, then add R:R downgrade if applicable.
         var downgradeReasons = new List<string>();
