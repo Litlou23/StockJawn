@@ -1600,6 +1600,9 @@ public class PortfolioLifecycleService
                 .ToList();
             var candidateMap = await _candidateRepo.GetCandidateMapByPredictionIdsAsync(predictionIds);
 
+            // Fetch ATR% and target prices from prediction_candidates for ATR-scaled trailing stops
+            var atrMap = await _candidateRepo.GetAtrDataByPredictionIdsAsync(predictionIds);
+
             // ── Build portfolio context for AI decisions ──
             // Fetch recent closed trades so AI can see patterns (churning, streak, etc.)
             // Only for broker/live — don't waste API calls on pure paper
@@ -1768,13 +1771,58 @@ public class PortfolioLifecycleService
                         result.HighWaterMarksUpdated++;
                     }
 
+                    // ── ATR-scaled trailing stop ──
+                    // Volatile stocks (TSLA 4% ATR, COIN 5% ATR) need wider trails than
+                    // stable stocks (PEP 1.2% ATR). A fixed 1.5% trail gets stopped out
+                    // on normal intraday noise for high-ATR names.
+                    // Formula: trail = max(base_trail, ATR% × atr_trail_mult)
+                    //          activate = max(base_activate, ATR% × atr_activate_mult)
+                    var atrTrailMult = weights.GetValueOrDefault("atr_trail_multiplier", 0.5);
+                    var atrActivateMult = weights.GetValueOrDefault("atr_activate_multiplier", 0.75);
+                    var baseTrail = limits.TrailPercent;
+                    var baseActivate = limits.TrailActivate;
+
+                    // Look up this position's ATR% and target price from its prediction
+                    double? posAtrPercent = null;
+                    double? predictionTargetPrice = null;
+                    if (pos.PredictionId is not null && atrMap.TryGetValue(pos.PredictionId, out var atrData))
+                    {
+                        posAtrPercent = atrData.AtrPercent / 100.0; // stored as percentage, convert to decimal
+                        predictionTargetPrice = atrData.TargetPrice;
+                    }
+                    // Also check paper_stock_candidate target price as fallback
+                    if (predictionTargetPrice is null && pos.PredictionId is not null
+                        && candidateMap.TryGetValue(pos.PredictionId, out var cand))
+                    {
+                        predictionTargetPrice = cand.TargetPrice;
+                    }
+
+                    if (posAtrPercent is not null and > 0)
+                    {
+                        baseTrail = Math.Max(limits.TrailPercent, posAtrPercent.Value * atrTrailMult);
+                        baseActivate = Math.Max(limits.TrailActivate, posAtrPercent.Value * atrActivateMult);
+                    }
+
+                    // ── Target-aware trail tightening ──
+                    // Once the price exceeds the prediction's target, tighten the trail
+                    // to lock in profit faster. The trade has achieved its goal — now
+                    // protect the gains but still let it run a bit.
+                    var targetTightenMult = weights.GetValueOrDefault("target_trail_tighten", 0.65);
+                    bool pastTarget = false;
+                    if (predictionTargetPrice is not null && predictionTargetPrice > pos.EntryPrice)
+                    {
+                        pastTarget = hwm >= predictionTargetPrice.Value;
+                    }
+
                     // After partial TP, activate trailing stop immediately (already in profit)
                     // and tighten the trail slightly — we've banked half, now protect the rest
                     // but not so tight that normal fluctuations trigger it.
-                    var effectiveActivate = pos.PartialProfitTaken ? 0.0 : limits.TrailActivate;
+                    var effectiveActivate = pos.PartialProfitTaken ? 0.0 : baseActivate;
                     var effectiveTrail = pos.PartialProfitTaken
-                        ? limits.TrailPercent * 0.90 // 10% tighter trail after partial TP — was 15%, too aggressive
-                        : limits.TrailPercent;
+                        ? baseTrail * 0.90 // 10% tighter trail after partial TP
+                        : pastTarget
+                            ? baseTrail * targetTightenMult // tighten when past prediction target
+                            : baseTrail;
 
                     // Check if trailing stop has been activated (price rose above activation threshold)
                     var hwmGainFromEntry = (hwm - pos.EntryPrice) / pos.EntryPrice;
@@ -1829,10 +1877,12 @@ public class PortfolioLifecycleService
 
                         if (currentPrice <= trailFloor)
                         {
-                            var suffix = pos.PartialProfitTaken ? " [post-partial, tightened trail]" : "";
+                            var atrTag = posAtrPercent is not null ? $", ATR={posAtrPercent.Value:P1}" : "";
+                            var targetTag = pastTarget ? " [past-target, tightened]" : "";
+                            var partialTag = pos.PartialProfitTaken ? " [post-partial]" : "";
                             var reason = $"TRAILING-STOP ({tier}): {pos.Ticker} fell to ${currentPrice:F2} " +
-                                         $"below trail floor ${trailFloor:F2} (peak ${hwm:F2}, trail {effectiveTrail:P1}). " +
-                                         $"Locked in {pnlPercent:P1} gain from entry ${pos.EntryPrice:F2}{suffix}";
+                                         $"below trail floor ${trailFloor:F2} (peak ${hwm:F2}, trail {effectiveTrail:P1}{atrTag}). " +
+                                         $"Locked in {pnlPercent:P1} gain from entry ${pos.EntryPrice:F2}{targetTag}{partialTag}";
                             await CloseWithReason(pos, currentPrice, reason);
                             result.TrailingStopClosed++;
                             result.ClosedTickers.Add(pos.Ticker);

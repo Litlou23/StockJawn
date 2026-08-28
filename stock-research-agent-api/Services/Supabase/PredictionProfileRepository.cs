@@ -227,6 +227,47 @@ public class PredictionProfileRepository
     }
 
     // -----------------------------------------------------------------------
+    // Ticker Pools — profile-specific ticker filtering
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Gets the ticker pool for a profile. Stored as config_key="ticker_pool",
+    /// CSV in the description column, mode (0=include, 1=exclude) in config_value.
+    /// Returns null if no ticker pool is configured.
+    /// </summary>
+    public async Task<(HashSet<string> Tickers, int Mode)?> GetTickerPoolAsync(string profileId)
+    {
+        var configs = await GetProfileConfigsAsync(profileId);
+        var poolConfig = configs.FirstOrDefault(c => c.ConfigKey == "ticker_pool");
+        if (poolConfig is null || string.IsNullOrWhiteSpace(poolConfig.Description))
+            return null;
+
+        var tickers = new HashSet<string>(
+            poolConfig.Description.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            StringComparer.OrdinalIgnoreCase);
+        var mode = (int)poolConfig.ConfigValue; // 0=include, 1=exclude
+        return (tickers, mode);
+    }
+
+    /// <summary>
+    /// Sets the ticker pool for a profile.
+    /// </summary>
+    public async Task<bool> SetTickerPoolAsync(string profileId, IEnumerable<string> tickers, int mode = 0)
+    {
+        var csv = string.Join(",", tickers.Select(t => t.Trim().ToUpperInvariant()));
+        return await _db.UpsertAsync("prediction_profile_configs", new[]
+        {
+            new
+            {
+                profile_id = profileId,
+                config_key = "ticker_pool",
+                config_value = (double)mode,
+                description = csv,
+            }
+        }, onConflict: "profile_id,config_key");
+    }
+
+    // -----------------------------------------------------------------------
     // Clone
     // -----------------------------------------------------------------------
 

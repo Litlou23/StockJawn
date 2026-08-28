@@ -219,6 +219,36 @@ public class PaperStockCandidateRepository
             .ToDictionary(g => g.Key, g => g.First());
     }
 
+    /// <summary>
+    /// Fetch ATR% and target price from prediction_candidates for a set of prediction IDs.
+    /// Used by risk management to scale trailing stops by volatility and tighten near target.
+    /// </summary>
+    public async Task<Dictionary<string, (double AtrPercent, double? TargetPrice)>> GetAtrDataByPredictionIdsAsync(
+        List<string> predictionIds)
+    {
+        if (predictionIds.Count == 0) return new();
+
+        var result = new Dictionary<string, (double, double?)>();
+        const int chunkSize = 50;
+        for (int i = 0; i < predictionIds.Count; i += chunkSize)
+        {
+            var chunk = predictionIds.Skip(i).Take(chunkSize);
+            var rows = await _db.SelectAsync("prediction_candidates",
+                filter: SupabaseClient.InFilter("id", chunk),
+                select: "id,atr_percent,target_price");
+            foreach (var r in rows)
+            {
+                var id = r["id"]?.ToString();
+                if (id is null) continue;
+                var atrPct = GetNullableDouble(r, "atr_percent");
+                var target = GetNullableDouble(r, "target_price");
+                if (atrPct is not null and > 0)
+                    result[id] = (atrPct.Value, target);
+            }
+        }
+        return result;
+    }
+
     public async Task<bool> UpdateCandidateStatusAsync(string id, PaperStockStatus status)
     {
         return await _db.UpdateAsync("paper_stock_candidates", $"id=eq.{id}",

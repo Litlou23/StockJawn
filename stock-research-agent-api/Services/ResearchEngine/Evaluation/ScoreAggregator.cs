@@ -11,6 +11,10 @@ public class ScoreAggregator : IScoreAggregator
         { EvaluatorKind.trend, "trend" },
         { EvaluatorKind.momentum, "momentum" },
         { EvaluatorKind.volume, "volume" },
+        { EvaluatorKind.volatility, "volatility" },
+        { EvaluatorKind.market_context, "market_context" },
+        { EvaluatorKind.catalyst, "catalyst" },
+        { EvaluatorKind.research_signal, "research_signal" },
     };
 
     public AggregateScoreResult Aggregate(IReadOnlyList<EvaluatorOutput> outputs, string winningDirection, EvaluationContext context)

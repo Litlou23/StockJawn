@@ -165,17 +165,57 @@ public class DailyResearchRunService
             await _repo.LogProgressAsync(run.Id, "generating_predictions",
                 $"Generating predictions for {profilesToRun.Count} profile(s): {string.Join(", ", profilesToRun.Select(p => p.Name))}");
 
-            // 3. Generate predictions per profile (snapshots are shared)
+            // 3. Generate predictions per profile
+            //    Each profile can define a ticker pool via profile configs:
+            //      config_key = "ticker_pool", description = "AAPL,MSFT,NVDA,..."
+            //      config_value = 0 (include only) or 1 (exclude these)
+            //    If no ticker_pool is set, the profile evaluates all tickers.
             var allPredictions = new List<PredictionCandidate>();
             var totalAllInputs = new List<PredictionInput>();
             var totalSupersessions = new List<PredictionGenerator.PendingSupersession>();
 
             foreach (var (profileId, profileName) in profilesToRun)
             {
-                _logger.LogInformation("[research-engine] Generating predictions for profile '{Name}'...", profileName);
-                await _repo.LogProgressAsync(run.Id, "profile_start", $"Starting predictions for profile '{profileName}'");
+                // Filter tickers for this profile based on its ticker pool
+                var profileTickers = tickers;
+                var profileSnapshots = snapshots;
+                var profileAssetLookup = assetLookup;
+
+                var tickerPool = await _profileRepo.GetTickerPoolAsync(profileId);
+                if (tickerPool is not null)
+                {
+                    var (pool, mode) = tickerPool.Value;
+                    if (pool.Count > 0)
+                    {
+                        if (mode == 0)
+                        {
+                            // Include mode: only these tickers
+                            profileTickers = tickers.Where(t => pool.Contains(t)).ToArray();
+                            profileSnapshots = snapshots.Where(s => pool.Contains(s.Ticker)).ToList();
+                        }
+                        else
+                        {
+                            // Exclude mode: everything except these tickers
+                            profileTickers = tickers.Where(t => !pool.Contains(t)).ToArray();
+                            profileSnapshots = snapshots.Where(s => !pool.Contains(s.Ticker)).ToList();
+                        }
+
+                        var filteredTickerSet = new HashSet<string>(profileTickers, StringComparer.OrdinalIgnoreCase);
+                        profileAssetLookup = assetLookup
+                            .Where(kv => filteredTickerSet.Contains(kv.Key))
+                            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+
+                        _logger.LogInformation(
+                            "[research-engine] Profile '{Name}': ticker pool {Mode} filter — {PoolCount} pool tickers, {ResultCount} after filter (from {TotalCount} total)",
+                            profileName, mode == 0 ? "include" : "exclude", pool.Count, profileTickers.Length, tickers.Length);
+                    }
+                }
+
+                _logger.LogInformation("[research-engine] Generating predictions for profile '{Name}' ({TickerCount} tickers)...",
+                    profileName, profileTickers.Length);
+                await _repo.LogProgressAsync(run.Id, "profile_start", $"Starting predictions for profile '{profileName}' ({profileTickers.Length} tickers)");
                 var (predictions, allInputs, pendingSupersessions) = await _predGen.GeneratePredictionsForWatchlistAsync(
-                    tickers, run.Id, snapshots, assetLookup, profileId: profileId);
+                    profileTickers, run.Id, profileSnapshots, profileAssetLookup, profileId: profileId);
 
                 _logger.LogInformation("[research-engine] Profile '{Name}': {Count} predictions", profileName, predictions.Count);
                 await _repo.LogProgressAsync(run.Id, "profile_done", $"Profile '{profileName}': {predictions.Count} predictions");
