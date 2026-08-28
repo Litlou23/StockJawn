@@ -949,6 +949,17 @@ public class PredictionGenerator
                 snapshot.Ticker, runId, snapshot, asset, sharedContext);
             if (pred is not null)
             {
+                // ── ATR floor gate: skip low-volatility stocks ──
+                // Data: <1.5% ATR → 0% target hit, 78.6% stop hit (n=14).
+                // Stops are too tight relative to the stock's natural movement.
+                var minAtrPercent = sharedContext.Weights.GetValueOrDefault("min_atr_percent", 1.5);
+                if (pred.AtrPercent is > 0 and double atrPct && atrPct < minAtrPercent)
+                {
+                    _logger.LogInformation(
+                        "[prediction] Skipping {Ticker}: ATR {Atr:F2}% below min {Min:F1}% — low-vol stocks hit stops 78% of the time",
+                        pred.Ticker, atrPct, minAtrPercent);
+                    continue;
+                }
                 var tickerKey = pred.Ticker.ToUpperInvariant();
                 var isNewDirectional = PredictionCategoryHelper.IsDirectional(pred.PredictionType);
 

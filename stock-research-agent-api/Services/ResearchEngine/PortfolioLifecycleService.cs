@@ -168,6 +168,9 @@ public class PortfolioLifecycleService
         var entryCutoffHourEt = (int)weights.GetValueOrDefault("entry_cutoff_hour_et", 13);
         var entryCutoffEnabled = weights.GetValueOrDefault("entry_cutoff_enabled", 1.0) >= 1.0;
         var maxDailyEntries = (int)weights.GetValueOrDefault("max_daily_entries", 3);
+        var minRiskRewardRatio = weights.GetValueOrDefault("min_risk_reward_ratio", 1.5);
+        var maxEntrySlippagePct = weights.GetValueOrDefault("max_entry_slippage_pct", 1.5);
+        var brokerMinQuality = (int)weights.GetValueOrDefault("broker_min_quality", 1); // 0=any, 1=medium+, 2=strong+
 
         // ── Position sizing config ──
         var sizingConfig = BuildSizingConfig(weights);
@@ -793,6 +796,65 @@ public class PortfolioLifecycleService
                             c.StopPrice is > 0 && c.EntryPrice is > 0
                                 ? Math.Abs(c.EntryPrice.Value - c.StopPrice.Value) / c.EntryPrice.Value * 100 : 0);
                         continue;
+                    }
+
+                    // ── Risk/Reward ratio gate — mechanical, no AI needed ──
+                    // Reject trades where potential loss exceeds potential gain by too much.
+                    // Every stop-loss loser in our history had poor R:R.
+                    if (c.TargetPrice is > 0 && c.StopPrice is > 0 && c.EntryPrice is > 0)
+                    {
+                        var gainDist = Math.Abs(c.TargetPrice.Value - c.EntryPrice.Value);
+                        var lossDist = Math.Abs(c.EntryPrice.Value - c.StopPrice.Value);
+                        if (lossDist > 0)
+                        {
+                            var rrRatio = gainDist / lossDist;
+                            if (rrRatio < minRiskRewardRatio)
+                            {
+                                _logger.LogInformation(
+                                    "[portfolio] R:R GATE: Skipping {Ticker} — R:R ratio {RR:F2}:1 below minimum {Min:F1}:1 " +
+                                    "(gain ${Gain:F2} vs risk ${Loss:F2})",
+                                    c.Ticker, rrRatio, minRiskRewardRatio, gainDist, lossDist);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // ── Entry slippage gate — reject if live price drifted too far ──
+                    // If the stock moved >1.5% from planned entry, the setup's math is stale.
+                    if (livePrice is not null && c.EntryPrice is > 0)
+                    {
+                        var slippagePct = Math.Abs(livePrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
+                        if (slippagePct > maxEntrySlippagePct)
+                        {
+                            _logger.LogInformation(
+                                "[portfolio] SLIPPAGE GATE: Skipping {Ticker} — live ${Live:F2} is {Slip:F1}% from entry ${Entry:F2} (max {Max:F1}%)",
+                                c.Ticker, livePrice, slippagePct, c.EntryPrice.Value, maxEntrySlippagePct);
+                            continue;
+                        }
+                    }
+
+                    // ── Broker quality tier gate — don't send weak trades to real money ──
+                    // Data: 100% of broker stop-loss losers were "medium" quality.
+                    // brokerMinQuality: 0=any, 1=medium+ (filter weak), 2=strong+ (filter medium too)
+                    var isBrokerMode = challenge.TradingMode is TradingMode.broker_paper or TradingMode.live;
+                    if (isBrokerMode)
+                    {
+                        var tierRank = c.QualityTier switch
+                        {
+                            QualityTier.very_weak => 0,
+                            QualityTier.weak => 0,
+                            QualityTier.medium => 1,
+                            QualityTier.strong_paper => 2,
+                            QualityTier.production_candidate => 2,
+                            _ => 1
+                        };
+                        if (tierRank < brokerMinQuality)
+                        {
+                            _logger.LogInformation(
+                                "[portfolio] QUALITY GATE: Skipping {Ticker} for broker — quality '{Tier}' (rank {Rank}) below min {Min} (conf={Conf})",
+                                c.Ticker, c.QualityTier, tierRank, brokerMinQuality, c.ConfidenceScore);
+                            continue;
+                        }
                     }
 
                     // ── For options: use real option premium from paper option candidate ──
