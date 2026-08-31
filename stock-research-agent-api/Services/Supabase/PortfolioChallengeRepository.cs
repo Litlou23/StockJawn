@@ -167,6 +167,8 @@ public class PortfolioChallengeRepository
         };
         if (p.BrokerEntryOrderId is not null)
             data["broker_entry_order_id"] = p.BrokerEntryOrderId;
+        if (p.OptionSymbol is not null)
+            data["option_symbol"] = p.OptionSymbol;
 
         var rows = await _db.InsertAsync("portfolio_positions", new[] { data });
 
@@ -546,6 +548,7 @@ public class PortfolioChallengeRepository
         BrokerEntryOrderId = r["broker_entry_order_id"]?.ToString(),
         BrokerExitOrderId = r["broker_exit_order_id"]?.ToString(),
         BrokerStopOrderId = r["broker_stop_order_id"]?.ToString(),
+        OptionSymbol = r["option_symbol"]?.ToString(),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
         UpdatedAt = GetDateTimeOffset(r, "updated_at"),
     };

@@ -88,6 +88,8 @@ public record PortfolioPosition
     public string? BrokerExitOrderId { get; init; }
     /// <summary>Broker order ID for the server-side stop-loss order on Alpaca. Tracked so we can cancel/replace when trailing stop moves.</summary>
     public string? BrokerStopOrderId { get; init; }
+    /// <summary>OCC option symbol (e.g. "AAPL261016C00230000") for option positions. Null for stocks.</summary>
+    public string? OptionSymbol { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
@@ -138,6 +140,8 @@ public record OpenPositionRequest
     /// when null (paper-only mode).
     /// </summary>
     public double? CurrentMarketPrice { get; init; }
+    /// <summary>OCC option symbol for option positions (e.g. "AAPL261016C00230000"). Stored on the position for live exit pricing.</summary>
+    public string? OptionSymbol { get; init; }
 }
 
 public record ClosePositionRequest

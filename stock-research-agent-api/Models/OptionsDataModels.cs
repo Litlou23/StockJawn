@@ -363,6 +363,60 @@ public record StockQuote
 }
 
 // ---------------------------------------------------------------------------
+// MarketData.app Option Quote — parallel arrays (single element for single symbol)
+// GET /v1/options/quotes/{optionSymbol}/
+// ---------------------------------------------------------------------------
+
+public class MarketDataOptionQuoteResponse
+{
+    [JsonPropertyName("s")]
+    public string Status { get; set; } = "";
+
+    [JsonPropertyName("optionSymbol")]
+    public string[] OptionSymbol { get; set; } = [];
+
+    [JsonPropertyName("ask")]
+    public double[] Ask { get; set; } = [];
+
+    [JsonPropertyName("bid")]
+    public double[] Bid { get; set; } = [];
+
+    [JsonPropertyName("mid")]
+    public double[] Mid { get; set; } = [];
+
+    [JsonPropertyName("last")]
+    public double[] Last { get; set; } = [];
+
+    [JsonPropertyName("iv")]
+    public double[] Iv { get; set; } = [];
+
+    [JsonPropertyName("delta")]
+    public double[] Delta { get; set; } = [];
+
+    [JsonPropertyName("underlyingPrice")]
+    public double[] UnderlyingPrice { get; set; } = [];
+
+    [JsonPropertyName("updated")]
+    public long[] Updated { get; set; } = [];
+}
+
+public record OptionQuote
+{
+    public string OptionSymbol { get; init; } = "";
+    public double Ask { get; init; }
+    public double Bid { get; init; }
+    public double Mid { get; init; }
+    public double Last { get; init; }
+    public double Iv { get; init; }
+    public double Delta { get; init; }
+    public double UnderlyingPrice { get; init; }
+    public DateTimeOffset Updated { get; init; }
+
+    /// <summary>Best available price: mid if both bid/ask exist, otherwise last.</summary>
+    public double Price => Mid > 0 ? Mid : Last;
+}
+
+// ---------------------------------------------------------------------------
 // MarketData.app Stock Candles — parallel arrays
 // ---------------------------------------------------------------------------
 

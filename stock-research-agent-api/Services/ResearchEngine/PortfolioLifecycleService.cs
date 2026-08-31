@@ -7,6 +7,7 @@ using StockResearchAgent.Api.Services.TradeDecision;
 using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.ResearchSignals;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
+using StockResearchAgent.Api.Services.OptionsData;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
 
@@ -33,6 +34,7 @@ public class PortfolioLifecycleService
     private readonly FinnhubProvider _finnhub;
     private readonly IBrokerAdapter _broker;
     private readonly ResearchSignalService _signalService;
+    private readonly MarketDataOptionsProvider _optionsQuoteProvider;
     private readonly ILogger<PortfolioLifecycleService> _logger;
 
     public PortfolioLifecycleService(
@@ -48,6 +50,7 @@ public class PortfolioLifecycleService
         FinnhubProvider finnhub,
         IBrokerAdapter broker,
         ResearchSignalService signalService,
+        MarketDataOptionsProvider optionsQuoteProvider,
         ILogger<PortfolioLifecycleService> logger)
     {
         _portfolio = portfolio;
@@ -62,6 +65,7 @@ public class PortfolioLifecycleService
         _finnhub = finnhub;
         _broker = broker;
         _signalService = signalService;
+        _optionsQuoteProvider = optionsQuoteProvider;
         _logger = logger;
     }
 
@@ -1057,7 +1061,8 @@ public class PortfolioLifecycleService
                         avgLossPercent: tradeStats.IsReal ? tradeStats.AverageLossPercent : null,
                         statsSampleSize: tradeStats.SampleSize,
                         currentMarketPrice: livePrice,
-                        positionScaleOverride: aiPositionScale);
+                        positionScaleOverride: aiPositionScale,
+                        optionSymbol: optionSymbol);
 
                     if (pos is not null)
                     {
@@ -1204,14 +1209,24 @@ public class PortfolioLifecycleService
                         continue;
                     }
 
-                    // ── Options: stock quote ≠ option price. Close at entry (flat)
-                    // until we have a real option pricing path.
-                    var exitPrice = pos.AssetType == PositionAssetType.option
-                        ? pos.EntryPrice
-                        : quote.Price;
-                    var exitReason = pos.AssetType == PositionAssetType.option
-                        ? $"EOD auto-close. {c.Ticker} option position closed flat (no option quote available)."
-                        : $"EOD auto-close. {c.Ticker} current price ${quote.Price:F2}.";
+                    // ── Options: fetch real option quote when possible ──
+                    double exitPrice;
+                    string exitReason;
+                    if (pos.AssetType == PositionAssetType.option)
+                    {
+                        var optQuote = !string.IsNullOrEmpty(pos.OptionSymbol)
+                            ? await _optionsQuoteProvider.GetOptionQuoteAsync(pos.OptionSymbol)
+                            : null;
+                        exitPrice = optQuote?.Price ?? pos.EntryPrice;
+                        exitReason = optQuote is not null
+                            ? $"EOD auto-close. {c.Ticker} option {pos.OptionSymbol} at ${exitPrice:F2} (mid=${optQuote.Mid:F2}, bid=${optQuote.Bid:F2}, ask=${optQuote.Ask:F2})."
+                            : $"EOD auto-close. {c.Ticker} option closed flat (no option quote — symbol={pos.OptionSymbol ?? "missing"}).";
+                    }
+                    else
+                    {
+                        exitPrice = quote.Price;
+                        exitReason = $"EOD auto-close. {c.Ticker} current price ${quote.Price:F2}.";
+                    }
 
                     var closed = await _portfolio.ClosePositionAsync(new ClosePositionRequest
                     {
@@ -1297,14 +1312,24 @@ public class PortfolioLifecycleService
                         continue;
                     }
 
-                    // ── Options: stock quote ≠ option price. Close at entry (flat)
-                    // until we have a real option pricing path.
-                    var exitPrice = pos.AssetType == PositionAssetType.option
-                        ? pos.EntryPrice
-                        : quote.Price;
-                    var exitReason = pos.AssetType == PositionAssetType.option
-                        ? $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Option closed flat (no option quote)."
-                        : $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Auto-closed at ${quote.Price:F2}.";
+                    // ── Options: fetch real option quote when possible ──
+                    double exitPrice;
+                    string exitReason;
+                    if (pos.AssetType == PositionAssetType.option)
+                    {
+                        var optQuote = !string.IsNullOrEmpty(pos.OptionSymbol)
+                            ? await _optionsQuoteProvider.GetOptionQuoteAsync(pos.OptionSymbol)
+                            : null;
+                        exitPrice = optQuote?.Price ?? pos.EntryPrice;
+                        exitReason = optQuote is not null
+                            ? $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Option {pos.OptionSymbol} at ${exitPrice:F2}."
+                            : $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Option closed flat (no quote — symbol={pos.OptionSymbol ?? "missing"}).";
+                    }
+                    else
+                    {
+                        exitPrice = quote.Price;
+                        exitReason = $"Holding window elapsed ({ageHours:F0}h > {maxHours}h). Auto-closed at ${quote.Price:F2}.";
+                    }
 
                     var result = await _portfolio.ClosePositionAsync(new ClosePositionRequest
                     {
@@ -1368,16 +1393,25 @@ public class PortfolioLifecycleService
 
             foreach (var pos in openPositions)
             {
-                // Skip options — no reliable quote
-                if (pos.AssetType == PositionAssetType.option) continue;
-
                 var ageHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
                 if (ageHours < minAgeHours) continue; // too young — not yet overnight
 
-                var quote = await _marketData.GetQuoteWithFallbackAsync(pos.Ticker);
-                if (quote is null || quote.Price <= 0) continue;
+                double currentPrice;
+                if (pos.AssetType == PositionAssetType.option)
+                {
+                    if (string.IsNullOrEmpty(pos.OptionSymbol)) continue;
+                    var optQuote = await _optionsQuoteProvider.GetOptionQuoteAsync(pos.OptionSymbol);
+                    if (optQuote is null || optQuote.Price <= 0) continue;
+                    currentPrice = optQuote.Price;
+                }
+                else
+                {
+                    var quote = await _marketData.GetQuoteWithFallbackAsync(pos.Ticker);
+                    if (quote is null || quote.Price <= 0) continue;
+                    currentPrice = quote.Price;
+                }
 
-                var pnlPct = (quote.Price - pos.EntryPrice) / pos.EntryPrice;
+                var pnlPct = (currentPrice - pos.EntryPrice) / pos.EntryPrice;
 
                 // Only close if losing (pnlPct < -maxLossPct threshold)
                 if (pnlPct >= -maxLossPct) continue; // green or within tolerance — keep
@@ -1387,7 +1421,7 @@ public class PortfolioLifecycleService
                     var result = await _portfolio.ClosePositionAsync(new ClosePositionRequest
                     {
                         PositionId = pos.Id,
-                        ExitPrice = quote.Price,
+                        ExitPrice = currentPrice,
                         ReasonExited = $"Next-day loser cut. {pos.Ticker} down {pnlPct:P1} after {ageHours:F0}h. Freeing capital.",
                     });
 
@@ -1396,7 +1430,7 @@ public class PortfolioLifecycleService
                         closed++;
                         _logger.LogInformation(
                             "[portfolio] LOSER CUT: {Ticker} closed at ${Price:F2} ({Pnl:P1}) after {Age:F0}h for challenge {Challenge}",
-                            pos.Ticker, quote.Price, pnlPct, ageHours, challenge.Name);
+                            pos.Ticker, currentPrice, pnlPct, ageHours, challenge.Name);
                     }
                 }
                 catch (Exception ex)
@@ -1643,15 +1677,22 @@ public class PortfolioLifecycleService
             {
                 result.PositionsChecked++;
 
-                // ── Skip options: we fetch STOCK quotes, not option quotes.
-                // Comparing a $55 stock price against a $1.05 option premium
-                // produces absurd P&L (5,000%+) and triggers instant take-profit.
-                // Options need their own pricing path (not yet implemented).
+                // ── Options: use real option quote, not the underlying stock price ──
+                double currentPrice;
                 if (pos.AssetType == PositionAssetType.option)
-                    continue;
-
-                var currentPrice = quoteMap.GetValueOrDefault(pos.Ticker, 0);
-                if (currentPrice <= 0) continue; // no quote available
+                {
+                    if (string.IsNullOrEmpty(pos.OptionSymbol))
+                        continue; // no option symbol stored — can't price
+                    var optQuote = await _optionsQuoteProvider.GetOptionQuoteAsync(pos.OptionSymbol);
+                    if (optQuote is null || optQuote.Price <= 0)
+                        continue; // no option quote available
+                    currentPrice = optQuote.Price;
+                }
+                else
+                {
+                    currentPrice = quoteMap.GetValueOrDefault(pos.Ticker, 0);
+                    if (currentPrice <= 0) continue; // no quote available
+                }
 
                 // Determine timeframe tier
                 var timeframe = StockTimeframe.one_day; // default

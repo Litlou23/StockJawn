@@ -24,7 +24,7 @@ public class PaperOptionsService
     private const double DefaultMaxContractCost = 500.0; // used when no portfolio budget is supplied; $200 was too low for quality contracts
 
     // Portfolio IDs for the Claude vs System A/B competition
-    private const string ClaudeOptionsPortfolioId = "41cc5a32-2e6e-4c92-b255-b884de7e13cb";  // "Broker Paper Trading" — Claude's picks, will execute via Alpaca
+    private const string ClaudeOptionsPortfolioId = "bb223b34-678b-464f-8b2b-701b3fbc17c8";  // "Claude Options" portfolio — options_only, paper mode
     private const string SystemOptionsPortfolioId = "e2c8238b-0475-4547-8249-edd5995b2411";  // "System Options" portfolio
 
     private readonly MarketDataOptionsProvider _provider;

@@ -386,6 +386,44 @@ public class ConfidenceEngine : IConfidenceEngine
             }
         }
 
+        // ── Low-ATR confidence penalty ──────────────────────────────
+        // Data proves: low-ATR stocks (PEP 1.8%, MA 2.0%, V 2.1%, COST 2.1%)
+        // get inflated confidence (50-66) but only 0-40% accuracy. Signals
+        // "agree" because the stock barely moves — no volatility noise to
+        // create disagreement. But agreement on a flat stock is meaningless.
+        // High-ATR stocks (COIN 5.6%, ACN 4.9%) at similar confidence hit 100%.
+        // Penalty scales linearly: full penalty at floor, no penalty at threshold.
+        {
+            double? liveAtrPct = null;
+            if (context.Indicators.Atr14 is double atrVal
+                && context.Snapshot.Quote is not null
+                && context.Snapshot.Quote.Price > 0)
+            {
+                liveAtrPct = atrVal / context.Snapshot.Quote.Price * 100.0;
+            }
+            var atrPct = liveAtrPct ?? context.ResearchUniverse.HistoricalAtrPercent;
+
+            if (atrPct is not null and > 0)
+            {
+                var atrThreshold = weights.GetValueOrDefault("atr_low_confidence_threshold", 3.0);
+                var atrFloor = weights.GetValueOrDefault("atr_low_confidence_floor", 1.5);
+                var atrMaxPenalty = Math.Clamp(
+                    weights.GetValueOrDefault("atr_low_confidence_penalty", 0.75), 0.5, 1.0);
+
+                if (atrPct < atrThreshold)
+                {
+                    // Linear interpolation: at floor → atrMaxPenalty, at threshold → 1.0
+                    var range = atrThreshold - atrFloor;
+                    var position = Math.Max(atrPct.Value - atrFloor, 0) / (range > 0 ? range : 1.0);
+                    var penalty = atrMaxPenalty + (1.0 - atrMaxPenalty) * position;
+                    penalty = Math.Clamp(penalty, atrMaxPenalty, 1.0);
+
+                    rawConfidence *= penalty;
+                    debugSignals.Add($"Confidence: low-ATR penalty {penalty:F3} — ATR%={atrPct:F1}% below threshold {atrThreshold}%. Clean signals on flat stock ≠ real conviction.");
+                }
+            }
+        }
+
         string? capReason = null;
         if (regimePenalty < 0.99)
         {

@@ -1,3 +1,11 @@
+## Lou's Terminology (use these meanings when he asks questions)
+
+- **Prediction** = what the profiles generate (prediction_candidates table). NOT paper stock candidates, NOT portfolio positions. When Lou asks "how did predictions do today?" he wants prediction_candidates + prediction_outcomes data grouped by profile.
+- **Profile** = a prediction profile (Balanced Aggressor, Catalyst Momentum, Risk-Adjusted, Data-Driven Scalper). When Lou asks "how did the profiles do?" he wants each profile's prediction accuracy/performance, NOT portfolio trade results.
+- **Portfolio** = the money accounts (Broker Paper Trading, Stock Growth, Claude Options, System Options). Only talk about portfolios when Lou specifically asks about them (e.g. "how's the broker doing?").
+
+Don't mix these up. When Lou asks about profiles, answer with prediction data. When Lou asks about portfolios, answer with trade/balance data. They are separate concepts.
+
 ## Project Notes
 
 - **No mock data**: This is a live system. Do not use mock fallbacks. If a data source fails, return empty results with honest status — never inject fake data.

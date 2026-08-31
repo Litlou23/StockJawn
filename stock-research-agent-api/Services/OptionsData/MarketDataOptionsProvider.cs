@@ -182,6 +182,57 @@ public class MarketDataOptionsProvider
         arr is not null && idx < arr.Length ? arr[idx] ?? fallback : fallback;
 
     // -----------------------------------------------------------------------
+    // Option Quote — GET /v1/options/quotes/{optionSymbol}/
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Fetch a live quote for a single option contract by its OCC symbol
+    /// (e.g. "AAPL261016C00230000"). Returns mid/bid/ask/last plus greeks.
+    /// </summary>
+    public async Task<OptionQuote?> GetOptionQuoteAsync(string optionSymbol)
+    {
+        if (!_configured) return null;
+
+        optionSymbol = optionSymbol.Trim().ToUpperInvariant();
+        var url = $"https://api.marketdata.app/v1/options/quotes/{optionSymbol}/";
+
+        try
+        {
+            _logger.LogInformation("[marketdata] Fetching option quote for {Symbol}", optionSymbol);
+            var resp = await _http.GetAsync(url);
+            var body = await resp.Content.ReadAsStringAsync();
+
+            if ((int)resp.StatusCode != 200 && (int)resp.StatusCode != 203)
+            {
+                _logger.LogWarning("[marketdata] Option quote for {Symbol} failed: {Status}", optionSymbol, resp.StatusCode);
+                return null;
+            }
+
+            var api = JsonSerializer.Deserialize<MarketDataOptionQuoteResponse>(body);
+            if (api is null || api.Status != "ok" || (api.OptionSymbol?.Length ?? 0) == 0)
+                return null;
+
+            return new OptionQuote
+            {
+                OptionSymbol = SafeGet(api.OptionSymbol, 0, optionSymbol),
+                Ask = SafeGet(api.Ask, 0, 0.0),
+                Bid = SafeGet(api.Bid, 0, 0.0),
+                Mid = SafeGet(api.Mid, 0, 0.0),
+                Last = SafeGet(api.Last, 0, 0.0),
+                Iv = SafeGet(api.Iv, 0, 0.0),
+                Delta = SafeGet(api.Delta, 0, 0.0),
+                UnderlyingPrice = SafeGet(api.UnderlyingPrice, 0, 0.0),
+                Updated = DateTimeOffset.FromUnixTimeSeconds(SafeGet(api.Updated, 0, 0L)),
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[marketdata] Error fetching option quote for {Symbol}", optionSymbol);
+            return null;
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Stock Quote — GET /v1/stocks/quotes/{symbol}/
     // -----------------------------------------------------------------------
 

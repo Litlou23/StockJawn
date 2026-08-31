@@ -237,7 +237,8 @@ public class PortfolioBalanceEngine
         double? avgLossPercent = null,
         int statsSampleSize = 0,
         double? currentMarketPrice = null,
-        double positionScaleOverride = 1.0)
+        double positionScaleOverride = 1.0,
+        string? optionSymbol = null)
     {
         var challenge = await _repo.GetChallengeAsync(portfolioId);
         if (challenge is null || challenge.Status != ChallengeStatus.active) return null;
@@ -277,6 +278,7 @@ public class PortfolioBalanceEngine
             Quantity = quantity,
             ReasonEntered = reason,
             CurrentMarketPrice = currentMarketPrice,
+            OptionSymbol = optionSymbol,
         });
     }
 
@@ -387,6 +389,7 @@ public class PortfolioBalanceEngine
             DollarsInvested = Math.Round(dollarsInvested, 2),
             ReasonEntered = request.ReasonEntered,
             BrokerEntryOrderId = brokerEntryOrderId,
+            OptionSymbol = request.OptionSymbol,
         };
 
         var saved = await _repo.OpenPositionAsync(position);
