@@ -588,6 +588,26 @@ public class PortfolioLifecycleService
                     }
                 }
 
+                // ── Monday/Tuesday confidence boost — early-week entries are historically terrible ──
+                // Data: Mon 16.7% WR (-$31.94), Tue 16.7% WR (-$23.81) = 73% of all losses.
+                // Require higher confidence on these days to filter out marginal setups.
+                // DB-configurable via weak_day_confidence_boost (default 10 = require conf+10).
+                var nowEtDay = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow,
+                    TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).DayOfWeek;
+                if (nowEtDay is DayOfWeek.Monday or DayOfWeek.Tuesday
+                    && !congressBackedTickers.Contains(c.Ticker))
+                {
+                    var weakDayBoost = (int)weights.GetValueOrDefault("weak_day_confidence_boost", 10);
+                    var weakDayMinConf = minConfidence + weakDayBoost;
+                    if (c.ConfidenceScore < weakDayMinConf)
+                    {
+                        _logger.LogInformation(
+                            "[portfolio] WEAK DAY GATE: Skipping {Ticker} on {Day} — conf {Conf} < Mon/Tue minimum {Min} (base {Base} + boost {Boost})",
+                            c.Ticker, nowEtDay, c.ConfidenceScore, weakDayMinConf, minConfidence, weakDayBoost);
+                        continue;
+                    }
+                }
+
                 // ── Regime gate — don't trade against the market trend ──
                 // Bullish picks in a bearish market get slaughtered (data shows 4-23% accuracy).
                 // Bearish picks in a bullish market face a rising tide.
