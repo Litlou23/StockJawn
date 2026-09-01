@@ -22,6 +22,7 @@ public class DailyResearchRunService
     private readonly WatchlistRepository _watchlistRepo;
     private readonly PredictionProfileRepository _profileRepo;
     private readonly IResearchUniverseService _universe;
+    private readonly TradeSetupEngine _setupEngine;
     private readonly ILogger<DailyResearchRunService> _logger;
 
     public DailyResearchRunService(
@@ -34,6 +35,7 @@ public class DailyResearchRunService
         WatchlistRepository watchlistRepo,
         PredictionProfileRepository profileRepo,
         IResearchUniverseService universe,
+        TradeSetupEngine setupEngine,
         ILogger<DailyResearchRunService> logger)
     {
         _predGen = predGen;
@@ -45,6 +47,7 @@ public class DailyResearchRunService
         _watchlistRepo = watchlistRepo;
         _profileRepo = profileRepo;
         _universe = universe;
+        _setupEngine = setupEngine;
         _logger = logger;
     }
 
@@ -224,6 +227,28 @@ public class DailyResearchRunService
                 totalSupersessions.AddRange(pendingSupersessions);
             }
 
+            // 4. Scan for EMA Pullback setups (pattern-based, no profile)
+            await _repo.LogProgressAsync(run.Id, "ema_pullback_scan", "Scanning for EMA Pullback setups...");
+            var emaPullbackCount = 0;
+            foreach (var snapshot in snapshots)
+            {
+                try
+                {
+                    var setup = await _setupEngine.ScanForEmaPullbackAsync(snapshot.Ticker, snapshot, run.Id);
+                    if (setup is not null)
+                    {
+                        allPredictions.Add(setup);
+                        emaPullbackCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[research-engine] EMA pullback scan failed for {Ticker}", snapshot.Ticker);
+                }
+            }
+            _logger.LogInformation("[research-engine] EMA Pullback scan: {Count} setups detected", emaPullbackCount);
+            await _repo.LogProgressAsync(run.Id, "ema_pullback_done", $"EMA Pullback scan: {emaPullbackCount} setups detected");
+
             // Save all predictions
             await _repo.LogProgressAsync(run.Id, "saving_predictions",
                 $"Saving {allPredictions.Count} predictions to database...");
@@ -275,6 +300,8 @@ public class DailyResearchRunService
                 downgrade_reasons = p.DowngradeReasons.ToArray(),
                 status = p.Status,
                 profile_id = p.ProfileId,
+                setup_type = p.SetupType,
+                setup_details = p.SetupDetailsJson,
             }).ToList();
             var (persisted, ids) = await _repo.SavePredictionsAsync(predRows);
 

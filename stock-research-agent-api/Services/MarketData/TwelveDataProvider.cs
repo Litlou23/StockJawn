@@ -410,6 +410,34 @@ public class TwelveDataProvider
         return (ema12, ema26, ema50);
     }
 
+    /// <summary>
+    /// Fetches EMA 21 for EMA Pullback setup detection.
+    /// Uses the same /ema endpoint with time_period=21.
+    /// </summary>
+    public async Task<double?> GetEma21Async(string ticker)
+    {
+        if (!_configured) return null;
+        if (!await ThrottleAsync()) return null;
+        _logger.LogDebug("[twelve-data] calling /ema(21) for {Ticker}", ticker);
+
+        var url = $"{BaseUrl}/ema?symbol={ticker}&interval=1day&time_period=21&outputsize=1&apikey={_apiKey}";
+        try
+        {
+            var resp = await GetStringWithRetryAsync(url, "/ema(21)", ticker);
+            var json = JsonNode.Parse(resp);
+            if (json is null || json["status"]?.ToString() == "error") return null;
+            var values = json["values"]?.AsArray();
+            if (values is null || values.Count == 0) return null;
+            var emaStr = values[0]?["ema"]?.ToString();
+            return double.TryParse(emaStr, out var ema) ? Math.Round(ema, 4) : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[twelve-data] EMA(21) fetch failed for {Ticker}", ticker);
+            return null;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Fundamentals (company profile + statistics)
     // -----------------------------------------------------------------------

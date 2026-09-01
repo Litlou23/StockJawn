@@ -1,5 +1,6 @@
 using System.Text.Json;
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.ResearchEngine;
@@ -42,11 +43,13 @@ public class TradeSetupEngine
     private const double DegradationThreshold = 0.15;
 
     private readonly ResearchRepository _repo;
+    private readonly MarketDataService _marketData;
     private readonly ILogger<TradeSetupEngine> _logger;
 
-    public TradeSetupEngine(ResearchRepository repo, ILogger<TradeSetupEngine> logger)
+    public TradeSetupEngine(ResearchRepository repo, MarketDataService marketData, ILogger<TradeSetupEngine> logger)
     {
         _repo = repo;
+        _marketData = marketData;
         _logger = logger;
     }
 
@@ -859,5 +862,197 @@ public class TradeSetupEngine
                 LastUpdatedAt = s.LastUpdatedAt,
             })
             .ToList();
+    }
+
+    // -----------------------------------------------------------------------
+    // EMA Pullback Setup Scanner
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Scans a ticker for a valid EMA Pullback setup using mechanical rules:
+    ///   1. Uptrend: price > EMA21, EMA21 > EMA50
+    ///   2. Pullback: recent bar(s) touched or dipped near EMA21
+    ///   3. Bounce confirmation: most recent bar closed above EMA21 with a green candle
+    ///   4. R:R >= 2.0 (stop below pullback low, target at swing high)
+    ///
+    /// Returns a PredictionCandidate if a valid setup is found, null otherwise.
+    /// The confidence score reflects setup quality (trend strength, pullback depth, volume).
+    /// </summary>
+    public async Task<PredictionCandidate?> ScanForEmaPullbackAsync(
+        string ticker, MarketSnapshot snapshot, string runId)
+    {
+        // Need at least a quote and recent bars
+        if (snapshot.Quote is null || snapshot.RecentBars.Count < 10)
+            return null;
+
+        var price = snapshot.Quote.Price;
+        if (price <= 0) return null;
+
+        // Fetch EMA 21 and EMA 50
+        var ema21 = await _marketData.GetEma21Async(ticker);
+        var emaData = await _marketData.GetEmaAsync(ticker);
+        var ema50 = emaData.Ema50;
+
+        if (ema21 is null || ema50 is null || ema21.Value <= 0 || ema50.Value <= 0)
+            return null;
+
+        // ── CHECK 1: Uptrend — EMA21 > EMA50 ──
+        if (ema21.Value <= ema50.Value)
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — not in uptrend (EMA21 {Ema21:F2} <= EMA50 {Ema50:F2})",
+                ticker, ema21.Value, ema50.Value);
+            return null;
+        }
+
+        // ── CHECK 2: Price near or above EMA21 ──
+        // After bounce, price should be at or slightly above EMA21
+        var priceToEma21Pct = (price - ema21.Value) / ema21.Value * 100;
+        if (priceToEma21Pct > 3.0) // more than 3% above = already extended, not a pullback
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — price too far above EMA21 ({Pct:F2}%)",
+                ticker, priceToEma21Pct);
+            return null;
+        }
+        if (priceToEma21Pct < -2.0) // more than 2% below = broken trend, not a pullback
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — price too far below EMA21 ({Pct:F2}%)",
+                ticker, priceToEma21Pct);
+            return null;
+        }
+
+        // ── CHECK 3: Pullback evidence — at least one recent bar dipped near EMA21 ──
+        // Look at last 5 bars for a bar whose low was within 1% of EMA21 or below it
+        var recentBars = snapshot.RecentBars
+            .OrderByDescending(b => b.Date)
+            .Take(5)
+            .ToList();
+
+        var pullbackBar = recentBars.FirstOrDefault(b =>
+        {
+            var lowToEma = (b.Low - ema21.Value) / ema21.Value * 100;
+            return lowToEma <= 0.5; // low was within 0.5% above or below EMA21
+        });
+
+        if (pullbackBar is null)
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — no recent pullback to EMA21", ticker);
+            return null;
+        }
+
+        // ── CHECK 4: Bounce confirmation — most recent bar is green and closed above EMA21 ──
+        var latestBar = recentBars[0];
+        if (latestBar.Close <= latestBar.Open) // red candle = no confirmation
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — latest bar is red (no bounce confirmation)", ticker);
+            return null;
+        }
+        if (latestBar.Close < ema21.Value) // closed below EMA21
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — latest close {Close:F2} below EMA21 {Ema21:F2}",
+                ticker, latestBar.Close, ema21.Value);
+            return null;
+        }
+
+        // ── COMPUTE TRADE PARAMETERS ──
+        // Stop: below pullback low (lowest low of bars that touched EMA21)
+        var pullbackLow = recentBars
+            .Where(b => (b.Low - ema21.Value) / ema21.Value * 100 <= 1.0)
+            .Min(b => b.Low);
+        var stopPrice = Math.Round(pullbackLow * 0.995, 2); // 0.5% cushion below pullback low
+
+        // Target: highest high in recent bars (swing high)
+        var allBars = snapshot.RecentBars.OrderByDescending(b => b.Date).Take(20).ToList();
+        var swingHigh = allBars.Max(b => b.High);
+        var targetPrice = Math.Round(swingHigh, 2);
+
+        // R:R check
+        var risk = price - stopPrice;
+        var reward = targetPrice - price;
+        if (risk <= 0 || reward <= 0)
+            return null;
+
+        var rrRatio = Math.Round(reward / risk, 2);
+        if (rrRatio < 2.0)
+        {
+            _logger.LogDebug("[ema-pullback] {Ticker}: SKIP — R:R {RR:F2} < 2.0 (target {Target:F2}, stop {Stop:F2})",
+                ticker, rrRatio, targetPrice, stopPrice);
+            return null;
+        }
+
+        // ── GRADE SETUP QUALITY (0–100) ──
+        var qualityScore = 50; // base
+
+        // Trend strength: wider EMA21-EMA50 gap = stronger trend
+        var emaSeparationPct = (ema21.Value - ema50.Value) / ema50.Value * 100;
+        if (emaSeparationPct > 5) qualityScore += 15;
+        else if (emaSeparationPct > 2) qualityScore += 8;
+
+        // Pullback depth: shallow pullback (barely touched EMA21) = better
+        var pullbackDepthPct = Math.Abs((pullbackBar.Low - ema21.Value) / ema21.Value * 100);
+        if (pullbackDepthPct < 0.5) qualityScore += 10; // barely touched
+        else if (pullbackDepthPct < 1.5) qualityScore += 5;
+        else qualityScore -= 5; // deep pullback = weaker
+
+        // R:R bonus
+        if (rrRatio >= 3.0) qualityScore += 10;
+        else if (rrRatio >= 2.5) qualityScore += 5;
+
+        // Volume: declining on pullback, rising on bounce = ideal
+        if (recentBars.Count >= 3)
+        {
+            var bounceVolume = recentBars[0].Volume;
+            var pullbackVolume = recentBars.Skip(1).Take(2).Average(b => b.Volume);
+            if (bounceVolume > pullbackVolume * 1.2)
+                qualityScore += 10; // volume confirmation
+        }
+
+        // Cap quality score
+        qualityScore = Math.Clamp(qualityScore, 20, 90);
+
+        // ── BUILD SETUP DETAILS ──
+        var setupDetails = new
+        {
+            ema21 = ema21.Value,
+            ema50 = ema50.Value,
+            ema_separation_pct = Math.Round(emaSeparationPct, 2),
+            pullback_low = pullbackLow,
+            pullback_depth_pct = Math.Round(pullbackDepthPct, 2),
+            swing_high = swingHigh,
+            rr_ratio = rrRatio,
+            price_to_ema21_pct = Math.Round(priceToEma21Pct, 2),
+            bounce_candle_date = latestBar.Date,
+            bounce_volume = latestBar.Volume,
+        };
+
+        _logger.LogInformation(
+            "[ema-pullback] {Ticker}: SETUP DETECTED — quality={Quality}, R:R={RR:F1}, entry={Price:F2}, stop={Stop:F2}, target={Target:F2}, EMA21={Ema21:F2}, EMA50={Ema50:F2}",
+            ticker, qualityScore, rrRatio, price, stopPrice, targetPrice, ema21.Value, ema50.Value);
+
+        return new PredictionCandidate
+        {
+            Id = Guid.NewGuid().ToString(),
+            RunId = runId,
+            Ticker = ticker,
+            PredictionType = PredictionType.bullish,
+            AssetType = PredictionAssetType.stock,
+            TimeWindow = "swing", // no time prediction — hold until target or stop
+            ConfidenceScore = qualityScore,
+            ImportanceScore = qualityScore,
+            RiskScore = Math.Clamp(100 - qualityScore, 10, 80),
+            EntryReferencePrice = price,
+            TargetPrice = targetPrice,
+            StopPrice = stopPrice,
+            RiskRewardRatio = rrRatio,
+            PricePredictionMethod = "ema_pullback",
+            SetupType = "ema_pullback",
+            SetupDetailsJson = JsonSerializer.Serialize(setupDetails),
+            BullishCase = $"EMA Pullback setup: price pulled back to 21 EMA ({ema21.Value:F2}) in uptrend and bounced. Trend strength: EMA21 {emaSeparationPct:F1}% above EMA50.",
+            BearishCase = $"Invalidation if price closes below pullback low ({pullbackLow:F2}) or EMA21 breaks below EMA50.",
+            PredictionReason = $"Mechanical EMA Pullback: uptrend confirmed (EMA21 > EMA50), price pulled back to 21 EMA, green bounce candle. R:R {rrRatio:F1}:1.",
+            InvalidationRule = $"Close below {stopPrice:F2} (pullback low) invalidates the setup.",
+            WinningDirection = "bullish",
+            Status = "open",
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
     }
 }

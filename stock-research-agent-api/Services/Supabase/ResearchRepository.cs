@@ -1242,6 +1242,8 @@ public class ResearchRepository
         SupersededBy = r["superseded_by"]?.ToString(),
         SupersessionReason = r["supersession_reason"]?.ToString(),
         ProfileId = r["profile_id"]?.ToString(),
+        SetupType = r["setup_type"]?.ToString() ?? "prediction",
+        SetupDetailsJson = r["setup_details"]?.ToJsonString(),
         PeakFavorablePrice = GetNullableDouble(r, "peak_favorable_price"),
         CreatedAt = GetDateTimeOffset(r, "created_at"),
     };

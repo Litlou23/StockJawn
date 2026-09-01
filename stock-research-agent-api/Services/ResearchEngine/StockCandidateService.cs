@@ -41,6 +41,7 @@ public class StockCandidateService
         [StockTimeframe.two_day] = 30,
         [StockTimeframe.three_day] = 48,   // 2-3 trading days
         [StockTimeframe.one_week] = 120,      // 5 trading days
+        [StockTimeframe.swing] = 120,          // setup-based: ~5 trading days min
         [StockTimeframe.one_month] = 504,      // 21 trading days
         [StockTimeframe.three_month] = 1512,   // 63 trading days
         [StockTimeframe.six_month] = 3024,     // 126 trading days
@@ -56,6 +57,7 @@ public class StockCandidateService
         [StockTimeframe.two_day] = 96,
         [StockTimeframe.three_day] = 120,  // 3-5 trading days max
         [StockTimeframe.one_week] = 240,
+        [StockTimeframe.swing] = 504,          // setup-based: up to ~21 trading days
         [StockTimeframe.one_month] = 1008,
         [StockTimeframe.three_month] = 3024,
         [StockTimeframe.six_month] = 6048,
@@ -252,6 +254,7 @@ public class StockCandidateService
             "3_month" => StockTimeframe.three_month,
             "6_month" => StockTimeframe.six_month,
             "1_year" => StockTimeframe.one_year,
+            "swing" => StockTimeframe.swing,
             _ => StockTimeframe.one_day,
         };
 

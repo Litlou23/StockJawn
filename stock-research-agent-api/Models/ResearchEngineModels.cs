@@ -395,10 +395,12 @@ public static class PredictionTimeWindows
     public const string ThreeMonth = "3_month";
     public const string SixMonth = "6_month";
     public const string OneYear = "1_year";
+    public const string Swing = "swing"; // Setup-based: no time prediction, hold until target or stop
 
     public static readonly HashSet<string> ShortTerm = [Intraday, OneDay, ThreeDay, OneWeek];
     public static readonly HashSet<string> LongTerm = [OneMonth, ThreeMonth, SixMonth, OneYear];
-    public static readonly HashSet<string> All = [.. ShortTerm, .. LongTerm];
+    public static readonly HashSet<string> SetupBased = [Swing];
+    public static readonly HashSet<string> All = [.. ShortTerm, .. LongTerm, .. SetupBased];
 }
 
 public static class PredictionCategoryHelper
@@ -492,6 +494,15 @@ public record PredictionCandidate
     public string? SupersededBy { get; init; }
     public string? SupersessionReason { get; init; }
     public string? ProfileId { get; init; }
+    /// <summary>
+    /// Strategy type: "prediction" (default), "ema_pullback", "breakout", "rsi_reversion".
+    /// Setup-based entries use mechanical pattern detection instead of direction prediction.
+    /// </summary>
+    public string SetupType { get; init; } = "prediction";
+    /// <summary>
+    /// Pattern-specific data as JSON: EMA values, pullback depth, R:R ratio, trend strength, etc.
+    /// </summary>
+    public string? SetupDetailsJson { get; init; }
     /// <summary>
     /// Tracks the most favorable price seen during intraday risk checks.
     /// Used for reversal detection — if the stock was up and starts dropping

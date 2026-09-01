@@ -409,6 +409,7 @@ public class OutcomeEvaluator
                 "1_day" => 24,   // full trading day close-to-close
                 "3_day" => 48,
                 "1_week" => 120,
+                "swing" => 120,      // setup-based: ~5 trading days min
                 "1_month" => 504,    // 21 days
                 "3_month" => 1512,   // 63 days
                 "6_month" => 3024,   // 126 days
@@ -1129,6 +1130,7 @@ public class OutcomeEvaluator
                 "1_day"    => 20,  // at least next trading session
                 "3_day"    => 20,  // at least overnight
                 "1_week"   => 44,  // at least 2 trading days
+                "swing"    => 44,  // setup-based: at least 2 trading days
                 "1_month"  => 120, // at least a week
                 _ => 20,           // default: overnight
             };

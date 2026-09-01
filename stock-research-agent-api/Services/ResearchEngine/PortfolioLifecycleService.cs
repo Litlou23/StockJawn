@@ -1489,6 +1489,7 @@ public class PortfolioLifecycleService
         StockTimeframe.two_day => RiskTier.Swing,
         StockTimeframe.three_day => RiskTier.Swing,
         StockTimeframe.one_week => RiskTier.Swing,
+        StockTimeframe.swing => RiskTier.Swing,
         _ => RiskTier.LongTerm, // one_month, three_month, six_month, one_year
     };
 

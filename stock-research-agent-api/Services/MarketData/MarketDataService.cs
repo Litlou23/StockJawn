@@ -107,6 +107,12 @@ public class MarketDataService
         return cached is not null ? (cached.Ema12, cached.Ema26, cached.Ema50) : (null, null, null);
     }
 
+    public async Task<double?> GetEma21Async(string ticker)
+    {
+        return await GetCachedValueAsync($"ema21:{ticker}",
+            () => _provider.GetEma21Async(ticker));
+    }
+
     // -----------------------------------------------------------------------
     // Fundamentals
     // -----------------------------------------------------------------------

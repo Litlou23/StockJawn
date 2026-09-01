@@ -2837,7 +2837,7 @@ public class LearningEngine
                 var tier = timeframe switch
                 {
                     StockTimeframe.one_day => "day",
-                    StockTimeframe.two_day or StockTimeframe.three_day or StockTimeframe.one_week => "swing",
+                    StockTimeframe.two_day or StockTimeframe.three_day or StockTimeframe.one_week or StockTimeframe.swing => "swing",
                     _ => "longterm",
                 };
 
