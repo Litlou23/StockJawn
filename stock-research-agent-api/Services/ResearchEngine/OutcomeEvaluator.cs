@@ -418,7 +418,8 @@ public class OutcomeEvaluator
             };
 
             var maxHours = PredictionTimeWindows.LongTerm.Contains(prediction.TimeWindow)
-                ? minHours * 2
+                    || PredictionTimeWindows.SetupBased.Contains(prediction.TimeWindow)
+                ? minHours * 4  // swing: 120 * 4 = 480h (~20 trading days); long-term: scaled similarly
                 : 240;
 
             if (ageHours < minHours)

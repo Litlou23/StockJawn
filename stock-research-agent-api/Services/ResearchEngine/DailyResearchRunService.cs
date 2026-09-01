@@ -249,6 +249,94 @@ public class DailyResearchRunService
             _logger.LogInformation("[research-engine] EMA Pullback scan: {Count} setups detected", emaPullbackCount);
             await _repo.LogProgressAsync(run.Id, "ema_pullback_done", $"EMA Pullback scan: {emaPullbackCount} setups detected");
 
+            // 5. Scan for VWAP Reclaim setups
+            await _repo.LogProgressAsync(run.Id, "vwap_reclaim_scan", "Scanning for VWAP Reclaim setups...");
+            var vwapReclaimCount = 0;
+            foreach (var snapshot in snapshots)
+            {
+                try
+                {
+                    var setup = await _setupEngine.ScanForVwapReclaimAsync(snapshot.Ticker, snapshot, run.Id);
+                    if (setup is not null)
+                    {
+                        allPredictions.Add(setup);
+                        vwapReclaimCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[research-engine] VWAP Reclaim scan failed for {Ticker}", snapshot.Ticker);
+                }
+            }
+            _logger.LogInformation("[research-engine] VWAP Reclaim scan: {Count} setups detected", vwapReclaimCount);
+            await _repo.LogProgressAsync(run.Id, "vwap_reclaim_done", $"VWAP Reclaim scan: {vwapReclaimCount} setups detected");
+
+            // 6. Scan for Bull Flag setups
+            await _repo.LogProgressAsync(run.Id, "bull_flag_scan", "Scanning for Bull Flag setups...");
+            var bullFlagCount = 0;
+            foreach (var snapshot in snapshots)
+            {
+                try
+                {
+                    var setup = await _setupEngine.ScanForBullFlagAsync(snapshot.Ticker, snapshot, run.Id);
+                    if (setup is not null)
+                    {
+                        allPredictions.Add(setup);
+                        bullFlagCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[research-engine] Bull Flag scan failed for {Ticker}", snapshot.Ticker);
+                }
+            }
+            _logger.LogInformation("[research-engine] Bull Flag scan: {Count} setups detected", bullFlagCount);
+            await _repo.LogProgressAsync(run.Id, "bull_flag_done", $"Bull Flag scan: {bullFlagCount} setups detected");
+
+            // 7. Scan for Range Contraction Breakout setups
+            await _repo.LogProgressAsync(run.Id, "range_breakout_scan", "Scanning for Range Breakout setups...");
+            var rangeBreakoutCount = 0;
+            foreach (var snapshot in snapshots)
+            {
+                try
+                {
+                    var setup = await _setupEngine.ScanForRangeBreakoutAsync(snapshot.Ticker, snapshot, run.Id);
+                    if (setup is not null)
+                    {
+                        allPredictions.Add(setup);
+                        rangeBreakoutCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[research-engine] Range Breakout scan failed for {Ticker}", snapshot.Ticker);
+                }
+            }
+            _logger.LogInformation("[research-engine] Range Breakout scan: {Count} setups detected", rangeBreakoutCount);
+            await _repo.LogProgressAsync(run.Id, "range_breakout_done", $"Range Breakout scan: {rangeBreakoutCount} setups detected");
+
+            // 8. Scan for Volume Shelf Bounce setups
+            await _repo.LogProgressAsync(run.Id, "volume_shelf_scan", "Scanning for Volume Shelf Bounce setups...");
+            var volumeShelfCount = 0;
+            foreach (var snapshot in snapshots)
+            {
+                try
+                {
+                    var setup = await _setupEngine.ScanForVolumeShelfBounceAsync(snapshot.Ticker, snapshot, run.Id);
+                    if (setup is not null)
+                    {
+                        allPredictions.Add(setup);
+                        volumeShelfCount++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[research-engine] Volume Shelf Bounce scan failed for {Ticker}", snapshot.Ticker);
+                }
+            }
+            _logger.LogInformation("[research-engine] Volume Shelf Bounce scan: {Count} setups detected", volumeShelfCount);
+            await _repo.LogProgressAsync(run.Id, "volume_shelf_done", $"Volume Shelf Bounce scan: {volumeShelfCount} setups detected");
+
             // Save all predictions
             await _repo.LogProgressAsync(run.Id, "saving_predictions",
                 $"Saving {allPredictions.Count} predictions to database...");

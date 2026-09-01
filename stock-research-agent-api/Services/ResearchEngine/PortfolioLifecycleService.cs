@@ -1102,14 +1102,24 @@ public class PortfolioLifecycleService
                             {
                                 try
                                 {
-                                    var tier = ClassifyTimeframe(c.Timeframe);
-                                    var slPct = tier switch
+                                    // Prefer the candidate's explicit stop price (from ATR
+                                    // scaling or EMA pullback mechanics) over a generic %.
+                                    double stopPrice;
+                                    if (c.StopPrice is > 0)
                                     {
-                                        RiskTier.Day => weights.GetValueOrDefault("risk_sl_day", 0.05),
-                                        RiskTier.Swing => weights.GetValueOrDefault("risk_sl_swing", 0.08),
-                                        _ => weights.GetValueOrDefault("risk_sl_longterm", 0.15),
-                                    };
-                                    var stopPrice = Math.Round(pos.EntryPrice * (1.0 - slPct), 2);
+                                        stopPrice = Math.Round(c.StopPrice.Value, 2);
+                                    }
+                                    else
+                                    {
+                                        var tier = ClassifyTimeframe(c.Timeframe);
+                                        var slPct = tier switch
+                                        {
+                                            RiskTier.Day => weights.GetValueOrDefault("risk_sl_day", 0.05),
+                                            RiskTier.Swing => weights.GetValueOrDefault("risk_sl_swing", 0.08),
+                                            _ => weights.GetValueOrDefault("risk_sl_longterm", 0.15),
+                                        };
+                                        stopPrice = Math.Round(pos.EntryPrice * (1.0 - slPct), 2);
+                                    }
 
                                     var stopResult = await _broker.PlaceStopOrderAsync(new BrokerOrderRequest
                                     {
@@ -1123,9 +1133,10 @@ public class PortfolioLifecycleService
                                     if (stopResult.Success && stopResult.BrokerOrderId is not null)
                                     {
                                         await _portfolioRepo.UpdateBrokerStopOrderIdAsync(pos.Id, stopResult.BrokerOrderId);
+                                        var actualSlPct = pos.EntryPrice > 0 ? (pos.EntryPrice - stopPrice) / pos.EntryPrice : 0;
                                         _logger.LogInformation(
                                             "[portfolio] BROKER STOP ORDER placed for {Ticker}: stop=${Stop} ({Pct:P0} below ${Entry}), orderId={OrderId}",
-                                            pos.Ticker, stopPrice, slPct, pos.EntryPrice, stopResult.BrokerOrderId);
+                                            pos.Ticker, stopPrice, actualSlPct, pos.EntryPrice, stopResult.BrokerOrderId);
                                     }
                                     else
                                     {
@@ -1411,10 +1422,25 @@ public class PortfolioLifecycleService
             var openPositions = await _portfolioRepo.GetOpenPositionsAsync(challenge.Id);
             if (openPositions.Count == 0) continue;
 
+            // Batch-load candidate timeframes to skip swing/long-term positions
+            var predIds = openPositions.Where(p => p.PredictionId is not null).Select(p => p.PredictionId!).Distinct().ToList();
+            var candidateMap = predIds.Count > 0
+                ? await _candidateRepo.GetCandidateMapByPredictionIdsAsync(predIds)
+                : new Dictionary<string, PaperStockCandidate>();
+
             foreach (var pos in openPositions)
             {
                 var ageHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
                 if (ageHours < minAgeHours) continue; // too young — not yet overnight
+
+                // Skip swing/long-term positions — they need more time to play out.
+                // The loser cut is for day/short-term trades, not setup-based swing entries.
+                if (pos.PredictionId is not null && candidateMap.TryGetValue(pos.PredictionId, out var cand)
+                    && cand.Timeframe is StockTimeframe.swing or StockTimeframe.one_month
+                        or StockTimeframe.three_month or StockTimeframe.six_month or StockTimeframe.one_year)
+                {
+                    continue;
+                }
 
                 double currentPrice;
                 if (pos.AssetType == PositionAssetType.option)
@@ -1717,8 +1743,12 @@ public class PortfolioLifecycleService
 
                 // Determine timeframe tier
                 var timeframe = StockTimeframe.one_day; // default
-                if (pos.PredictionId is not null && candidateMap.TryGetValue(pos.PredictionId, out var candidate))
+                PaperStockCandidate? candidate = null;
+                if (pos.PredictionId is not null && candidateMap.TryGetValue(pos.PredictionId, out var cand))
+                {
+                    candidate = cand;
                     timeframe = candidate.Timeframe;
+                }
 
                 var tier = ClassifyTimeframe(timeframe);
                 var limits = thresholds[tier];
@@ -1727,11 +1757,18 @@ public class PortfolioLifecycleService
                 var pnlPercent = (currentPrice - pos.EntryPrice) / pos.EntryPrice;
                 var hwm = pos.HighWaterMark ?? pos.EntryPrice;
 
+                // ── Candidate-level stop price check ──
+                // When the candidate has an explicit stop (ATR-based or EMA pullback),
+                // use it instead of the generic % threshold — it's more precise.
+                var candidateStopHit = false;
+                if (candidate?.StopPrice is > 0 && currentPrice <= candidate.StopPrice.Value)
+                    candidateStopHit = true;
+
                 // ── Stop-loss check — AI-gated for broker challenges ──
                 // For broker/live: ask AI before closing. AI can override if this is
                 // a market-wide dip (all positions red) vs stock-specific breakdown.
                 // For paper: mechanical close (save API cost).
-                if (limits.StopLoss > 0 && pnlPercent <= -limits.StopLoss)
+                if (candidateStopHit || (limits.StopLoss > 0 && pnlPercent <= -limits.StopLoss))
                 {
                     if (isBrokerChallenge && aiExitEnabled)
                     {
@@ -1778,6 +1815,21 @@ public class PortfolioLifecycleService
                     result.StopLossClosed++;
                     result.ClosedTickers.Add(pos.Ticker);
                     _logger.LogWarning("[risk] {Reason}", paperReason);
+                    continue;
+                }
+
+                // ── Candidate-level target hit check ──
+                // When the candidate has an explicit target (EMA pullback swing high,
+                // ATR-based target), close at target — the setup is complete.
+                if (candidate?.TargetPrice is > 0 && currentPrice >= candidate.TargetPrice.Value
+                    && !pos.PartialProfitTaken)
+                {
+                    var tgtReason = $"TARGET-HIT: {pos.Ticker} hit candidate target ${candidate.TargetPrice.Value:F2} " +
+                                    $"(current ${currentPrice:F2}). Entry ${pos.EntryPrice:F2}, P&L {pnlPercent:P1}.";
+                    await CloseWithReason(pos, currentPrice, tgtReason);
+                    result.TakeProfitClosed++;
+                    result.ClosedTickers.Add(pos.Ticker);
+                    _logger.LogInformation("[risk] {Reason}", tgtReason);
                     continue;
                 }
 
@@ -1854,9 +1906,9 @@ public class PortfolioLifecycleService
                     }
                     // Also check paper_stock_candidate target price as fallback
                     if (predictionTargetPrice is null && pos.PredictionId is not null
-                        && candidateMap.TryGetValue(pos.PredictionId, out var cand))
+                        && candidateMap.TryGetValue(pos.PredictionId, out var trailCand))
                     {
-                        predictionTargetPrice = cand.TargetPrice;
+                        predictionTargetPrice = trailCand.TargetPrice;
                     }
 
                     if (posAtrPercent is not null and > 0)

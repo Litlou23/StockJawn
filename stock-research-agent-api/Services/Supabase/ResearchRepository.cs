@@ -959,7 +959,7 @@ public class ResearchRepository
 
     private static readonly string DirectionalTypes = "prediction_type=in.(bullish,bearish)";
     private static readonly string ShortTermWindows = "time_window=in.(intraday,1_day,3_day,1_week)";
-    private static readonly string LongTermWindows = "time_window=in.(1_month,3_month,6_month,1_year)";
+    private static readonly string LongTermWindows = "time_window=in.(swing,1_month,3_month,6_month,1_year)";
     private static readonly string NonDirectionalTypes =
         "prediction_type=in.(neutral_no_edge,neutral_range_bound,neutral_high_volatility,watch_only,rejected,unavailable,neutral)";
 
