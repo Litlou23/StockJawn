@@ -2632,6 +2632,7 @@ public class PortfolioLifecycleService
         StockTimeframe.one_week,
         StockTimeframe.two_day,
         StockTimeframe.three_day,
+        StockTimeframe.swing,
         StockTimeframe.one_month,
         StockTimeframe.three_month,
         StockTimeframe.six_month,
