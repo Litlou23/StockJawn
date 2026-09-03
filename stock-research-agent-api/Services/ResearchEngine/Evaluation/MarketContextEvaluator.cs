@@ -63,16 +63,43 @@ public class MarketContextEvaluator : IMarketContextEvaluator
             else if (ctx.QqqTrend == "bearish") { bear += 2; signals.Add("Market: QQQ trend bearish"); }
         }
 
+        // ── Macro sentiment from SPY news headlines (AI-classified) ──
+        // This is the strongest directional signal: geopolitical events, Fed policy,
+        // macro shocks. When the AI classifies risk_off with high confidence, this
+        // heavily penalizes bullish predictions and boosts bearish ones system-wide.
+        // Scaled by confidence: weak signal (conf 30) ≈ 3-4 pts, strong signal (conf 80+) ≈ 10-12 pts.
+        if (ctx.MacroSentiment is not null && ctx.MacroSentimentConfidence is int macroConf and > 20)
+        {
+            // Scale contribution by confidence: (confidence / 100) * max_points
+            // Max 12 points — comparable to multi-day SPY trend (8pts) but can exceed it
+            // for high-confidence macro events
+            var scale = Math.Clamp(macroConf / 100.0, 0.2, 1.0);
+            var macroPoints = Math.Round(12.0 * scale, 1);
+            var themes = ctx.MacroThemes is not null ? string.Join(", ", ctx.MacroThemes) : "unknown";
+            var daysNote = ctx.MacroImpactDays is int days ? $", est. {days}d impact" : "";
+
+            if (ctx.MacroSentiment == "risk_off")
+            {
+                bear += macroPoints;
+                signals.Add($"Macro: RISK-OFF ({themes}, conf {macroConf}{daysNote}) → +{macroPoints:F1} bearish");
+            }
+            else if (ctx.MacroSentiment == "risk_on")
+            {
+                bull += macroPoints;
+                signals.Add($"Macro: RISK-ON ({themes}, conf {macroConf}{daysNote}) → +{macroPoints:F1} bullish");
+            }
+        }
+
         return new EvaluatorOutput
         {
             Kind = Kind,
-            BullishContribution = Math.Clamp(bull, 0, 25),
-            BearishContribution = Math.Clamp(bear, 0, 25),
+            BullishContribution = Math.Clamp(bull, 0, 35),
+            BearishContribution = Math.Clamp(bear, 0, 35),
             DebugSignals = signals,
             DebugInformation = new EvaluatorReasoning
             {
                 EvaluatorName = nameof(MarketContextEvaluator),
-                Summary = "Market-context contribution based on relative strength and benchmark trend.",
+                Summary = "Market-context contribution based on relative strength, benchmark trend, and macro news sentiment.",
                 Reasons = signals,
                 SupportingFeatureIds = context.Intelligence.Features
                     .Where(f => f.FeatureId.Contains("sector", StringComparison.OrdinalIgnoreCase))

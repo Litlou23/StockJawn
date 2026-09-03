@@ -183,6 +183,17 @@ public record BenchmarkContext
     public double? SectorEtfEmaRatio { get; init; }
     /// <summary>Sector ETF multi-day trend: "bullish", "bearish", or "neutral" based on EMA ratio.</summary>
     public string? SectorEtfTrend { get; init; }
+
+    // ── Macro sentiment (from SPY news headlines via AI classification) ──
+
+    /// <summary>Macro sentiment: "risk_on", "risk_off", or "neutral".</summary>
+    public string? MacroSentiment { get; init; }
+    /// <summary>Macro sentiment confidence (0-100) from AI classifier.</summary>
+    public int? MacroSentimentConfidence { get; init; }
+    /// <summary>Estimated impact duration in trading days (1-20).</summary>
+    public int? MacroImpactDays { get; init; }
+    /// <summary>Key macro themes driving sentiment (e.g., "geopolitical_conflict", "fed_hawkish").</summary>
+    public List<string>? MacroThemes { get; init; }
 }
 
 /// <summary>

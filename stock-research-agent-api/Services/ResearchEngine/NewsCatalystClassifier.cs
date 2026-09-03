@@ -113,6 +113,144 @@ public class NewsCatalystClassifier
         }
     }
 
+    // ───────────────────────────────────────────────────────────────────
+    // Macro sentiment classification — fetches SPY news headlines and
+    // classifies the broad market environment as risk_on / risk_off / neutral.
+    // Called once per scan run and cached; the result feeds into
+    // BenchmarkContext → MarketContextEvaluator for every ticker.
+    // ───────────────────────────────────────────────────────────────────
+
+    private MacroSentimentResult? _cachedMacroSentiment;
+    private DateTimeOffset? _macroSentimentFetchedAt;
+
+    /// <summary>
+    /// Classifies broad market sentiment from SPY news headlines.
+    /// Cached for 2 hours so multiple tickers in the same scan reuse the result.
+    /// </summary>
+    public async Task<MacroSentimentResult?> ClassifyMacroSentimentAsync(
+        List<MarketSnapshotNews> spyNews, CancellationToken ct = default)
+    {
+        // Return cache if fresh (within 2 hours)
+        if (_cachedMacroSentiment is not null && _macroSentimentFetchedAt is not null
+            && (DateTimeOffset.UtcNow - _macroSentimentFetchedAt.Value).TotalHours < 2)
+        {
+            return _cachedMacroSentiment;
+        }
+
+        if (!_openAi.IsConfigured || spyNews.Count == 0)
+            return null;
+
+        try
+        {
+            var headlines = string.Join("\n", spyNews
+                .OrderByDescending(n => n.ImportanceScore)
+                .Take(12)
+                .Select((n, i) =>
+                {
+                    var summary = !string.IsNullOrWhiteSpace(n.Summary)
+                        ? $" | {n.Summary[..Math.Min(120, n.Summary.Length)]}"
+                        : "";
+                    return $"[{i}] {n.Title}{summary} ({n.SourceName})";
+                }));
+
+            var prompt = $$"""
+                You are a macro market sentiment classifier. Given these recent market/SPY news headlines,
+                classify the BROAD MARKET environment.
+
+                Headlines:
+                {{headlines}}
+
+                Respond with a JSON object:
+                {
+                  "sentiment": "risk_on" | "risk_off" | "neutral",
+                  "confidence": 0-100,
+                  "impact_days": 1-20,
+                  "themes": ["theme1", "theme2"],
+                  "reasoning": "one sentence explaining why"
+                }
+
+                Guidelines:
+                - "risk_off": war, geopolitical crisis, rate hikes, recession fears, major selloff, sanctions, oil shock, bank failures, tariffs escalation
+                - "risk_on": peace deals, rate cuts, strong earnings season, stimulus, trade deals, positive economic data
+                - "neutral": mixed signals, routine news, no clear macro driver
+                - impact_days: how many TRADING days this macro environment is likely to persist (1=today only, 5=about a week, 10-20=structural shift)
+                - themes: 1-3 short labels (e.g., "geopolitical_conflict", "fed_hawkish", "earnings_season", "oil_shock", "trade_war")
+                - confidence: how confident you are in this classification (higher = clearer signal in the headlines)
+                """;
+
+            var result = await _openAi.CompleteAsync(new AiCompletionRequest
+            {
+                Messages =
+                [
+                    new AiChatMessageDto { Role = "system", Content = "You are a concise macro market classifier. Respond only with valid JSON." },
+                    new AiChatMessageDto { Role = "user", Content = prompt }
+                ],
+                MaxOutputTokens = 300,
+                ResponseFormatJson = true,
+            }, ct);
+
+            if (string.IsNullOrWhiteSpace(result.Text))
+            {
+                _logger.LogWarning("[macro-classifier] Empty response from OpenAI");
+                return null;
+            }
+
+            var parsed = JsonSerializer.Deserialize<MacroSentimentResponse>(result.Text,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (parsed is null)
+            {
+                _logger.LogWarning("[macro-classifier] Could not parse response: {Text}",
+                    result.Text[..Math.Min(200, result.Text.Length)]);
+                return null;
+            }
+
+            var macro = new MacroSentimentResult
+            {
+                Sentiment = parsed.Sentiment ?? "neutral",
+                Confidence = Math.Clamp(parsed.Confidence, 0, 100),
+                ImpactDays = Math.Clamp(parsed.ImpactDays, 1, 20),
+                Themes = parsed.Themes ?? [],
+                Reasoning = parsed.Reasoning,
+            };
+
+            _cachedMacroSentiment = macro;
+            _macroSentimentFetchedAt = DateTimeOffset.UtcNow;
+
+            _logger.LogInformation(
+                "[macro-classifier] Macro sentiment: {Sentiment} (conf {Confidence}, impact {Days}d, themes: {Themes}) — {Reasoning}",
+                macro.Sentiment, macro.Confidence, macro.ImpactDays,
+                string.Join(", ", macro.Themes), macro.Reasoning);
+
+            return macro;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[macro-classifier] Macro sentiment classification failed — proceeding without");
+            return null;
+        }
+    }
+
+    // ── Models ──────────────────────────────────────────────────────────
+
+    public record MacroSentimentResult
+    {
+        public string Sentiment { get; init; } = "neutral";
+        public int Confidence { get; init; }
+        public int ImpactDays { get; init; } = 1;
+        public List<string> Themes { get; init; } = [];
+        public string? Reasoning { get; init; }
+    }
+
+    private record MacroSentimentResponse
+    {
+        public string? Sentiment { get; init; }
+        public int Confidence { get; init; }
+        public int ImpactDays { get; init; } = 1;
+        public List<string>? Themes { get; init; }
+        public string? Reasoning { get; init; }
+    }
+
     private record ClassificationResponse
     {
         public List<ClassificationItem> Classifications { get; init; } = [];

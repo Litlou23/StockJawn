@@ -291,6 +291,30 @@ public class PredictionGenerator
             snapshot.Quote, spyQuote, qqqQuote, spyEma20,
             sectorEtf, sectorEtfPrice, sectorEtfEma);
 
+        // ── Macro Sentiment (SPY news → AI classification) ───────────
+        // Fetches + classifies once per scan run (cached 2h in NewsCatalystClassifier).
+        // Overlays broad market sentiment onto BenchmarkContext so MarketContextEvaluator
+        // can boost/penalize bullish/bearish scores system-wide based on geopolitical events,
+        // Fed policy, macro shocks, etc.
+        try
+        {
+            var macro = await _snapshotBuilder.GetMacroSentimentAsync();
+            if (macro is not null)
+            {
+                benchmark = benchmark with
+                {
+                    MacroSentiment = macro.Sentiment,
+                    MacroSentimentConfidence = macro.Confidence,
+                    MacroImpactDays = macro.ImpactDays,
+                    MacroThemes = macro.Themes,
+                };
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[prediction] Macro sentiment overlay failed for {Ticker} — proceeding", ticker);
+        }
+
         // ── Market Regime Classification ──────────────────────────────
         // Build context from available data and classify the current regime.
         // The regime result flows into EvaluationContext for use by evaluators

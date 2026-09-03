@@ -200,6 +200,45 @@ public class MarketSnapshotBuilder
         };
     }
 
+    /// <summary>
+    /// Fetches SPY news from StockFit and classifies macro sentiment via AI.
+    /// Cached in NewsCatalystClassifier for 2 hours — safe to call per-ticker.
+    /// </summary>
+    public async Task<NewsCatalystClassifier.MacroSentimentResult?> GetMacroSentimentAsync(
+        CancellationToken ct = default)
+    {
+        if (!_stockFit.IsConfigured) return null;
+
+        try
+        {
+            var spyNews = await _stockFit.GetNewsAsync("SPY", limit: 15, ct: ct);
+            if (spyNews.Data is null || spyNews.Data.Count == 0)
+            {
+                _logger.LogDebug("[snapshot] No SPY news returned from StockFit for macro sentiment");
+                return null;
+            }
+
+            var spyNewsContext = spyNews.Data.Select(a => new MarketSnapshotNews
+            {
+                Title = a.Title,
+                Summary = a.Summary,
+                SourceName = a.Publisher ?? "stockfit",
+                Url = a.ArticleUrl ?? "",
+                PublishedAt = (a.PublishedAt ?? DateTimeOffset.UtcNow).ToString("o"),
+                CatalystType = "macro_news",
+                Sentiment = a.Sentiment,
+                ImportanceScore = ScoreNewsImportance(a),
+            }).ToList();
+
+            return await _newsClassifier.ClassifyMacroSentimentAsync(spyNewsContext, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[snapshot] Macro sentiment fetch failed — proceeding without");
+            return null;
+        }
+    }
+
     internal static double ScoreNewsImportance(NormalizedNewsArticle a)
     {
         double baseScore = 40;
