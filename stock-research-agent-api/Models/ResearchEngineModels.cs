@@ -73,6 +73,24 @@ public record MarketSnapshotTechnical
     public string MomentumSummary { get; init; } = "";
     public string VolumeSummary { get; init; } = "";
     public string RelativeStrengthNote { get; init; } = "";
+
+    // ── 3-month trend context (computed from 65 bars) ──
+    /// <summary>3-month price change % (oldest bar to newest).</summary>
+    public double? ThreeMonthChangePct { get; init; }
+    /// <summary>1-month price change % (last ~21 bars).</summary>
+    public double? OneMonthChangePct { get; init; }
+    /// <summary>"accelerating" if 1M > 3M momentum, "decelerating" if 1M weaker, "reversing" if opposite sign.</summary>
+    public string? MomentumTrend { get; init; }
+    /// <summary>SMA50 computed from bars (null if fewer than 50 bars).</summary>
+    public double? Sma50 { get; init; }
+    /// <summary>Count of higher highs in rolling 5-bar windows over the full bar set.</summary>
+    public int? HigherHighCount { get; init; }
+    /// <summary>Count of higher lows in rolling 5-bar windows over the full bar set.</summary>
+    public int? HigherLowCount { get; init; }
+    /// <summary>"strong_uptrend" | "uptrend" | "sideways" | "downtrend" | "strong_downtrend"</summary>
+    public string? ThreeMonthTrendStructure { get; init; }
+    /// <summary>One-line human-readable summary of the 3-month picture.</summary>
+    public string? ThreeMonthSummary { get; init; }
 }
 
 public record MarketSnapshotNews

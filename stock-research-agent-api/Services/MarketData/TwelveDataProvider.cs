@@ -209,7 +209,7 @@ public class TwelveDataProvider
     // Time Series (recent bars)
     // -----------------------------------------------------------------------
 
-    public async Task<List<MarketSnapshotBar>> GetRecentBarsAsync(string ticker, int count = 20)
+    public async Task<List<MarketSnapshotBar>> GetRecentBarsAsync(string ticker, int count = 65)
     {
         if (!_configured) return [];
 
@@ -324,6 +324,100 @@ public class TwelveDataProvider
                 ? "Price below key averages, downtrend intact"
                 : "Mixed signals, trend and averages diverging";
 
+        // ── 3-month trend context (needs 40+ bars for meaningful signals) ──
+        double? threeMonthChangePct = null;
+        double? oneMonthChangePct = null;
+        string? momentumTrend = null;
+        double? sma50Computed = null;
+        int? higherHighCount = null;
+        int? higherLowCount = null;
+        string? trendStructure = null;
+        string? threeMonthSummary = null;
+
+        if (bars.Count >= 40)
+        {
+            var latestPrice = bars[0].Close;
+
+            // 3-month change: newest vs oldest bar
+            var oldestIdx = Math.Min(bars.Count - 1, 64); // up to 65 bars
+            var oldestClose = bars[oldestIdx].Close;
+            if (oldestClose > 0)
+                threeMonthChangePct = Math.Round(((latestPrice - oldestClose) / oldestClose) * 100, 2);
+
+            // 1-month change: newest vs ~21 bars ago
+            var oneMonthIdx = Math.Min(21, bars.Count - 1);
+            var oneMonthClose = bars[oneMonthIdx].Close;
+            if (oneMonthClose > 0)
+                oneMonthChangePct = Math.Round(((latestPrice - oneMonthClose) / oneMonthClose) * 100, 2);
+
+            // Momentum trend: is 1-month momentum accelerating or decelerating vs 3-month?
+            if (threeMonthChangePct is not null && oneMonthChangePct is not null)
+            {
+                if (threeMonthChangePct > 0 && oneMonthChangePct > 0)
+                    momentumTrend = oneMonthChangePct > (threeMonthChangePct / 3.0) ? "accelerating" : "decelerating";
+                else if (threeMonthChangePct < 0 && oneMonthChangePct < 0)
+                    momentumTrend = oneMonthChangePct < (threeMonthChangePct / 3.0) ? "accelerating" : "decelerating";
+                else if ((threeMonthChangePct > 0 && oneMonthChangePct < 0) || (threeMonthChangePct < 0 && oneMonthChangePct > 0))
+                    momentumTrend = "reversing";
+                else
+                    momentumTrend = "flat";
+            }
+
+            // SMA50 from bars
+            if (bars.Count >= 50)
+                sma50Computed = Math.Round(bars.Take(50).Average(b => b.Close), 2);
+
+            // Higher-highs / higher-lows structure (rolling 5-bar windows)
+            int hh = 0, hl = 0;
+            int windowSize = 5;
+            int windowCount = Math.Min(bars.Count / windowSize, 12); // up to 12 windows
+            var windowHighs = new List<double>();
+            var windowLows = new List<double>();
+            for (int w = 0; w < windowCount; w++)
+            {
+                var windowBars = bars.Skip(w * windowSize).Take(windowSize).ToList();
+                if (windowBars.Count < windowSize) break;
+                windowHighs.Add(windowBars.Max(b => b.High));
+                windowLows.Add(windowBars.Min(b => b.Low));
+            }
+            // Windows are newest-first, so compare [i] > [i+1] = higher high (more recent is higher)
+            for (int i = 0; i < windowHighs.Count - 1; i++)
+            {
+                if (windowHighs[i] > windowHighs[i + 1]) hh++;
+                if (windowLows[i] > windowLows[i + 1]) hl++;
+            }
+            higherHighCount = hh;
+            higherLowCount = hl;
+
+            // Classify trend structure
+            var totalWindows = Math.Max(windowHighs.Count - 1, 1);
+            var hhPct = (double)hh / totalWindows;
+            var hlPct = (double)hl / totalWindows;
+
+            if (threeMonthChangePct > 10 && hhPct >= 0.7 && hlPct >= 0.6)
+                trendStructure = "strong_uptrend";
+            else if (threeMonthChangePct > 3 && hhPct >= 0.5)
+                trendStructure = "uptrend";
+            else if (threeMonthChangePct < -10 && hhPct <= 0.3 && hlPct <= 0.4)
+                trendStructure = "strong_downtrend";
+            else if (threeMonthChangePct < -3 && hhPct <= 0.5)
+                trendStructure = "downtrend";
+            else
+                trendStructure = "sideways";
+
+            // Build human-readable summary
+            var dirWord = trendStructure switch
+            {
+                "strong_uptrend" => "strong uptrend",
+                "uptrend" => "uptrend",
+                "strong_downtrend" => "strong downtrend",
+                "downtrend" => "downtrend",
+                _ => "sideways/choppy"
+            };
+            var momWord = momentumTrend ?? "unknown";
+            threeMonthSummary = $"3-month: {threeMonthChangePct:+0.0;-0.0}%, 1-month: {oneMonthChangePct:+0.0;-0.0}%, {dirWord}, momentum {momWord}";
+        }
+
         return new MarketSnapshotTechnical
         {
             TrendDirection = trendDirection,
@@ -331,6 +425,14 @@ public class TwelveDataProvider
             MomentumSummary = momSummary,
             VolumeSummary = volSummary,
             RelativeStrengthNote = rsNote,
+            ThreeMonthChangePct = threeMonthChangePct,
+            OneMonthChangePct = oneMonthChangePct,
+            MomentumTrend = momentumTrend,
+            Sma50 = sma50Computed,
+            HigherHighCount = higherHighCount,
+            HigherLowCount = higherLowCount,
+            ThreeMonthTrendStructure = trendStructure,
+            ThreeMonthSummary = threeMonthSummary,
         };
     }
 

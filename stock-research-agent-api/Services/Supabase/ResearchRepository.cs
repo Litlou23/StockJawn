@@ -520,6 +520,67 @@ public class ResearchRepository
         return (seen.Count, seen.Values.Count(v => v));
     }
 
+    /// <summary>
+    /// Batch-fetch per-ticker prediction accuracy for all evaluated directional predictions.
+    /// Returns a dictionary of ticker → (Total, Correct, AccuracyPct).
+    /// Used by PredictionGenerator to gate out tickers with consistently poor accuracy.
+    /// </summary>
+    public async Task<Dictionary<string, (int Total, int Correct, double AccuracyPct)>> GetAllTickerAccuraciesAsync()
+    {
+        // Fetch evaluated directional predictions with their direction_correct outcome
+        var predictions = await _db.SelectAsync("prediction_candidates",
+            filter: "status=eq.evaluated&prediction_type=in.(bullish,bearish)",
+            select: "id,ticker", limit: 2000, order: "created_at.desc");
+
+        if (predictions.Count == 0)
+            return new Dictionary<string, (int, int, double)>(StringComparer.OrdinalIgnoreCase);
+
+        var predIds = predictions
+            .Select(p => p["id"]?.ToString())
+            .Where(id => id is not null)
+            .Select(id => id!)
+            .ToList();
+
+        // Map prediction_id → ticker
+        var predToTicker = new Dictionary<string, string>();
+        foreach (var p in predictions)
+        {
+            var id = p["id"]?.ToString();
+            var ticker = p["ticker"]?.ToString();
+            if (id is not null && ticker is not null)
+                predToTicker[id] = ticker.ToUpperInvariant();
+        }
+
+        // Fetch outcomes in chunks
+        var tickerStats = new Dictionary<string, (int Total, int Correct)>(StringComparer.OrdinalIgnoreCase);
+        const int chunkSize = 100;
+        foreach (var chunk in predIds.Chunk(chunkSize))
+        {
+            var filter = $"prediction_id=in.({string.Join(",", chunk)})";
+            var outcomes = await _db.SelectAsync("prediction_outcomes",
+                filter: filter, select: "prediction_id,direction_correct", limit: chunk.Length);
+
+            foreach (var row in outcomes)
+            {
+                var pid = row["prediction_id"]?.ToString();
+                if (pid is null || !predToTicker.TryGetValue(pid, out var ticker)) continue;
+                var dc = row["direction_correct"];
+                if (dc is null || dc.GetValueKind() == System.Text.Json.JsonValueKind.Null) continue;
+
+                var correct = dc.GetValue<bool>();
+                if (!tickerStats.TryGetValue(ticker, out var stats))
+                    stats = (0, 0);
+                tickerStats[ticker] = (stats.Total + 1, stats.Correct + (correct ? 1 : 0));
+            }
+        }
+
+        return tickerStats.ToDictionary(
+            kv => kv.Key,
+            kv => (kv.Value.Total, kv.Value.Correct,
+                   kv.Value.Total > 0 ? (double)kv.Value.Correct / kv.Value.Total * 100 : 0.0),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     // -----------------------------------------------------------------------
     // Signal Performance
     // -----------------------------------------------------------------------

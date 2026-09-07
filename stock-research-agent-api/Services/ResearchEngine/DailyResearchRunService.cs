@@ -1,4 +1,5 @@
 using StockResearchAgent.Api.Models;
+using StockResearchAgent.Api.Services.Discovery;
 using StockResearchAgent.Api.Services.Knowledge;
 using StockResearchAgent.Api.Services.ResearchUniverse;
 using StockResearchAgent.Api.Services.Supabase;
@@ -23,6 +24,7 @@ public class DailyResearchRunService
     private readonly PredictionProfileRepository _profileRepo;
     private readonly IResearchUniverseService _universe;
     private readonly TradeSetupEngine _setupEngine;
+    private readonly IDiscoveryEngine _discovery;
     private readonly ILogger<DailyResearchRunService> _logger;
 
     public DailyResearchRunService(
@@ -36,6 +38,7 @@ public class DailyResearchRunService
         PredictionProfileRepository profileRepo,
         IResearchUniverseService universe,
         TradeSetupEngine setupEngine,
+        IDiscoveryEngine discovery,
         ILogger<DailyResearchRunService> logger)
     {
         _predGen = predGen;
@@ -48,6 +51,7 @@ public class DailyResearchRunService
         _profileRepo = profileRepo;
         _universe = universe;
         _setupEngine = setupEngine;
+        _discovery = discovery;
         _logger = logger;
     }
 
@@ -95,6 +99,25 @@ public class DailyResearchRunService
 
         try
         {
+            // 0. News-first: run discovery to scan today's headlines and inject
+            //    news-driven tickers into the Research Universe BEFORE loading candidates.
+            //    This is how a trader works: read the news → identify tickers → check charts.
+            await _repo.LogProgressAsync(run.Id, "news_discovery", "Scanning market news for ticker opportunities...");
+            try
+            {
+                var discoveryResult = await _discovery.RunDiscoveryAsync();
+                _logger.LogInformation(
+                    "[research-engine] News-first discovery: {New} new tickers, {Updated} updated from {Events} events",
+                    discoveryResult.NewAssetsCreated, discoveryResult.ExistingAssetsUpdated, discoveryResult.TotalEventsDiscovered);
+                await _repo.LogProgressAsync(run.Id, "news_discovery_done",
+                    $"Discovery found {discoveryResult.TotalEventsDiscovered} events → {discoveryResult.NewAssetsCreated} new tickers added");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[research-engine] News discovery failed — proceeding with existing universe");
+                await _repo.LogProgressAsync(run.Id, "news_discovery_failed", $"Discovery failed: {ex.Message} — using existing universe");
+            }
+
             // 1. Build market snapshots from research candidates
             await _repo.LogProgressAsync(run.Id, "load_candidates", "Loading research candidates...");
             var (tickers, assetLookup) = await GetResearchCandidatesAsync();

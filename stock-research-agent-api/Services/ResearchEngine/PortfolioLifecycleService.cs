@@ -2006,6 +2006,64 @@ public class PortfolioLifecycleService
                     }
                 }
 
+                // ── Proactive AI thesis review ──
+                // A real trader doesn't wait for a stop to trigger — they look at their
+                // positions and ask "does the thesis still hold?" every cycle.
+                // This runs for broker positions that have been held 4+ hours, haven't hit
+                // any mechanical trigger, and haven't been AI-reviewed in the last 2 hours.
+                if (isBrokerChallenge && aiExitEnabled && !pos.PartialProfitTaken)
+                {
+                    var hoursHeldReview = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+                    if (hoursHeldReview >= 4)
+                    {
+                        // Check if we've already reviewed this position recently (2h cooldown)
+                        var shouldReview = true;
+                        try
+                        {
+                            var recentDecisions = await _portfolioRepo.GetRecentAiDecisionsAsync(pos.Ticker, limit: 5);
+                            var lastReview = recentDecisions.FirstOrDefault(d =>
+                                d["decision_type"]?.ToString() == "thesis_review"
+                                && DateTimeOffset.TryParse(d["created_at"]?.ToString(), out var dt)
+                                && (DateTimeOffset.UtcNow - dt).TotalHours < 2);
+                            if (lastReview is not null)
+                                shouldReview = false;
+                        }
+                        catch { /* non-critical */ }
+
+                        if (shouldReview)
+                        {
+                            var aiReview = await GetAiThesisReviewAsync(
+                                pos, currentPrice, pnlPercent, hoursHeldReview,
+                                portfolioCtx, aiTrackRecord, isMacroShockDay, riskRegime);
+
+                            // Persist the review decision
+                            _ = _portfolioRepo.SaveAiDecisionAsync(
+                                pos.Id, pos.Ticker, challenge.Id,
+                                "thesis_review", aiReview.ShouldExit ? "EXIT" : "HOLD",
+                                aiReview.AiReason,
+                                entryPrice: pos.EntryPrice, currentPrice: currentPrice,
+                                pnlPercent: pnlPercent, hoursHeld: hoursHeldReview,
+                                highWaterMark: pos.HighWaterMark,
+                                marketRegime: riskRegime, isMacroShock: isMacroShockDay,
+                                portfolioOpenCount: openPositions.Count,
+                                portfolioAllRed: portfolioAllRed,
+                                portfolioCash: challenge.CurrentCash);
+
+                            if (aiReview.ShouldExit)
+                            {
+                                var reason = $"AI THESIS REVIEW: {pos.Ticker} — AI says exit at {pnlPercent:P1}. " +
+                                             $"Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}. " +
+                                             $"AI: {aiReview.AiReason ?? "thesis no longer valid"}";
+                                await CloseWithReason(pos, currentPrice, reason);
+                                result.AiExitPositions++;
+                                result.ClosedTickers.Add(pos.Ticker);
+                                _logger.LogInformation("[risk] {Reason}", reason);
+                                continue;
+                            }
+                        }
+                    }
+                }
+
                 // ── Time stop — AI-enhanced exit decision ──
                 // When a position hits the time stop threshold, ask AI whether
                 // to hold or exit. AI sees the P&L, hold duration, entry reason,
@@ -2445,6 +2503,81 @@ public class PortfolioLifecycleService
             _logger.LogWarning(ex, "[ai-exit] AI exit decision failed for {Ticker}, defaulting to mechanical exit",
                 pos.Ticker);
             return new AiExitDecision(true, null);
+        }
+    }
+
+    // ── AI Proactive Thesis Review ──────────────────────────────────────
+    // Runs every risk cycle for positions held 4+ hours. The AI reviews
+    // whether the original trade thesis still holds — not just P&L, but
+    // whether the story has changed. A trader checks their positions, not
+    // just their stops.
+
+    private async Task<AiExitDecision> GetAiThesisReviewAsync(
+        PortfolioPosition pos, double currentPrice, double pnlPercent,
+        double hoursHeld, string? portfolioContext, string? aiTrackRecord,
+        bool isMacroShockDay, string? regime)
+    {
+        if (!_ai.IsConfigured)
+            return new AiExitDecision(false, null); // default to hold if no AI
+
+        try
+        {
+            var prompt = $$"""
+                You are a swing trader reviewing an open position. This is NOT a stop-loss
+                trigger — no mechanical threshold was hit. You're doing what a real trader
+                does: checking your positions and asking "should I still be in this trade?"
+
+                {{pos.Ticker}} | Entry: ${{pos.EntryPrice:F2}} → Now: ${{currentPrice:F2}} | P&L: {{pnlPercent:P2}}
+                Held: {{hoursHeld:F0}} hours | Peak: ${{pos.HighWaterMark ?? pos.EntryPrice:F2}}
+                Entry reason: {{pos.ReasonEntered ?? "n/a"}}
+
+                Market regime: {{regime ?? "unknown"}} | Macro shock: {{(isMacroShockDay ? "YES" : "no")}}
+                {{portfolioContext ?? ""}}
+                {{aiTrackRecord ?? ""}}
+
+                REVIEW CRITERIA — think like a trader with money on the line:
+                - Has the THESIS changed? If you entered for earnings momentum but the stock
+                  is fading on no news, the thesis is broken → EXIT
+                - Is this dead money? Flat for 8+ hours with no catalyst ahead → EXIT, redeploy
+                - Did we peak and fade? HWM well above current = momentum lost → EXIT
+                - Is the market moving against us (bearish regime + bullish position)? → EXIT
+                - Are we green and the trade is working? → HOLD, let winners run
+                - Still early in the thesis window with catalyst ahead? → HOLD
+
+                Be decisive. Default to HOLD — only say EXIT if there's a clear reason.
+                But don't hold dead money. Capital sitting idle is capital not making money.
+
+                Respond in JSON: {"decision": "EXIT" or "HOLD", "reason": "one sentence"}
+                """;
+
+            var result = await _ai.CompleteAsync(new AiCompletionRequest
+            {
+                Messages = [new AiChatMessageDto { Role = "user", Content = prompt }],
+                ResponseFormatJson = true,
+                MaxOutputTokens = 100,
+                ModelOverride = 4, // Luna — good enough for thesis review, saves cost vs Terra
+            }, CancellationToken.None);
+
+            if (string.IsNullOrWhiteSpace(result.Text))
+                return new AiExitDecision(false, null);
+
+            using var doc = JsonDocument.Parse(result.Text);
+            var decision = doc.RootElement.GetProperty("decision").GetString() ?? "HOLD";
+            var reason = doc.RootElement.GetProperty("reason").GetString() ?? "";
+
+            _logger.LogInformation(
+                "[ai-thesis-review] {Ticker} at {Pnl:P1} after {Hours:F0}h — AI says {Decision}: {Reason}",
+                pos.Ticker, pnlPercent, hoursHeld, decision, reason);
+
+            return new AiExitDecision(
+                decision.Equals("EXIT", StringComparison.OrdinalIgnoreCase),
+                reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[ai-thesis-review] Thesis review failed for {Ticker}, defaulting to hold",
+                pos.Ticker);
+            return new AiExitDecision(false, null);
         }
     }
 

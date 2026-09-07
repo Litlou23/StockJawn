@@ -567,17 +567,19 @@ public class PredictionGenerator
         // ── Step 3: Ask OpenAI to explain the computed prediction ───
         var explanation = await GetAiExplanationAsync(
             ticker, snapshot, predType, totalScore, confidence, risk,
-            allSignals, weights, lessons);
+            allSignals, weights, lessons, benchmark);
 
         if (explanation is not null)
             dataSources.Add("openai-analysis");
 
         // ── Apply AI confidence adjustment ──
-        // The AI can adjust confidence by -15 to +10 based on learning context,
-        // regime awareness, and pattern recognition the scoring engine can't do.
+        // The AI is the decision-maker — it sees the full picture (trend, catalyst,
+        // news, technicals, learning context) and adjusts confidence like a trader would.
+        // Range: -30 to +25. This is intentionally wide — the AI should swing
+        // confidence hard when the story is clear or clearly wrong.
         if (explanation?.ConfidenceAdjustment is int aiAdj and not 0)
         {
-            var clampedAdj = Math.Clamp(aiAdj, -15, 10);
+            var clampedAdj = Math.Clamp(aiAdj, -30, 25);
             var prevConf = confidence;
             confidence = Math.Clamp(confidence + clampedAdj, 5, 100);
             allSignals.Add($"AI confidence adjustment: {clampedAdj:+0;-0} ({explanation.AiAdjustmentReason ?? "no reason"})");
@@ -588,11 +590,12 @@ public class PredictionGenerator
 
         // ── Apply AI trade flag ──
         // "avoid" demotes to watch_only — the AI thinks this trade shouldn't be taken.
-        // "caution" docks 5 additional confidence points as a warning.
+        // "caution" docks 15 confidence points — marginal setup, proceed with less size.
+        // "strong_buy" boosts confidence by 15 on top of any adjustment — clear conviction.
         if (explanation?.AiFlag is "avoid" && predType is "bullish" or "bearish")
         {
             predType = "watch_only";
-            confidence = Math.Min(confidence, 30);
+            confidence = Math.Min(confidence, 20);
             var avoidReason = $"AI flagged AVOID: {explanation.AiAdjustmentReason ?? "conflicting signals"}";
             missingWarnings.Add(avoidReason);
             _logger.LogInformation("[prediction] {Ticker}: AI vetoed trade → watch_only: {Reason}",
@@ -600,8 +603,28 @@ public class PredictionGenerator
         }
         else if (explanation?.AiFlag is "caution")
         {
-            confidence = Math.Max(5, confidence - 5);
+            confidence = Math.Max(5, confidence - 15);
             allSignals.Add($"AI caution flag: {explanation.AiAdjustmentReason ?? "borderline trade"}");
+        }
+        else if (explanation?.AiFlag is "strong_buy")
+        {
+            confidence = Math.Clamp(confidence + 15, 5, 100);
+            allSignals.Add($"AI STRONG BUY: {explanation.AiAdjustmentReason ?? "high-conviction setup"}");
+            _logger.LogInformation("[prediction] {Ticker}: AI flagged STRONG BUY (+15 confidence): {Reason}",
+                ticker, explanation.AiAdjustmentReason ?? "n/a");
+        }
+
+        // --- AI direction override ---
+        // AI can flip the scoring engine's direction when evidence clearly contradicts it
+        if (explanation?.DirectionOverride is "bullish" or "bearish"
+            && explanation.DirectionOverride != predType
+            && predType is "bullish" or "bearish") // don't override watch_only
+        {
+            var oldDirection = predType;
+            predType = explanation.DirectionOverride;
+            allSignals.Add($"AI direction override: {oldDirection} → {predType} ({explanation.AiAdjustmentReason ?? "AI sees opposite setup"})");
+            _logger.LogInformation("[prediction] {Ticker}: AI overrode direction {Old} → {New}: {Reason}",
+                ticker, oldDirection, predType, explanation.AiAdjustmentReason ?? "n/a");
         }
 
         // Fall back to signal-derived explanation if AI unavailable
@@ -638,6 +661,65 @@ public class PredictionGenerator
         var entryPrice = snapshot.Quote?.Price;
         var priceCalc = ComputeAtrPriceForecast(
             entryPrice, predType, timeWindow, snapshot, confidence, risk, scoring.Breakdown, researchUniverse, weights);
+
+        // ── Let AI override price targets when it provides them ──
+        // The AI sees trend, catalyst, news, market context — it may have a better
+        // sense of where this stock is headed than pure ATR math.
+        if (explanation?.PredictedPrice is > 0 && entryPrice is > 0 && priceCalc.PredictedPrice is > 0)
+        {
+            var aiTarget = explanation.PredictedPrice.Value;
+            // Sanity check: AI target must be in the right direction and within 20% of entry
+            var aiMoveFromEntry = (aiTarget - entryPrice.Value) / entryPrice.Value * 100;
+            var isDirectionCorrect = (predType == "bullish" && aiMoveFromEntry > 0) ||
+                                     (predType == "bearish" && aiMoveFromEntry < 0);
+            if (isDirectionCorrect && Math.Abs(aiMoveFromEntry) <= 20)
+            {
+                // Blend: 60% mechanical, 40% AI target for predicted price
+                var blendedTarget = priceCalc.PredictedPrice.Value * 0.6 + aiTarget * 0.4;
+                priceCalc.PredictedPrice = Math.Round(blendedTarget, 2);
+                allSignals.Add($"AI target price: ${aiTarget:F2} (blended into prediction)");
+            }
+        }
+
+        // ── Use AI's key levels for support/resistance when provided ──
+        if (explanation?.KeyLevels is not null)
+        {
+            if (explanation.KeyLevels.Support is > 0)
+                priceCalc.SupportLevel = explanation.KeyLevels.Support.Value;
+            if (explanation.KeyLevels.Resistance is > 0)
+                priceCalc.ResistanceLevel = explanation.KeyLevels.Resistance.Value;
+
+            // ── AI-informed stop price ──
+            // For bullish: if AI's support is below entry but within 5%, use it as a
+            // smarter stop than pure ATR math. A support level based on chart structure
+            // (prior lows, moving average, demand zone) is where a real trader would put their stop.
+            // For bearish: if AI's resistance is above entry but within 5%, same logic.
+            if (entryPrice is > 0 && priceCalc.StopPrice is > 0)
+            {
+                if (predType == "bullish" && explanation.KeyLevels.Support is > 0)
+                {
+                    var aiStop = explanation.KeyLevels.Support.Value;
+                    var distFromEntry = (entryPrice.Value - aiStop) / entryPrice.Value * 100;
+                    // AI stop must be below entry (valid bullish stop) and within 5% (reasonable)
+                    if (aiStop < entryPrice.Value && distFromEntry > 0.5 && distFromEntry <= 5.0)
+                    {
+                        // Blend: 50% mechanical, 50% AI stop
+                        priceCalc.StopPrice = Math.Round(priceCalc.StopPrice.Value * 0.5 + aiStop * 0.5, 2);
+                        allSignals.Add($"AI stop level: ${aiStop:F2} (support-based, blended into stop)");
+                    }
+                }
+                else if (predType == "bearish" && explanation.KeyLevels.Resistance is > 0)
+                {
+                    var aiStop = explanation.KeyLevels.Resistance.Value;
+                    var distFromEntry = (aiStop - entryPrice.Value) / entryPrice.Value * 100;
+                    if (aiStop > entryPrice.Value && distFromEntry > 0.5 && distFromEntry <= 5.0)
+                    {
+                        priceCalc.StopPrice = Math.Round(priceCalc.StopPrice.Value * 0.5 + aiStop * 0.5, 2);
+                        allSignals.Add($"AI stop level: ${aiStop:F2} (resistance-based, blended into stop)");
+                    }
+                }
+            }
+        }
 
         // Second-pass finalization: apply R/R-aware caps + actionability tier
         // now that we know the risk/reward ratio.
@@ -956,7 +1038,42 @@ public class PredictionGenerator
         // ── Min stock price gate: skip cheap stocks at prediction level ──
         var minStockPrice = sharedContext.Weights.GetValueOrDefault("min_stock_price", 10.0);
 
-        foreach (var snapshot in snapshots)
+        // ── Per-ticker accuracy gate: skip tickers with proven poor prediction accuracy ──
+        var tickerAccuracyMinPct = sharedContext.Weights.GetValueOrDefault("ticker_accuracy_min_pct", 30.0);
+        var tickerAccuracyMinPredictions = (int)sharedContext.Weights.GetValueOrDefault("ticker_accuracy_min_predictions", 4.0);
+        Dictionary<string, (int Total, int Correct, double AccuracyPct)> tickerAccuracies;
+        try
+        {
+            tickerAccuracies = await _repo.GetAllTickerAccuraciesAsync();
+            var blocked = tickerAccuracies.Count(kv => kv.Value.Total >= tickerAccuracyMinPredictions && kv.Value.AccuracyPct < tickerAccuracyMinPct);
+            if (blocked > 0)
+                _logger.LogInformation("[prediction] Ticker accuracy gate: {Blocked} tickers below {Min}% accuracy will be skipped", blocked, tickerAccuracyMinPct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[prediction] Failed to load ticker accuracies — gate disabled for this run");
+            tickerAccuracies = new();
+        }
+
+        // ── Momentum pre-screen: rank tickers by recent momentum + catalyst presence ──
+        // Think like a trader: scan for movers first, then look at the chart.
+        // Stocks with strong 3-month trends AND catalyst news get processed first.
+        var rankedSnapshots = snapshots
+            .Select(s => new
+            {
+                Snapshot = s,
+                MomentumScore = ComputeMomentumRank(s),
+            })
+            .OrderByDescending(x => x.MomentumScore)
+            .Select(x => x.Snapshot)
+            .ToList();
+
+        _logger.LogInformation("[prediction] Momentum pre-screen ranked {Count} tickers. Top 5: {Top5}",
+            rankedSnapshots.Count,
+            string.Join(", ", rankedSnapshots.Take(5).Select(s =>
+                $"{s.Ticker}({ComputeMomentumRank(s):F0})")));
+
+        foreach (var snapshot in rankedSnapshots)
         {
             // Filter out stocks below min_stock_price before wasting an API call
             var quotePrice = snapshot.Quote?.Price ?? 0;
@@ -964,6 +1081,41 @@ public class PredictionGenerator
             {
                 _logger.LogDebug("[prediction] Skipping {Ticker}: price ${Price:F2} < min ${Min:F2}",
                     snapshot.Ticker, quotePrice, minStockPrice);
+                continue;
+            }
+
+            // ── Catalyst + trend gate: think like a trader ──
+            // Skip stocks that have no story AND no sustained trend.
+            // A trader wouldn't waste time on a stock with no news and sideways price action.
+            var catalystGateMinImportance = sharedContext.Weights.GetValueOrDefault("catalyst_gate_min_importance", 50.0);
+            var hasCatalyst = snapshot.NewsContext.Any(n => n.ImportanceScore >= catalystGateMinImportance);
+            var trendStr = snapshot.TechnicalContext?.ThreeMonthTrendStructure;
+            var hasStrongTrend = trendStr is "strong_uptrend" or "uptrend" or "strong_downtrend" or "downtrend";
+            var oneMonthMove = Math.Abs(snapshot.TechnicalContext?.OneMonthChangePct ?? 0);
+
+            if (!hasCatalyst && !hasStrongTrend && oneMonthMove < 5)
+            {
+                _logger.LogInformation(
+                    "[prediction] Skipping {Ticker}: no catalyst (top importance: {TopImp:F0}), " +
+                    "trend={Trend}, 1M move={Move:F1}% — no story, no momentum",
+                    snapshot.Ticker,
+                    snapshot.NewsContext.Count > 0 ? snapshot.NewsContext.Max(n => n.ImportanceScore) : 0,
+                    trendStr ?? "unknown",
+                    snapshot.TechnicalContext?.OneMonthChangePct ?? 0);
+                continue;
+            }
+
+            // ── Per-ticker accuracy gate ──
+            // Skip tickers with proven poor prediction accuracy (e.g. VRTX 0/4, MWH 0/4).
+            // Learning engine identifies these but only as advisory text — this is the mechanical block.
+            var tickerKey0 = snapshot.Ticker.ToUpperInvariant();
+            if (tickerAccuracies.TryGetValue(tickerKey0, out var tickerAcc)
+                && tickerAcc.Total >= tickerAccuracyMinPredictions
+                && tickerAcc.AccuracyPct < tickerAccuracyMinPct)
+            {
+                _logger.LogInformation(
+                    "[prediction] Skipping {Ticker}: historical accuracy {Acc:F0}% ({Correct}/{Total}) below min {Min}%",
+                    snapshot.Ticker, tickerAcc.AccuracyPct, tickerAcc.Correct, tickerAcc.Total, tickerAccuracyMinPct);
                 continue;
             }
 
@@ -1044,7 +1196,7 @@ public class PredictionGenerator
     }
 
     // -----------------------------------------------------------------------
-    // OpenAI call — explanation only, not decision-making
+    // OpenAI call — AI is the decision-maker for confidence and trade flags
     // -----------------------------------------------------------------------
 
     private async Task<AiExplanationResponse?> GetAiExplanationAsync(
@@ -1056,7 +1208,8 @@ public class PredictionGenerator
         int risk,
         List<string> signals,
         Dictionary<string, double> weights,
-        List<string> lessons)
+        List<string> lessons,
+        BenchmarkContext? benchmark = null)
     {
         if (_chatClient is null) return null;
 
@@ -1065,7 +1218,7 @@ public class PredictionGenerator
             var learningContext = await GetLearningContextAsync();
             var systemPrompt = BuildExplanationSystemPrompt();
             var userPrompt = BuildExplanationUserPrompt(
-                ticker, snapshot, direction, totalScore, confidence, risk, signals, weights, lessons, learningContext);
+                ticker, snapshot, direction, totalScore, confidence, risk, signals, weights, lessons, learningContext, benchmark);
 
             var messages = new List<ChatMessage>
             {
@@ -1075,7 +1228,7 @@ public class PredictionGenerator
 
             var options = new ChatCompletionOptions
             {
-                MaxOutputTokenCount = 400,
+                MaxOutputTokenCount = 800,
                 ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat(),
             };
 
@@ -1087,6 +1240,7 @@ public class PredictionGenerator
             var result = JsonSerializer.Deserialize<AiExplanationResponse>(text, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
+                PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
             });
 
             return result;
@@ -1101,13 +1255,22 @@ public class PredictionGenerator
     private static string BuildExplanationSystemPrompt()
     {
         return """
-            You are a stock market analyst writing prediction explanations with
-            strong risk management discipline.
+            You are a swing trader making the final call on every prediction.
+            The scoring engine computed a starting direction, confidence, and risk from
+            market signals — but YOU are the decision-maker. You see the full picture:
+            trend, catalyst, news, technicals, market context, and learning history.
+            Your confidence_adjustment and ai_flag are what ultimately decide if a trade
+            gets taken, boosted, or killed. Think like a trader with money on the line.
 
-            IMPORTANT: You do NOT decide the prediction direction, confidence, or risk.
-            Those have already been computed by the scoring engine from real market signals.
-            Your job is to EXPLAIN WHY those signals led to this prediction AND to
-            frame the trade in terms of risk management.
+            TREND + CATALYST THINKING:
+            - A stock in a strong 3-month uptrend with accelerating momentum AND a
+              catalyst (earnings beat, sector rotation, institutional buying) is the
+              highest-quality setup. Boost confidence for these.
+            - A stock with no trend (sideways chop) and no catalyst is noise. Dock
+              confidence and consider "caution" or "avoid".
+            - A stock trending down but the scoring engine says bullish? That's a
+              reversal bet — risky. Dock confidence unless the catalyst is overwhelming.
+            - The 3-month trend matters MORE than the 5-day technicals for swing trades.
 
             You MUST respond with valid JSON matching this schema:
             {
@@ -1118,40 +1281,66 @@ public class PredictionGenerator
               "key_levels": { "support": <price or null>, "resistance": <price or null> },
               "predicted_price": <number or null — your best estimate of where this stock will close at the end of the time window>,
               "predicted_move_percent": <number or null — expected % move from current price, positive for up, negative for down>,
-              "confidence_adjustment": <integer from -15 to +10 — YOUR adjustment to the scoring engine's confidence>,
-              "ai_flag": "<'proceed' | 'caution' | 'avoid'> — your overall trade recommendation",
+              "confidence_adjustment": <integer from -30 to +25 — YOUR adjustment as the decision-maker>,
+              "ai_flag": "<'strong_buy' | 'proceed' | 'caution' | 'avoid'> — your trade conviction>,
+              "direction_override": "<null | 'bullish' | 'bearish'> — set ONLY if the scoring engine got the direction WRONG>,
               "ai_adjustment_reason": "<one-line reason for your confidence_adjustment and ai_flag>"
             }
+
+            YOUR OUTPUTS DIRECTLY CONTROL THE TRADE:
+            - predicted_price: blended into the actual price target. Be realistic.
+            - key_levels.support / key_levels.resistance: used as the actual stop price.
+              For bullish: set support at the nearest chart support (prior low, EMA, demand zone)
+              where you'd actually place your stop. This is NOT decoration — it sets the stop.
+              For bearish: set resistance at the nearest overhead level.
+            - confidence_adjustment + ai_flag: control whether the trade gets taken at all.
+            - direction_override: if the scoring engine picked the WRONG direction, you can
+              flip it. Use this RARELY — only when the evidence clearly contradicts the engine.
+              Example: engine says bullish but SPY is crashing, macro is risk_off, stock has no
+              catalyst, and the 3-month trend is down. That's clearly bearish — flip it.
+              Set to null (default) when the direction is reasonable.
 
             Rules:
             - Reference ONLY the signals, scores, and data provided. Do NOT invent signals.
             - Be specific about price levels from the bars provided (support/resistance).
-            - Explain the reasoning behind the computed direction — don't override it.
             - Keep thesis to 1-3 sentences. Be concise and insightful.
             - Invalidation rule should reference specific price levels when possible.
             - predicted_price must be a realistic price based on the current price, signals, and key levels.
             - predicted_move_percent should match the direction (positive for bullish, negative for bearish).
 
             confidence_adjustment and ai_flag rules:
-            - You have real influence on trade decisions. Use it responsibly.
-            - confidence_adjustment: integer from -15 to +10. Use 0 if you agree with the score.
-              Dock confidence (-5 to -15) when:
+            - YOU ARE THE DECISION-MAKER. The scoring engine provides a starting point,
+              but you have the final say on confidence. Think like a swing trader looking
+              at a chart with the news in front of you. Would YOU take this trade?
+            - confidence_adjustment: integer from -30 to +25. Use 0 ONLY if you truly
+              agree with the score. Be decisive — don't be afraid to swing hard.
+              Dock confidence (-10 to -30) when:
+                * No catalyst — the stock has no reason to move. Why are we trading this?
+                * 3-month trend is sideways or down but direction is bullish (fighting the trend)
                 * Learning context shows this ticker or pattern has been failing
                 * Bearish call in a strong bull regime (or vice versa)
                 * Signals are thin or contradictory despite high computed score
-                * Market context conflicts with the direction
-                * The stock is thinly traded or has no catalyst
-              Boost confidence (+1 to +10) when:
-                * Strong catalyst alignment (earnings beat + technical breakout)
+                * The stock has no volume, no institutional interest, no story
+                * SPY/QQQ bearish or macro risk_off but you're going bullish — fighting the market
+                * Sector ETF trending bearish while stock is bullish — swimming upstream
+              Boost confidence (+5 to +25) when:
+                * Strong 3-month uptrend + accelerating momentum + fresh catalyst = dream setup
+                * Big institutional stock (>$100B market cap) pulling back to support with catalyst
+                * Earnings beat + technical breakout + sector in favor
                 * Learning shows this pattern has been consistently winning
-                * Multiple confirming signals with no opposing ones
-            - ai_flag: "proceed" (normal), "caution" (marginal trade, borderline),
+                * Everything aligns — trend, catalyst, technicals, AND market context
+                * SPY/QQQ trending bullish + macro sentiment risk_on + sector ETF bullish + stock bullish = green light
+                * Market is WITH your direction — wind at your back
+            - ai_flag: "strong_buy" (high conviction — you'd put your own money here),
+              "proceed" (normal — decent setup), "caution" (marginal — docks 15 confidence),
               "avoid" (this trade should NOT be taken — demotes to watch_only).
+              Use "strong_buy" when trend + catalyst + technicals ALL align on a quality stock.
               Use "avoid" when the prediction contradicts obvious context (e.g.,
               bearish on a stock that just had a massive earnings beat in a bull market,
-              or bullish on a stock with deteriorating fundamentals in a bear regime).
+              or bullish on a stock with no catalyst and sideways/down 3-month trend).
             - ai_adjustment_reason: one line explaining your adjustment. Be specific.
-              Example: "Bearish call on COF contradicts +22% EPS beat and bull regime (-10)"
+              Example: "NVDA strong uptrend + AI spending catalyst + pullback to 20-day = dream setup (+20)"
+              Example: "No catalyst, sideways 3 months, scoring engine fooled by 2-day bounce (-25)"
 
             Risk management principles — apply these when writing explanations:
             - A high-confidence call with a poor risk/reward ratio is NOT a good trade.
@@ -1181,7 +1370,8 @@ public class PredictionGenerator
         List<string> signals,
         Dictionary<string, double> weights,
         List<string> lessons,
-        string? learningContext = null)
+        string? learningContext = null,
+        BenchmarkContext? benchmark = null)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine($"## Explain this prediction for {ticker}");
@@ -1217,6 +1407,44 @@ public class PredictionGenerator
         {
             var t = snapshot.TechnicalContext;
             sb.AppendLine($"### Technical: Trend={t.TrendDirection} | MA={t.MovingAverageSummary} | Momentum={t.MomentumSummary} | Volume={t.VolumeSummary} | RSI={t.RelativeStrengthNote}");
+
+            // ── 3-month trend context — the bigger picture ──
+            if (t.ThreeMonthTrendStructure is not null)
+            {
+                sb.AppendLine($"### 3-Month Trend Context:");
+                sb.AppendLine($"  Structure: {t.ThreeMonthTrendStructure} | 3M Change: {t.ThreeMonthChangePct:+0.0;-0.0}% | 1M Change: {t.OneMonthChangePct:+0.0;-0.0}%");
+                sb.AppendLine($"  Momentum: {t.MomentumTrend} | SMA50: ${t.Sma50:F2}");
+                sb.AppendLine($"  Higher Highs: {t.HigherHighCount} | Higher Lows: {t.HigherLowCount}");
+                if (t.ThreeMonthSummary is not null)
+                    sb.AppendLine($"  Summary: {t.ThreeMonthSummary}");
+                sb.AppendLine();
+                sb.AppendLine("  >> IMPORTANT: Think like a swing trader. Ask yourself: Is this stock in a sustained");
+                sb.AppendLine("  >> trend with a reason to keep going? A stock up 15% over 3 months with accelerating");
+                sb.AppendLine("  >> momentum AND a catalyst is a much better setup than one with sideways chop and no news.");
+                sb.AppendLine("  >> Weight the 3-month trend heavily in your confidence_adjustment.");
+            }
+        }
+
+        // ── Market context — what is the overall market doing? ──
+        if (benchmark is not null)
+        {
+            sb.AppendLine("### Market Context (CRITICAL — check this before deciding):");
+            if (benchmark.SpyTrend is not null)
+                sb.AppendLine($"  SPY: {benchmark.SpyChangePercent:+0.00;-0.00}% today | Trend: {benchmark.SpyTrend} | Multi-day: {benchmark.SpyMultiDayTrend ?? "n/a"}");
+            if (benchmark.QqqTrend is not null)
+                sb.AppendLine($"  QQQ: {benchmark.QqqChangePercent:+0.00;-0.00}% today | Trend: {benchmark.QqqTrend}");
+            if (benchmark.SectorEtf is not null)
+                sb.AppendLine($"  Sector ETF ({benchmark.SectorEtf}): trend={benchmark.SectorEtfTrend ?? "n/a"} | EMA ratio={benchmark.SectorEtfEmaRatio:F3}");
+            if (benchmark.MacroSentiment is not null)
+                sb.AppendLine($"  Macro sentiment: {benchmark.MacroSentiment} (confidence: {benchmark.MacroSentimentConfidence}/100, impact: {benchmark.MacroImpactDays} days)");
+            if (benchmark.MacroThemes?.Count > 0)
+                sb.AppendLine($"  Macro themes: {string.Join(", ", benchmark.MacroThemes)}");
+            if (benchmark.RelativeStrengthVsSpy is not null)
+                sb.AppendLine($"  Relative strength vs SPY: {benchmark.RelativeStrengthVsSpy:+0.00;-0.00}%");
+            sb.AppendLine();
+            sb.AppendLine("  >> A bullish pick in a risk_off / bearish SPY environment needs an EXTREMELY strong");
+            sb.AppendLine("  >> stock-specific catalyst to overcome the headwind. Dock confidence if the market is");
+            sb.AppendLine("  >> against the direction. Boost if the market is WITH the direction.");
         }
 
         if (snapshot.NewsContext.Count > 0)
@@ -1767,6 +1995,70 @@ public class PredictionGenerator
             _ => 0,
         };
     }
+
+    /// <summary>
+    /// Momentum pre-screen rank: higher score = better candidate.
+    /// Combines 3-month trend structure, recent momentum, and catalyst presence.
+    /// Think like a trader: movers with a story get looked at first.
+    /// </summary>
+    private static double ComputeMomentumRank(MarketSnapshot snapshot)
+    {
+        double score = 50; // baseline
+
+        var tech = snapshot.TechnicalContext;
+        if (tech is not null)
+        {
+            // 3-month trend structure (up to ±30)
+            score += tech.ThreeMonthTrendStructure switch
+            {
+                "strong_uptrend" => 30,
+                "uptrend" => 15,
+                "sideways" => 0,
+                "downtrend" => -15,
+                "strong_downtrend" => -30,
+                _ => 0,
+            };
+
+            // Momentum acceleration (up to ±15)
+            score += tech.MomentumTrend switch
+            {
+                "accelerating" => 15,
+                "decelerating" => -5,
+                "reversing" => -15,
+                _ => 0,
+            };
+
+            // 1-month change magnitude — bigger recent movers rank higher
+            if (tech.OneMonthChangePct is double oneM)
+                score += Math.Clamp(oneM, -10, 10);
+        }
+
+        // Catalyst presence — news-driven stocks get a boost
+        if (snapshot.NewsContext is { Count: > 0 } news)
+        {
+            // High-importance catalyst (earnings, insider, macro) = big boost
+            var topImportance = news.Max(n => n.ImportanceScore);
+            if (topImportance >= 70) score += 20;
+            else if (topImportance >= 50) score += 10;
+            else if (news.Count >= 3) score += 5;
+        }
+
+        // Stock size/price tier — bigger stocks get love.
+        // These are the names a trader focuses on: liquid, well-covered,
+        // institutional flow, tighter spreads, more predictable behavior.
+        var price = snapshot.Quote?.Price ?? 0;
+        if (price >= 200) score += 15;       // mega-cap territory (AAPL, NVDA, MSFT)
+        else if (price >= 100) score += 10;  // large-cap (CRM, AMZN, META)
+        else if (price >= 50) score += 5;    // mid-large (AMD, UBER, COIN)
+        // Below $50 gets no bonus — small stocks have to earn their spot via trend + catalyst
+
+        // Market cap boost if fundamentals available
+        var mktCap = snapshot.Fundamentals?.MarketCap;
+        if (mktCap >= 100_000_000_000) score += 10;       // $100B+ mega-cap
+        else if (mktCap >= 10_000_000_000) score += 5;    // $10B+ large-cap
+
+        return score;
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -1783,11 +2075,14 @@ internal class AiExplanationResponse
     public double? PredictedPrice { get; set; }
     public double? PredictedMovePercent { get; set; }
 
-    /// <summary>AI confidence adjustment: -15 to +10. Applied on top of scoring engine confidence.</summary>
+    /// <summary>AI confidence adjustment: -30 to +25. Applied on top of scoring engine confidence.</summary>
     public int? ConfidenceAdjustment { get; set; }
 
-    /// <summary>AI trade flag: "proceed", "caution", or "avoid". Avoid demotes to watch_only.</summary>
+    /// <summary>AI trade flag: "strong_buy", "proceed", "caution", or "avoid". Avoid demotes to watch_only.</summary>
     public string? AiFlag { get; set; }
+
+    /// <summary>AI direction override: null (agree), "bullish", or "bearish". Flips the prediction direction when set.</summary>
+    public string? DirectionOverride { get; set; }
 
     /// <summary>One-line reason for the confidence adjustment or flag.</summary>
     public string? AiAdjustmentReason { get; set; }

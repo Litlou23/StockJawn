@@ -65,11 +65,72 @@ public class TrendEvaluator : ITrendEvaluator
             else if (position <= 0.20) { bear += 2; signals.Add($"Trend: in lower 20% of 52-week range ({position:P0})"); }
         }
 
+        // ── 3-month trend structure (from 65 bars) — heaviest weight ──
+        var tech = context.Snapshot.TechnicalContext;
+        if (tech?.ThreeMonthTrendStructure is string trendStructure)
+        {
+            switch (trendStructure)
+            {
+                case "strong_uptrend":
+                    bull += 10;
+                    signals.Add($"3M Trend: strong uptrend ({tech.ThreeMonthChangePct:+0.0;-0.0}% over 3 months)");
+                    break;
+                case "uptrend":
+                    bull += 6;
+                    signals.Add($"3M Trend: uptrend ({tech.ThreeMonthChangePct:+0.0;-0.0}% over 3 months)");
+                    break;
+                case "sideways":
+                    // No contribution — neutral
+                    signals.Add($"3M Trend: sideways ({tech.ThreeMonthChangePct:+0.0;-0.0}% over 3 months)");
+                    break;
+                case "downtrend":
+                    bear += 6;
+                    signals.Add($"3M Trend: downtrend ({tech.ThreeMonthChangePct:+0.0;-0.0}% over 3 months)");
+                    break;
+                case "strong_downtrend":
+                    bear += 10;
+                    signals.Add($"3M Trend: strong downtrend ({tech.ThreeMonthChangePct:+0.0;-0.0}% over 3 months)");
+                    break;
+            }
+        }
+
+        // Momentum trend — is the move accelerating or fading?
+        if (tech?.MomentumTrend is string momentumTrend)
+        {
+            switch (momentumTrend)
+            {
+                case "accelerating":
+                    bull += 4;
+                    signals.Add($"Momentum: accelerating (1M {tech.OneMonthChangePct:+0.0;-0.0}% vs 3M {tech.ThreeMonthChangePct:+0.0;-0.0}%)");
+                    break;
+                case "decelerating":
+                    // Uptrend losing steam — mild bearish signal
+                    bear += 2;
+                    signals.Add($"Momentum: decelerating (1M {tech.OneMonthChangePct:+0.0;-0.0}% vs 3M {tech.ThreeMonthChangePct:+0.0;-0.0}%)");
+                    break;
+                case "reversing":
+                    bear += 4;
+                    signals.Add($"Momentum: reversing (1M {tech.OneMonthChangePct:+0.0;-0.0}% vs 3M {tech.ThreeMonthChangePct:+0.0;-0.0}%)");
+                    break;
+            }
+        }
+
+        // Price vs SMA50 — medium-term trend anchor (stronger than EMA50 short-term)
+        if (tech?.Sma50 is double sma50 && context.Snapshot.Quote is not null)
+        {
+            var price = context.Snapshot.Quote.Price;
+            var pctAbove = ((price - sma50) / sma50) * 100;
+            if (pctAbove > 5) { bull += 4; signals.Add($"3M: price {pctAbove:F1}% above SMA50 (${price:F2} vs ${sma50:F2})"); }
+            else if (pctAbove > 0) { bull += 2; signals.Add($"3M: price {pctAbove:F1}% above SMA50 (${price:F2} vs ${sma50:F2})"); }
+            else if (pctAbove < -5) { bear += 4; signals.Add($"3M: price {Math.Abs(pctAbove):F1}% below SMA50 (${price:F2} vs ${sma50:F2})"); }
+            else { bear += 2; signals.Add($"3M: price {Math.Abs(pctAbove):F1}% below SMA50 (${price:F2} vs ${sma50:F2})"); }
+        }
+
         return new EvaluatorOutput
         {
             Kind = Kind,
-            BullishContribution = Math.Clamp(bull, 0, 30),
-            BearishContribution = Math.Clamp(bear, 0, 30),
+            BullishContribution = Math.Clamp(bull, 0, 45),
+            BearishContribution = Math.Clamp(bear, 0, 45),
             DebugSignals = signals,
             DebugInformation = new EvaluatorReasoning
             {

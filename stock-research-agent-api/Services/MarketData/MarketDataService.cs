@@ -63,7 +63,7 @@ public class MarketDataService
         };
     }
 
-    public async Task<List<MarketSnapshotBar>> GetRecentBarsAsync(string ticker, int count = 20)
+    public async Task<List<MarketSnapshotBar>> GetRecentBarsAsync(string ticker, int count = 65)
     {
         return await GetCachedAsync<List<MarketSnapshotBar>>($"bars:{ticker}:{count}",
             async () => await _provider.GetRecentBarsAsync(ticker, count)) ?? [];
