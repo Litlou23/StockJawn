@@ -416,6 +416,20 @@ public class PortfolioLifecycleService
                 "[portfolio] Loser blacklist: {Tickers} (lost money in last {Days} days)",
                 string.Join(", ", globalRepeatLoserTickers), globalBlacklistDays);
 
+        // ── Cross-portfolio ticker dedup ──
+        // CAT and FTNT were held in BOTH Broker Paper Trading AND Stock Growth simultaneously.
+        // Double exposure on the same trade doubles the loss when it goes wrong.
+        // Build a global set of all open tickers across ALL challenges.
+        var globalOpenTickers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ch in activeChallenges)
+        {
+            var positions = await _portfolioRepo.GetOpenPositionsAsync(ch.Id);
+            foreach (var p in positions)
+                globalOpenTickers.Add(p.Ticker);
+        }
+        if (globalOpenTickers.Count > 0)
+            _logger.LogInformation("[portfolio] Cross-portfolio open tickers: {Tickers}", string.Join(", ", globalOpenTickers));
+
         foreach (var challenge in activeChallenges)
         {
             // ── Drawdown circuit breaker ──
@@ -632,12 +646,21 @@ public class PortfolioLifecycleService
                     }
                 }
 
-                // Skip tickers we already hold (or just opened this run for broker challenges)
+                // Skip tickers we already hold in THIS challenge (or just opened this run for broker challenges)
                 if (openPositions.Any(p => p.Ticker == c.Ticker)
                     || (brokerTickersOpened?.Contains(c.Ticker) == true))
                 {
                     _logger.LogDebug("[portfolio] Skipping {Ticker} — already held in challenge {Challenge}",
                         c.Ticker, challenge.Name);
+                    continue;
+                }
+
+                // Cross-portfolio dedup: don't open same ticker in multiple portfolios.
+                // CAT/FTNT held in both Broker and Stock Growth = double exposure = double loss.
+                if (globalOpenTickers.Contains(c.Ticker) && !openPositions.Any(p => p.Ticker == c.Ticker))
+                {
+                    _logger.LogInformation("[portfolio] CROSS-PORTFOLIO DEDUP: Skipping {Ticker} — already held in another portfolio",
+                        c.Ticker);
                     continue;
                 }
 
@@ -1089,6 +1112,7 @@ public class PortfolioLifecycleService
                         portfolioPositionsOpened++;
                         opened++;
                         brokerTickersOpened?.Add(c.Ticker);
+                        globalOpenTickers.Add(c.Ticker); // Cross-portfolio dedup: block this ticker in subsequent challenges
                         if (!string.IsNullOrEmpty(c.PredictionId))
                             usedPredictionIds.Add(c.PredictionId);
 

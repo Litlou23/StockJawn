@@ -1013,10 +1013,14 @@ public class PredictionGenerator
         _logger.LogInformation("[prediction] Preloaded shared context: {WeightCount} weights, {LessonCount} lessons",
             sharedContext.Weights.Count, sharedContext.Lessons.Count);
 
-        // Scope dedup to the current profile so challenger predictions don't block champion slots
-        var todayStart = DateTimeOffset.UtcNow.Date;
+        // Scope dedup to the current profile so challenger predictions don't block champion slots.
+        // Multi-day ticker cooldown: don't re-predict the same ticker+timeWindow combo
+        // if one was generated within the cooldown period. Default 2 days.
+        // This kills the "CAT picked 21 times in 14 days" ticker spam problem.
+        var tickerCooldownDays = (int)sharedContext.Weights.GetValueOrDefault("ticker_prediction_cooldown_days", 2.0);
+        var cooldownStart = DateTimeOffset.UtcNow.Date.AddDays(-(tickerCooldownDays - 1));
         var recentPredictions = await _repo.GetPredictionsByDateRangeAsync(
-            todayStart, DateTimeOffset.UtcNow, profileId: sharedContext.ProfileId);
+            cooldownStart, DateTimeOffset.UtcNow, profileId: sharedContext.ProfileId);
         // Also include open predictions from earlier days
         var openPredictions = await _repo.GetOpenPredictionsAsync(profileId: sharedContext.ProfileId);
         var allExisting = recentPredictions
@@ -1866,7 +1870,7 @@ public class PredictionGenerator
         {
             var scalpDampener = configWeights.GetValueOrDefault("scalp_target_dampener", 1.0);
             if (scalpDampener < 1.0 && scalpDampener > 0
-                && (timeWindow is "intraday" or "1_day" or "3_day" or "1_week"))
+                && (timeWindow is "intraday" or "1_day" or "3_day" or "1_week" or "swing"))
             {
                 effectiveScalpDampener = scalpDampener;
                 expectedMove *= effectiveScalpDampener;
