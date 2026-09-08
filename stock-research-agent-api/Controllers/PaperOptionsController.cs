@@ -151,6 +151,53 @@ public class PaperOptionsController : ControllerBase
         return Ok(resp);
     }
 
+    /// <summary>
+    /// GET /api/paper-options/dev/direct-pick — GET wrapper for direct-pick.
+    /// Used by Claude's scheduled morning options task (sandbox can't POST).
+    /// Auth via ?token= query param (same JOB_RUN_SECRET).
+    /// </summary>
+    [HttpGet("dev/direct-pick")]
+    public async Task<IActionResult> DevDirectPick(
+        [FromQuery] string? token,
+        [FromQuery] string? ticker,
+        [FromQuery] string? direction,
+        [FromQuery] string? source,
+        [FromQuery] string? reason,
+        [FromQuery] string? timeframe,
+        [FromQuery] string? conviction,
+        [FromQuery] bool autoSave = true)
+    {
+        var expected = Environment.GetEnvironmentVariable("JOB_RUN_SECRET") ?? "";
+        if (string.IsNullOrEmpty(expected) || token != expected)
+            return Unauthorized(new { error = "Invalid or missing ?token=" });
+
+        var req = new DirectOptionPickRequest
+        {
+            Ticker = ticker ?? "",
+            Direction = direction ?? "",
+            Source = source ?? "claude_morning_pick",
+            Reason = reason ?? "",
+            Timeframe = timeframe ?? "1_week",
+            Conviction = conviction ?? "high",
+            AutoSave = autoSave,
+        };
+
+        if (string.IsNullOrWhiteSpace(req.Ticker))
+            return BadRequest(new { error = "ticker is required" });
+
+        if (req.Direction is not "bullish" and not "bearish")
+            return BadRequest(new { error = "direction must be 'bullish' or 'bearish'" });
+
+        _logger.LogInformation("[paper-options] Dev direct pick: {Ticker} {Direction} by {Source} — {Reason}",
+            req.Ticker, req.Direction, req.Source, req.Reason);
+
+        var resp = await _service.GenerateFromDirectPickAsync(req);
+        if (resp is null)
+            return BadRequest(new { error = "Failed to generate candidates" });
+
+        return Ok(resp);
+    }
+
     /// <summary>GET /api/paper-options/debug — counts, learning stats, provider config.</summary>
     [HttpGet("debug")]
     public async Task<IActionResult> Debug()
