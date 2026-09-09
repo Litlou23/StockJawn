@@ -282,8 +282,8 @@ public class DailyResearchRunService
             // PredictionCandidate is a record with init-only props, so we return a new copy.
             PredictionCandidate DampenSetupTarget(PredictionCandidate c)
             {
-                if (c.TargetPrice is null || c.EntryReferencePrice <= 0 || setupTargetDampener >= 1.0) return c;
-                var entry = c.EntryReferencePrice;
+                if (c.TargetPrice is null || c.EntryReferencePrice is null or <= 0 || setupTargetDampener >= 1.0) return c;
+                var entry = c.EntryReferencePrice.Value;
                 var originalDist = c.TargetPrice.Value - entry;
                 if (Math.Abs(originalDist) < 0.01) return c;
                 var dampenedTarget = Math.Round(entry + originalDist * setupTargetDampener, 2);
