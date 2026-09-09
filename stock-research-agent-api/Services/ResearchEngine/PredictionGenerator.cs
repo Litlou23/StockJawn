@@ -1079,9 +1079,18 @@ public class PredictionGenerator
 
         foreach (var snapshot in rankedSnapshots)
         {
-            // Filter out stocks below min_stock_price before wasting an API call
+            // Filter out stocks below min_stock_price before wasting an API call.
+            // BUG FIX: when Quote.Price is null/0 (market data fetch failed for low-volume junk),
+            // the old check `quotePrice > 0 && quotePrice < min` silently passed them through.
+            // Now: if we have no price data at all, skip the ticker — no price = untradeable.
             var quotePrice = snapshot.Quote?.Price ?? 0;
-            if (quotePrice > 0 && quotePrice < minStockPrice)
+            if (quotePrice <= 0)
+            {
+                _logger.LogInformation("[prediction] Skipping {Ticker}: no quote price available — untradeable",
+                    snapshot.Ticker);
+                continue;
+            }
+            if (quotePrice < minStockPrice)
             {
                 _logger.LogDebug("[prediction] Skipping {Ticker}: price ${Price:F2} < min ${Min:F2}",
                     snapshot.Ticker, quotePrice, minStockPrice);

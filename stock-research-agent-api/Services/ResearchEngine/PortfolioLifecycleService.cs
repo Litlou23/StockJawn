@@ -164,6 +164,10 @@ public class PortfolioLifecycleService
         var skipWeakQuality = weights.GetValueOrDefault("skip_weak_quality", 1.0) >= 1.0;
         var dailyLossLimitPct = weights.GetValueOrDefault("daily_loss_limit_pct", 0.03);
         var dailyLossLimitEnabled = weights.GetValueOrDefault("daily_loss_limit_enabled", 1.0) >= 1.0;
+        // Daily profit target — stop opening new positions once today's realized P&L >= target.
+        // The "$5/day" rule: once you've banked $5 today, protect the win — don't give it back.
+        var dailyProfitTarget = weights.GetValueOrDefault("daily_profit_target", 0); // 0 = disabled
+        var dailyProfitTargetEnabled = dailyProfitTarget > 0;
         var maxSpreadPct = weights.GetValueOrDefault("max_spread_pct", 0.5);
         var roundTripCostPct = weights.GetValueOrDefault("round_trip_cost_pct", 0.15);
         var minBearishConfidence = (int)weights.GetValueOrDefault("min_bearish_confidence", 55);
@@ -471,6 +475,30 @@ public class PortfolioLifecycleService
                         "(limit ${Limit:F2} = {Pct:P0} of ${Balance:F2}). No new trades until tomorrow.",
                         challenge.Name, Math.Abs(todaysClosedLosses), dailyLossLimit,
                         dailyLossLimitPct, challenge.CurrentBalance);
+                    continue;
+                }
+            }
+
+            // ── Daily profit target — stop trading once you've hit the daily goal ──
+            // Mirror of daily_loss_limit: if today's realized P&L >= daily_profit_target,
+            // don't open new positions. You hit $5 today — protect the win, don't give it back.
+            // Only applies to broker challenges (paper can keep experimenting).
+            if (dailyProfitTargetEnabled
+                && challenge.TradingMode is TradingMode.broker_paper or TradingMode.live)
+            {
+                var todayStart = DateTime.UtcNow.Date;
+                // Reuse closedToday if already fetched by loss limit, otherwise fetch
+                var closedForProfit = await _portfolioRepo.GetClosedPositionsAsync(challenge.Id, limit: 100);
+                var todaysRealizedPnl = closedForProfit
+                    .Where(p => p.ExitDate.HasValue && p.ExitDate.Value.UtcDateTime.Date == todayStart)
+                    .Sum(p => p.ProfitLoss ?? 0);
+
+                if (todaysRealizedPnl >= dailyProfitTarget)
+                {
+                    _logger.LogInformation(
+                        "[portfolio] DAILY PROFIT TARGET: challenge {Name} banked ${Profit:F2} today " +
+                        "(target ${Target:F2}). Goal hit — no new trades until tomorrow. Protect the win.",
+                        challenge.Name, todaysRealizedPnl, dailyProfitTarget);
                     continue;
                 }
             }
@@ -1561,6 +1589,13 @@ public class PortfolioLifecycleService
         var partialTpEnabled = weights.GetValueOrDefault("partial_tp_enabled", 1.0) >= 1.0;
         var partialTpFraction = Math.Clamp(weights.GetValueOrDefault("partial_tp_fraction", 0.5), 0.1, 0.9);
 
+        // Dollar-based profit target — "$5/day" rule.
+        // Close any broker position that's up >= this dollar amount.
+        // PDT-safe: only fires on positions held overnight (can't close same-day).
+        // 0 = disabled (default behavior — percentage-based TP only).
+        var minDollarProfit = weights.GetValueOrDefault("min_position_dollar_profit", 0);
+        var dollarProfitBrokerOnly = weights.GetValueOrDefault("dollar_profit_broker_only", 1.0) >= 1.0;
+
         // AI exit advisor: consult AI before time-stop decisions
         var aiExitEnabled = weights.GetValueOrDefault("ai_exit_enabled", 1.0) >= 1.0;
 
@@ -1855,6 +1890,33 @@ public class PortfolioLifecycleService
                     result.ClosedTickers.Add(pos.Ticker);
                     _logger.LogInformation("[risk] {Reason}", tgtReason);
                     continue;
+                }
+
+                // ── Dollar-profit take-profit — the "$5/day" rule ──
+                // A modest, mechanical profit grab. If the position is up $X in
+                // dollar terms, close it. Designed for PDT-constrained accounts
+                // where the goal is consistent small wins, not home runs.
+                // Only applies to broker positions (paper can experiment freely).
+                // Must be held overnight (>= 20h) to avoid PDT violations.
+                if (minDollarProfit > 0
+                    && (!dollarProfitBrokerOnly || isBrokerChallenge)
+                    && !pos.PartialProfitTaken)
+                {
+                    var positionAgeHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+                    var dollarPnl = (currentPrice - pos.EntryPrice) * pos.Quantity
+                        * (pos.AssetType == PositionAssetType.option ? 100 : 1);
+
+                    if (dollarPnl >= minDollarProfit && positionAgeHours >= 20) // overnight hold minimum
+                    {
+                        var dollarReason = $"DOLLAR-PROFIT: {pos.Ticker} up ${dollarPnl:F2} (>= ${minDollarProfit:F2} target). " +
+                                           $"Entry ${pos.EntryPrice:F2} → ${currentPrice:F2}, {pos.Quantity:G} shares, " +
+                                           $"held {positionAgeHours:F0}h. Goal: consistent small wins.";
+                        await CloseWithReason(pos, currentPrice, dollarReason);
+                        result.TakeProfitClosed++;
+                        result.ClosedTickers.Add(pos.Ticker);
+                        _logger.LogInformation("[risk] {Reason}", dollarReason);
+                        continue;
+                    }
                 }
 
                 // ── Take-profit check (day/swing only) ──

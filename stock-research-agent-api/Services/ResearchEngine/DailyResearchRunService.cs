@@ -250,6 +250,57 @@ public class DailyResearchRunService
                 totalSupersessions.AddRange(pendingSupersessions);
             }
 
+            // ── Setup scanner quality gates ──
+            // Pattern scanners (EMA Pullback, VWAP Reclaim, etc.) previously bypassed ALL
+            // quality gates: min_stock_price, ticker cooldown, and dedup. This caused the
+            // same stale tickers (CAT, FTNT, RLX, LEAT) to be picked every single day
+            // because chart patterns don't change day-to-day.
+            var setupMinStockPrice = 10.0;
+            var setupCooldownDays = 2;
+            var setupTargetDampener = 0.3; // Same as scalp_target_dampener — cap chart-based targets
+            if (champion is not null)
+            {
+                var championWeights = await _profileRepo.GetProfileWeightsAsync(champion.Id);
+                setupMinStockPrice = championWeights.GetValueOrDefault("min_stock_price", 10.0);
+                setupCooldownDays = (int)championWeights.GetValueOrDefault("ticker_prediction_cooldown_days", 2.0);
+                setupTargetDampener = championWeights.GetValueOrDefault("scalp_target_dampener", 0.3);
+            }
+            var setupCooldownStart = DateTimeOffset.UtcNow.Date.AddDays(-(setupCooldownDays - 1));
+            var recentPreds = await _repo.GetPredictionsByDateRangeAsync(setupCooldownStart, DateTimeOffset.UtcNow);
+            var recentSetupTickers = new HashSet<string>(
+                recentPreds.Select(p => p.Ticker), StringComparer.OrdinalIgnoreCase);
+            // Also include tickers already picked in THIS run by profile-based predictions
+            var setupTickersSeen = new HashSet<string>(
+                allPredictions.Select(p => p.Ticker), StringComparer.OrdinalIgnoreCase);
+            _logger.LogInformation(
+                "[research-engine] Setup scanner gates: min_price=${MinPrice}, cooldown={Cooldown}d, dampener={Dampener}, {RecentCount} recent tickers, {SeenCount} already predicted this run",
+                setupMinStockPrice, setupCooldownDays, setupTargetDampener, recentSetupTickers.Count, setupTickersSeen.Count);
+
+            // Helper: dampen setup scanner targets so they match realistic move distances.
+            // Scanners use swing highs / measured moves which are 3-4x beyond actual moves.
+            // Apply the same dampener as regular predictions: target = entry + (original_target - entry) × dampener.
+            // PredictionCandidate is a record with init-only props, so we return a new copy.
+            PredictionCandidate DampenSetupTarget(PredictionCandidate c)
+            {
+                if (c.TargetPrice is null || c.EntryReferencePrice <= 0 || setupTargetDampener >= 1.0) return c;
+                var entry = c.EntryReferencePrice;
+                var originalDist = c.TargetPrice.Value - entry;
+                if (Math.Abs(originalDist) < 0.01) return c;
+                var dampenedTarget = Math.Round(entry + originalDist * setupTargetDampener, 2);
+                var newRR = c.RiskRewardRatio;
+                if (c.StopPrice is not null)
+                {
+                    var risk = Math.Abs(entry - c.StopPrice.Value);
+                    var reward = Math.Abs(dampenedTarget - entry);
+                    newRR = risk > 0 ? Math.Round(reward / risk, 2) : 0;
+                }
+                _logger.LogDebug("[setup-gate] {Ticker} target dampened: ${Original:F2} → ${Dampened:F2} ({Pct:F1}% → {DPct:F1}%), R:R {OldRR:F1} → {NewRR:F1}",
+                    c.Ticker, c.TargetPrice.Value, dampenedTarget,
+                    originalDist / entry * 100, originalDist * setupTargetDampener / entry * 100,
+                    c.RiskRewardRatio, newRR);
+                return c with { TargetPrice = dampenedTarget, RiskRewardRatio = newRR };
+            }
+
             // 4. Scan for EMA Pullback setups (pattern-based, no profile)
             await _repo.LogProgressAsync(run.Id, "ema_pullback_scan", "Scanning for EMA Pullback setups...");
             var emaPullbackCount = 0;
@@ -260,8 +311,18 @@ public class DailyResearchRunService
                     var setup = await _setupEngine.ScanForEmaPullbackAsync(snapshot.Ticker, snapshot, run.Id);
                     if (setup is not null)
                     {
-                        allPredictions.Add(setup);
-                        emaPullbackCount++;
+                        var price = snapshot.Quote?.Price ?? 0;
+                        if (price <= 0 || price < setupMinStockPrice)
+                            _logger.LogDebug("[setup-gate] EMA Pullback skipping {Ticker}: price ${Price:F2} below min ${Min:F2}", snapshot.Ticker, price, setupMinStockPrice);
+                        else if (recentSetupTickers.Contains(snapshot.Ticker) || setupTickersSeen.Contains(snapshot.Ticker))
+                            _logger.LogDebug("[setup-gate] EMA Pullback skipping {Ticker}: cooldown/dedup", snapshot.Ticker);
+                        else
+                        {
+                            setup = DampenSetupTarget(setup);
+                            allPredictions.Add(setup);
+                            setupTickersSeen.Add(snapshot.Ticker);
+                            emaPullbackCount++;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -282,8 +343,18 @@ public class DailyResearchRunService
                     var setup = await _setupEngine.ScanForVwapReclaimAsync(snapshot.Ticker, snapshot, run.Id);
                     if (setup is not null)
                     {
-                        allPredictions.Add(setup);
-                        vwapReclaimCount++;
+                        var price = snapshot.Quote?.Price ?? 0;
+                        if (price <= 0 || price < setupMinStockPrice)
+                            _logger.LogDebug("[setup-gate] VWAP Reclaim skipping {Ticker}: price ${Price:F2} below min ${Min:F2}", snapshot.Ticker, price, setupMinStockPrice);
+                        else if (recentSetupTickers.Contains(snapshot.Ticker) || setupTickersSeen.Contains(snapshot.Ticker))
+                            _logger.LogDebug("[setup-gate] VWAP Reclaim skipping {Ticker}: cooldown/dedup", snapshot.Ticker);
+                        else
+                        {
+                            setup = DampenSetupTarget(setup);
+                            allPredictions.Add(setup);
+                            setupTickersSeen.Add(snapshot.Ticker);
+                            vwapReclaimCount++;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -304,8 +375,18 @@ public class DailyResearchRunService
                     var setup = await _setupEngine.ScanForBullFlagAsync(snapshot.Ticker, snapshot, run.Id);
                     if (setup is not null)
                     {
-                        allPredictions.Add(setup);
-                        bullFlagCount++;
+                        var price = snapshot.Quote?.Price ?? 0;
+                        if (price <= 0 || price < setupMinStockPrice)
+                            _logger.LogDebug("[setup-gate] Bull Flag skipping {Ticker}: price ${Price:F2} below min ${Min:F2}", snapshot.Ticker, price, setupMinStockPrice);
+                        else if (recentSetupTickers.Contains(snapshot.Ticker) || setupTickersSeen.Contains(snapshot.Ticker))
+                            _logger.LogDebug("[setup-gate] Bull Flag skipping {Ticker}: cooldown/dedup", snapshot.Ticker);
+                        else
+                        {
+                            setup = DampenSetupTarget(setup);
+                            allPredictions.Add(setup);
+                            setupTickersSeen.Add(snapshot.Ticker);
+                            bullFlagCount++;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -326,8 +407,18 @@ public class DailyResearchRunService
                     var setup = await _setupEngine.ScanForRangeBreakoutAsync(snapshot.Ticker, snapshot, run.Id);
                     if (setup is not null)
                     {
-                        allPredictions.Add(setup);
-                        rangeBreakoutCount++;
+                        var price = snapshot.Quote?.Price ?? 0;
+                        if (price <= 0 || price < setupMinStockPrice)
+                            _logger.LogDebug("[setup-gate] Range Breakout skipping {Ticker}: price ${Price:F2} below min ${Min:F2}", snapshot.Ticker, price, setupMinStockPrice);
+                        else if (recentSetupTickers.Contains(snapshot.Ticker) || setupTickersSeen.Contains(snapshot.Ticker))
+                            _logger.LogDebug("[setup-gate] Range Breakout skipping {Ticker}: cooldown/dedup", snapshot.Ticker);
+                        else
+                        {
+                            setup = DampenSetupTarget(setup);
+                            allPredictions.Add(setup);
+                            setupTickersSeen.Add(snapshot.Ticker);
+                            rangeBreakoutCount++;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -348,8 +439,18 @@ public class DailyResearchRunService
                     var setup = await _setupEngine.ScanForVolumeShelfBounceAsync(snapshot.Ticker, snapshot, run.Id);
                     if (setup is not null)
                     {
-                        allPredictions.Add(setup);
-                        volumeShelfCount++;
+                        var price = snapshot.Quote?.Price ?? 0;
+                        if (price <= 0 || price < setupMinStockPrice)
+                            _logger.LogDebug("[setup-gate] Volume Shelf Bounce skipping {Ticker}: price ${Price:F2} below min ${Min:F2}", snapshot.Ticker, price, setupMinStockPrice);
+                        else if (recentSetupTickers.Contains(snapshot.Ticker) || setupTickersSeen.Contains(snapshot.Ticker))
+                            _logger.LogDebug("[setup-gate] Volume Shelf Bounce skipping {Ticker}: cooldown/dedup", snapshot.Ticker);
+                        else
+                        {
+                            setup = DampenSetupTarget(setup);
+                            allPredictions.Add(setup);
+                            setupTickersSeen.Add(snapshot.Ticker);
+                            volumeShelfCount++;
+                        }
                     }
                 }
                 catch (Exception ex)
