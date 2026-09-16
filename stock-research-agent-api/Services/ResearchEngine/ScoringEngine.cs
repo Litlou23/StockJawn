@@ -197,7 +197,8 @@ public class ScoringEngine : IScoringEngine
             marketContextScore: market.BullishContribution - market.BearishContribution,
             dataQualityFactor: confidence.DataQualityFactor,
             confidenceCap: confidence.ConfidenceCap,
-            weights: context.LearningData.Weights);
+            weights: context.LearningData.Weights,
+            winningDirection: winningDirection);
 
         return new ScoringResult
         {
@@ -285,23 +286,33 @@ public class ScoringEngine : IScoringEngine
 
         if (riskReward is double rr and > 0)
         {
-            if (rr < 0.8)
+            // Softened R:R penalties — the system's own scalp_target_dampener often
+            // creates R:R in the 0.7-1.0 range, so hard-capping at 35 for R:R < 0.8
+            // was self-sabotage. Only truly terrible R:R gets a hard cap now.
+            if (rr < 0.5)
             {
                 confidence = Math.Min(confidence, 35);
-                capReason = $"R/R {rr:F2} < 0.8 — poor risk/reward";
+                capReason = $"R/R {rr:F2} < 0.5 — very poor risk/reward";
                 reasons.Add($"Confidence capped at 35 — risk/reward {rr:F2} unacceptable");
             }
-            else if (rr < 1.2 && confidence > 55)
+            else if (rr < 0.8)
             {
-                confidence = 55;
-                capReason = $"R/R {rr:F2} < 1.2";
-                reasons.Add($"Confidence capped at 55 — risk/reward {rr:F2} below 1.2");
+                // Mild penalty instead of hard cap — dampener-created R:R lands here
+                var penalty = (int)Math.Round((0.8 - rr) * 20); // 0-6 point penalty
+                confidence = Math.Max(confidence - penalty, 25);
+                reasons.Add($"R/R penalty -{penalty}: risk/reward {rr:F2} below 0.8");
             }
-            else if (rr < 1.5 && confidence > 70)
+            else if (rr < 1.2 && confidence > 60)
             {
-                confidence = 70;
+                confidence = 60;
+                capReason = $"R/R {rr:F2} < 1.2";
+                reasons.Add($"Confidence capped at 60 — risk/reward {rr:F2} below 1.2");
+            }
+            else if (rr < 1.5 && confidence > 75)
+            {
+                confidence = 75;
                 capReason = $"R/R {rr:F2} < 1.5";
-                reasons.Add($"Confidence capped at 70 — risk/reward {rr:F2} mediocre");
+                reasons.Add($"Confidence capped at 75 — risk/reward {rr:F2} mediocre");
             }
         }
 
@@ -314,7 +325,8 @@ public class ScoringEngine : IScoringEngine
             catalystScore: catalystNet,
             marketContextScore: marketNet,
             dataQualityFactor: breakdown.DataQualityFactor,
-            confidenceCap: capReason);
+            confidenceCap: capReason,
+            winningDirection: initial.WinningDirection);
         reasons.AddRange(tierReasons.Where(r => !reasons.Contains(r)));
 
         return initial with
@@ -373,10 +385,21 @@ public class ScoringEngine : IScoringEngine
         }
         else if (ev < -0.5 && setupPerformance.SampleSize >= 8)
         {
-            var penalty = 15;
-            confidence = Math.Max(confidence - penalty, 15);
-            capReason = $"Negative EV setup ({ev:F2}%)";
-            reasons.Add($"Setup penalty -{penalty}: negative EV={ev:F2}%, WR={wr * 100:F0}%");
+            // Only apply negative EV penalty if the WinRate is real data, not the 50% default.
+            // Default WR=50% with default AvgWin=AvgLoss=5% produces EV=0, but any slight
+            // imbalance in actual win/loss sizes makes EV negative even though direction
+            // accuracy may be very high. Skip penalty when WR is exactly the default.
+            if (Math.Abs(wr - 0.50) > 0.001)
+            {
+                var penalty = 15;
+                confidence = Math.Max(confidence - penalty, 15);
+                capReason = $"Negative EV setup ({ev:F2}%)";
+                reasons.Add($"Setup penalty -{penalty}: negative EV={ev:F2}%, WR={wr * 100:F0}%");
+            }
+            else
+            {
+                reasons.Add($"Skipped negative EV penalty — WR={wr * 100:F0}% is default, not real data");
+            }
         }
 
         var catalystNet = breakdown.CatalystBullish - breakdown.CatalystBearish;
@@ -386,7 +409,8 @@ public class ScoringEngine : IScoringEngine
             catalystScore: catalystNet,
             marketContextScore: marketNet,
             dataQualityFactor: breakdown.DataQualityFactor,
-            confidenceCap: capReason);
+            confidenceCap: capReason,
+            winningDirection: initial.WinningDirection);
         reasons.AddRange(tierReasons.Where(r => !reasons.Contains(r)));
 
         return initial with
@@ -455,7 +479,8 @@ public class ScoringEngine : IScoringEngine
             catalystScore: catalystNet,
             marketContextScore: marketNet,
             dataQualityFactor: breakdown.DataQualityFactor,
-            confidenceCap: capReason);
+            confidenceCap: capReason,
+            winningDirection: initial.WinningDirection);
         reasons.AddRange(tierReasons.Where(r => !reasons.Contains(r)));
 
         var adjusted = initial with
@@ -481,7 +506,8 @@ public class ScoringEngine : IScoringEngine
         double marketContextScore,
         double dataQualityFactor,
         string? confidenceCap,
-        IReadOnlyDictionary<string, double>? weights = null)
+        IReadOnlyDictionary<string, double>? weights = null,
+        string? winningDirection = null)
     {
         var reasons = new List<string>();
 
@@ -510,24 +536,42 @@ public class ScoringEngine : IScoringEngine
 
         if (riskReward is double rr and > 0)
         {
-            if (rr < 1.5 && (tier == ActionabilityTier.strong || tier == ActionabilityTier.strongest))
+            // Only downgrade tier for truly poor R:R (< 1.0), not 1.5.
+            // The system's dampener creates R:R in 0.7-1.2 range regularly,
+            // so a 1.5 threshold was penalizing nearly every prediction.
+            if (rr < 1.0 && (tier == ActionabilityTier.strong || tier == ActionabilityTier.strongest))
             {
                 if (Math.Abs(catalystScore) < 20)
                 {
                     tier = ActionabilityTier.actionable;
-                    reasons.Add($"Downgraded to actionable — R/R {rr:F2} < 1.5 and catalyst {catalystScore:F0} < 20");
+                    reasons.Add($"Downgraded to actionable — R/R {rr:F2} < 1.0 and catalyst {catalystScore:F0} < 20");
                 }
                 else
                 {
-                    reasons.Add($"Strong tier held despite R/R {rr:F2} < 1.5 — catalyst {catalystScore:F0} very strong");
+                    reasons.Add($"Strong tier held despite R/R {rr:F2} < 1.0 — catalyst {catalystScore:F0} very strong");
                 }
             }
         }
 
-        if (marketContextScore < -8 && tier >= ActionabilityTier.actionable)
+        // Only downgrade when prediction direction ACTUALLY conflicts with market context.
+        // Bearish prediction + negative market = AGREEMENT (no penalty).
+        // Bullish prediction + negative market = CONFLICT (downgrade).
+        bool marketActuallyConflicts = winningDirection switch
+        {
+            "bullish" => marketContextScore < -8,   // bullish pred in bearish market
+            "bearish" => marketContextScore > 8,     // bearish pred in bullish market
+            _ => Math.Abs(marketContextScore) > 8,   // unknown direction: fall back to magnitude
+        };
+
+        if (marketActuallyConflicts && tier >= ActionabilityTier.actionable)
         {
             tier = ActionabilityTier.watch_only;
-            reasons.Add($"Downgraded to watch_only — market context {marketContextScore:F0} strongly conflicts");
+            reasons.Add($"Downgraded to watch_only — market context {marketContextScore:F0} conflicts with {winningDirection ?? "unknown"} prediction");
+        }
+        else if (Math.Abs(marketContextScore) > 8 && !marketActuallyConflicts && tier <= ActionabilityTier.actionable)
+        {
+            // Market context AGREES with prediction direction — mild boost
+            reasons.Add($"Market context {marketContextScore:F0} agrees with {winningDirection} prediction — no penalty");
         }
 
         if (dataQualityFactor < 0.85 && (tier == ActionabilityTier.strong || tier == ActionabilityTier.strongest))

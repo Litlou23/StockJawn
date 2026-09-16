@@ -1596,6 +1596,11 @@ public class PortfolioLifecycleService
         var minDollarProfit = weights.GetValueOrDefault("min_position_dollar_profit", 0);
         var dollarProfitBrokerOnly = weights.GetValueOrDefault("dollar_profit_broker_only", 1.0) >= 1.0;
 
+        // PDT protection: minimum hours before ANY exit (stop-loss, trailing stop)
+        // can fire. Prevents same-day exits which count as day trades.
+        // Default 20h = must hold overnight. DB-configurable via scoring_weight_overrides.
+        var minHoldBeforeExit = weights.GetValueOrDefault("min_hold_hours_before_exit", 20);
+
         // AI exit advisor: consult AI before time-stop decisions
         var aiExitEnabled = weights.GetValueOrDefault("ai_exit_enabled", 1.0) >= 1.0;
 
@@ -1822,6 +1827,19 @@ public class PortfolioLifecycleService
                 var candidateStopHit = false;
                 if (candidate?.StopPrice is > 0 && currentPrice <= candidate.StopPrice.Value)
                     candidateStopHit = true;
+
+                // ── PDT protection: no exits before minimum hold period ──
+                // We are NOT day trading. Exiting the same day as entry counts as
+                // a day trade under PDT rules. Skip ALL exit checks until the
+                // position has been held long enough (default 20h = overnight).
+                var posAgeHours = (DateTimeOffset.UtcNow - pos.EntryDate).TotalHours;
+                if (posAgeHours < minHoldBeforeExit)
+                {
+                    // Update high-water mark even while holding — we still track peaks
+                    if (currentPrice > hwm)
+                        await _portfolioRepo.UpdateHighWaterMarkAsync(pos.Id, currentPrice);
+                    continue; // too young — PDT protection, skip all exit checks
+                }
 
                 // ── Stop-loss check — AI-gated for broker challenges ──
                 // For broker/live: ask AI before closing. AI can override if this is
