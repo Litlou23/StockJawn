@@ -556,11 +556,12 @@ public class ScoringEngine : IScoringEngine
         // Only downgrade when prediction direction ACTUALLY conflicts with market context.
         // Bearish prediction + negative market = AGREEMENT (no penalty).
         // Bullish prediction + negative market = CONFLICT (downgrade).
+        var marketConflictThreshold = w.GetValueOrDefault("market_conflict_threshold", 15.0);
         bool marketActuallyConflicts = winningDirection switch
         {
-            "bullish" => marketContextScore < -8,   // bullish pred in bearish market
-            "bearish" => marketContextScore > 8,     // bearish pred in bullish market
-            _ => Math.Abs(marketContextScore) > 8,   // unknown direction: fall back to magnitude
+            "bullish" => marketContextScore < -marketConflictThreshold,   // bullish pred in bearish market
+            "bearish" => marketContextScore > marketConflictThreshold,     // bearish pred in bullish market
+            _ => Math.Abs(marketContextScore) > marketConflictThreshold,   // unknown direction: fall back to magnitude
         };
 
         if (marketActuallyConflicts && tier >= ActionabilityTier.actionable)
@@ -568,7 +569,7 @@ public class ScoringEngine : IScoringEngine
             tier = ActionabilityTier.watch_only;
             reasons.Add($"Downgraded to watch_only — market context {marketContextScore:F0} conflicts with {winningDirection ?? "unknown"} prediction");
         }
-        else if (Math.Abs(marketContextScore) > 8 && !marketActuallyConflicts && tier <= ActionabilityTier.actionable)
+        else if (Math.Abs(marketContextScore) > marketConflictThreshold && !marketActuallyConflicts && tier <= ActionabilityTier.actionable)
         {
             // Market context AGREES with prediction direction — mild boost
             reasons.Add($"Market context {marketContextScore:F0} agrees with {winningDirection} prediction — no penalty");
