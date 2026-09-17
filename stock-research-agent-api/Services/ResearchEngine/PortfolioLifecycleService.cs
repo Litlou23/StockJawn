@@ -605,7 +605,15 @@ public class PortfolioLifecycleService
                 if (pastCutoff) break; // No new entries after cutoff — exit loop entirely
 
                 // ── Filter candidates by challenge PortfolioMode ──
-                var (allowed, assetType) = FilterByPortfolioMode(challenge, c);
+                // When the candidate has an explicit AssetTypeOverride (e.g. from force-option-trade),
+                // use it directly — but only for portfolios that support the overridden asset type.
+                // An option override applies to options_only, mixed, and broker modes (broker_paper/live).
+                // Stock-only and swing_trading paper portfolios still use the normal filter.
+                var (allowed, assetType) = c.AssetTypeOverride is not null
+                    && (challenge.PortfolioMode is PortfolioMode.options_only or PortfolioMode.mixed
+                        || challenge.TradingMode is TradingMode.broker_paper or TradingMode.live)
+                    ? (true, c.AssetTypeOverride.Value)
+                    : FilterByPortfolioMode(challenge, c);
                 if (!allowed)
                 {
                     _logger.LogDebug("[portfolio] Skipping {Ticker} for challenge {Challenge} — mode {Mode} rejects this candidate (options={QualifiesForOptions}, tf={Timeframe})",
@@ -759,6 +767,10 @@ public class PortfolioLifecycleService
                 // since the prediction was generated, we'd be buying high (or selling low).
                 // Compare current price to the prediction's entry price snapshot.
                 // Also captures the live price for broker limit orders (see below).
+                // NOTE: Skip chase/slippage price comparisons for option overrides — EntryPrice
+                // is the option premium, not the stock price, so comparing to live stock price
+                // would always produce absurd percentages (6000%+).
+                var isOptionOverride = assetType == PositionAssetType.option && c.AssetTypeOverride is not null;
                 double? livePrice = null;
                 if (maxChasePercent > 0 && c.EntryPrice is > 0)
                 {
@@ -815,20 +827,23 @@ public class PortfolioLifecycleService
                                 }
                             }
 
-                            var movePercent = (currentQuote.Price - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
-                            var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
-
-                            // Bullish + stock already up > threshold = chasing
-                            // Bearish + stock already down > threshold = chasing
-                            var isChasing = (isBullish && movePercent >= maxChasePercent)
-                                         || (!isBullish && movePercent <= -maxChasePercent);
-
-                            if (isChasing)
+                            if (!isOptionOverride)
                             {
-                                _logger.LogInformation(
-                                    "[portfolio] Skipping {Ticker} — already moved {Move:F1}% in predicted direction (chase limit {Limit}%)",
-                                    c.Ticker, Math.Abs(movePercent), maxChasePercent);
-                                continue;
+                                var movePercent = (currentQuote.Price - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
+                                var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
+
+                                // Bullish + stock already up > threshold = chasing
+                                // Bearish + stock already down > threshold = chasing
+                                var isChasing = (isBullish && movePercent >= maxChasePercent)
+                                             || (!isBullish && movePercent <= -maxChasePercent);
+
+                                if (isChasing)
+                                {
+                                    _logger.LogInformation(
+                                        "[portfolio] Skipping {Ticker} — already moved {Move:F1}% in predicted direction (chase limit {Limit}%)",
+                                        c.Ticker, Math.Abs(movePercent), maxChasePercent);
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -896,7 +911,8 @@ public class PortfolioLifecycleService
 
                     // ── Entry slippage gate — reject if live price drifted too far ──
                     // If the stock moved >1.5% from planned entry, the setup's math is stale.
-                    if (livePrice is not null && c.EntryPrice is > 0)
+                    // Skip for option overrides: EntryPrice is option premium, livePrice is stock price.
+                    if (!isOptionOverride && livePrice is not null && c.EntryPrice is > 0)
                     {
                         var slippagePct = Math.Abs(livePrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
                         if (slippagePct > maxEntrySlippagePct)
@@ -911,8 +927,9 @@ public class PortfolioLifecycleService
                     // ── Broker quality tier gate — don't send weak trades to real money ──
                     // Data: 100% of broker stop-loss losers were "medium" quality.
                     // brokerMinQuality: 0=any, 1=medium+ (filter weak), 2=strong+ (filter medium too)
+                    // Skip for option overrides — Claude already approved the trade.
                     var isBrokerMode = challenge.TradingMode is TradingMode.broker_paper or TradingMode.live;
-                    if (isBrokerMode)
+                    if (isBrokerMode && !isOptionOverride)
                     {
                         var tierRank = c.QualityTier switch
                         {
@@ -937,9 +954,10 @@ public class PortfolioLifecycleService
                     // premium. Look up the linked PaperCandidateEnhanced to get the actual
                     // contract mid-price from MarketData.app.
                     var entryPrice = c.EntryPrice!.Value;
-                    var optionSymbol = (string?)null;
-                    if (assetType == PositionAssetType.option && !string.IsNullOrEmpty(c.Id))
+                    var optionSymbol = c.OptionSymbol; // Pre-populated by force-option-trade, null otherwise
+                    if (assetType == PositionAssetType.option && string.IsNullOrEmpty(optionSymbol) && !string.IsNullOrEmpty(c.Id))
                     {
+                        // Normal flow: look up the linked option candidate from DB
                         var optionCandidate = await _optionsRepo.GetByStockCandidateIdAsync(c.Id);
                         if (optionCandidate is not null && optionCandidate.EntryMid > 0)
                         {
@@ -956,6 +974,13 @@ public class PortfolioLifecycleService
                                 c.Id, c.Ticker);
                             continue; // Don't open option positions without real premium data
                         }
+                    }
+                    else if (assetType == PositionAssetType.option && !string.IsNullOrEmpty(optionSymbol))
+                    {
+                        // Force-option-trade path: EntryPrice is already the option premium
+                        _logger.LogInformation(
+                            "[portfolio] Using pre-populated option for {Ticker}: ${Premium:F2} ({Symbol})",
+                            c.Ticker, entryPrice, optionSymbol);
                     }
 
                     // ── Look up prediction's ATR% for volatility-adjusted sizing ──
@@ -2320,6 +2345,15 @@ public class PortfolioLifecycleService
     /// </summary>
     public async Task<int> AfternoonOpportunityScanAsync()
     {
+        // Claude approval gate — if enabled, afternoon scan also defers to Claude
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var weights = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        if (weights.GetValueOrDefault("claude_approval_gate", 0.0) >= 1.0)
+        {
+            _logger.LogInformation("[afternoon-scan] Claude approval gate ENABLED — skipping auto-open");
+            return 0;
+        }
+
         var openCandidates = await _candidateRepo.GetOpenCandidatesAsync();
         if (openCandidates.Count == 0)
         {

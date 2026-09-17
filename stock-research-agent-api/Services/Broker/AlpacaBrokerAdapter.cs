@@ -104,6 +104,75 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
     public Task<BrokerOrderResult> PlaceStopOrderAsync(BrokerOrderRequest request, double stopPrice)
         => PlaceOrderAsync(request, "stop", stopPrice);
 
+    public async Task<BrokerOrderResult> PlaceOptionOrderAsync(BrokerOptionOrderRequest request)
+    {
+        EnsureConfigured();
+
+        // Alpaca options use the same /v2/orders endpoint with the OCC symbol
+        var body = new JsonObject
+        {
+            ["symbol"] = request.OptionSymbol,
+            ["qty"] = request.Contracts.ToString(),
+            ["side"] = request.Side == BrokerOrderSide.buy ? "buy" : "sell",
+            ["type"] = "limit", // Always limit for options — market orders get terrible fills
+            ["time_in_force"] = request.TimeInForce.ToString(),
+            ["limit_price"] = request.LimitPrice.ToString("F2"),
+        };
+
+        if (!string.IsNullOrEmpty(request.ClientOrderId))
+            body["client_order_id"] = request.ClientOrderId;
+
+        _logger.LogInformation(
+            "[alpaca] Placing OPTION order: {Side} {Contracts}x {Symbol} @ ${Limit} (underlying={Ticker})",
+            request.Side, request.Contracts, request.OptionSymbol, request.LimitPrice, request.Ticker);
+
+        try
+        {
+            var content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+            var response = await _http.PostAsync("/v2/orders", content);
+            var responseBody = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[alpaca] Option order rejected: {Status} — {Body}",
+                    response.StatusCode, responseBody);
+                return new BrokerOrderResult
+                {
+                    Success = false,
+                    ErrorMessage = $"Alpaca {response.StatusCode}: {responseBody}",
+                    Status = BrokerOrderState.rejected,
+                };
+            }
+
+            var json = JsonNode.Parse(responseBody);
+            var orderId = json?["id"]?.ToString() ?? "";
+            var clientOrderId = json?["client_order_id"]?.ToString();
+            var status = MapOrderStatus(json?["status"]?.ToString());
+
+            _logger.LogInformation(
+                "[alpaca] Option order placed: id={OrderId}, status={Status}, symbol={Symbol}",
+                orderId, status, request.OptionSymbol);
+
+            return new BrokerOrderResult
+            {
+                Success = true,
+                BrokerOrderId = orderId,
+                ClientOrderId = clientOrderId,
+                Status = status,
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[alpaca] Option order failed for {Symbol}", request.OptionSymbol);
+            return new BrokerOrderResult
+            {
+                Success = false,
+                ErrorMessage = ex.Message,
+                Status = BrokerOrderState.unknown,
+            };
+        }
+    }
+
     public async Task<BrokerOrderResult> ReplaceStopOrderAsync(string existingOrderId, BrokerOrderRequest request, double newStopPrice)
     {
         EnsureConfigured();

@@ -6,6 +6,7 @@ using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.ResearchEngine;
+using StockResearchAgent.Api.Services.OptionsData;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Controllers;
@@ -999,6 +1000,124 @@ public class PortfolioChallengeController : ControllerBase
             startedAt = DateTimeOffset.UtcNow,
         });
     }
+
+    /// <summary>
+    /// POST /api/portfolio/force-option-trade — open an option position for a given ticker + direction.
+    /// Uses the existing PaperOptionsService to find the best contract, then routes through the
+    /// standard portfolio pipeline to place the actual broker order.
+    ///
+    /// Body: { "ticker": "AAPL", "direction": "bearish", "reason": "Fed rate hike puts pressure" }
+    /// Protected by JOB_SECRET header.
+    /// Fire-and-forget: returns 202 immediately.
+    /// </summary>
+    [HttpPost("force-option-trade")]
+    public IActionResult ForceOptionTrade([FromBody] ForceOptionTradeRequest req)
+    {
+        var secret = Request.Headers["X-Job-Secret"].FirstOrDefault();
+        var expected = Environment.GetEnvironmentVariable("JOB_RUN_SECRET") ?? "";
+        if (string.IsNullOrEmpty(expected) || secret != expected)
+            return Unauthorized(new { error = "Invalid or missing X-Job-Secret header" });
+
+        if (req is null || string.IsNullOrWhiteSpace(req.Ticker))
+            return BadRequest(new { error = "ticker is required" });
+
+        if (req.Direction is not "bullish" and not "bearish")
+            return BadRequest(new { error = "direction must be 'bullish' or 'bearish'" });
+
+        const string jobName = "force-option-trade";
+        _logger.LogInformation("[force-option-trade] Triggered for {Ticker} {Direction}", req.Ticker, req.Direction);
+        _jobStatus.MarkStarted(jobName);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var optionsService = scope.ServiceProvider.GetRequiredService<PaperOptionsService>();
+                var lifecycle = scope.ServiceProvider.GetRequiredService<PortfolioLifecycleService>();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<PortfolioChallengeController>>();
+
+                // 1. Use the direct-pick pipeline to find the best option contract
+                var directPickReq = new DirectOptionPickRequest
+                {
+                    Ticker = req.Ticker,
+                    Direction = req.Direction,
+                    Source = "claude_approval_gate",
+                    Reason = req.Reason ?? "",
+                    Timeframe = req.Timeframe ?? "1_week",
+                    Conviction = req.Conviction ?? "high",
+                    AutoSave = true,
+                };
+
+                var optionResult = await optionsService.GenerateFromDirectPickAsync(directPickReq);
+                if (optionResult is null || optionResult.SavedCandidate is null)
+                {
+                    var msg = $"No suitable option contract found for {req.Ticker} {req.Direction}";
+                    logger.LogWarning("[force-option-trade] {Msg}", msg);
+                    _jobStatus.MarkCompleted(jobName, msg);
+                    return;
+                }
+
+                var saved = optionResult.SavedCandidate;
+                logger.LogInformation(
+                    "[force-option-trade] Found contract {Symbol}: {Side} ${Strike} exp {Exp} @ ${Mid}",
+                    saved.OptionSymbol, saved.Side, saved.Strike, saved.Expiration, saved.EntryMid);
+
+                // 2. Open position via lifecycle service
+                var errors = new List<string>();
+                var candidate = new PaperStockCandidate
+                {
+                    Id = saved.Id.ToString(),
+                    Ticker = req.Ticker,
+                    EntryPrice = saved.EntryMid > 0 ? saved.EntryMid : saved.EntryAsk > 0 ? saved.EntryAsk : 0,
+                    ConfidenceScore = 50, // Claude-approved = high confidence
+                    IsActionable = true,
+                    CandidateMode = CandidateMode.live_eligible,
+                    Status = PaperStockStatus.open,
+                    PredictionType = req.Direction == "bullish"
+                        ? PredictionType.bullish
+                        : PredictionType.bearish,
+                    AssetTypeOverride = PositionAssetType.option,
+                    OptionSymbol = saved.OptionSymbol,
+                    Timeframe = StockTimeframe.one_week,
+                };
+
+                var opened = await lifecycle.OpenPositionsForCandidatesAsync(
+                    [candidate], errors, bypassTimeGate: true);
+
+                var resultMsg = $"Option trade: {req.Ticker} {req.Direction} → {saved.OptionSymbol} → {opened} positions opened.";
+                if (errors.Count > 0)
+                    resultMsg += $" Errors: {string.Join("; ", errors)}";
+
+                logger.LogInformation("[force-option-trade] {Summary}", resultMsg);
+                _jobStatus.MarkCompleted(jobName, resultMsg);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[force-option-trade] Background job failed");
+                _jobStatus.MarkFailed(jobName, ex.Message);
+            }
+        });
+
+        return Accepted(new
+        {
+            status = "started",
+            jobName,
+            ticker = req.Ticker,
+            direction = req.Direction,
+            message = "Force option trade running in background. Poll /api/jobs/status for progress.",
+            startedAt = DateTimeOffset.UtcNow,
+        });
+    }
+}
+
+public record ForceOptionTradeRequest
+{
+    public string Ticker { get; init; } = "";
+    public string Direction { get; init; } = ""; // "bullish" or "bearish"
+    public string? Reason { get; init; }
+    public string? Timeframe { get; init; } // "1_week", "2_week", "1_month"
+    public string? Conviction { get; init; } // "high", "very_high"
 }
 
 public record UpdateStatusRequest

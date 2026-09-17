@@ -319,39 +319,65 @@ public class PortfolioBalanceEngine
         // ── Broker execution FIRST (broker_paper or live mode) ──────
         // Place broker order before persisting to Supabase so we never
         // record a position that doesn't exist at the broker.
-        // Options are not supported in broker mode — only stocks.
         string? brokerEntryOrderId = null;
         var isBrokerMode = challenge.TradingMode != TradingMode.paper && _broker.IsConfigured;
 
         if (isBrokerMode)
         {
-            if (assetType == PositionAssetType.option)
-            {
-                _logger.LogWarning(
-                    "[balance-engine] Broker mode does not support options — skipping {Ticker}",
-                    request.Ticker);
-                return null;
-            }
-
             try
             {
-                // ── Marketable limit order — eliminates slippage ──
-                // Use the CURRENT market price (not the stale prediction entry
-                // price) so the limit sits just above the live ask. If the stock
-                // moved since prediction, the old entry price is below the ask
-                // and the order would never fill. 0.1% buffer above current
-                // price ensures the order fills in normal conditions.
-                var priceForLimit = request.CurrentMarketPrice ?? request.EntryPrice;
-                var limitPrice = Math.Round(priceForLimit * 1.001, 2);
-                var brokerResult = await _broker.PlaceLimitOrderAsync(new BrokerOrderRequest
+                BrokerOrderResult brokerResult;
+
+                if (assetType == PositionAssetType.option && !string.IsNullOrEmpty(request.OptionSymbol))
                 {
-                    Ticker = request.Ticker,
-                    Quantity = request.Quantity,
-                    Side = BrokerOrderSide.buy,
-                    TimeInForce = BrokerTimeInForce.day,
-                    LimitPrice = limitPrice,
-                    ClientOrderId = $"sj-{Guid.NewGuid():N}", // 35 chars, within Alpaca's 48-char limit
-                });
+                    // ── Option order — limit order at the mid price ──
+                    // Options should always use limit orders. Market orders on options
+                    // get terrible fills due to wide bid-ask spreads.
+                    var optionLimitPrice = Math.Round(request.EntryPrice * 1.02, 2); // 2% buffer above mid
+                    brokerResult = await _broker.PlaceOptionOrderAsync(new BrokerOptionOrderRequest
+                    {
+                        Ticker = request.Ticker,
+                        OptionSymbol = request.OptionSymbol,
+                        Contracts = (int)request.Quantity, // For options, quantity = number of contracts
+                        Side = BrokerOrderSide.buy,
+                        LimitPrice = optionLimitPrice,
+                        TimeInForce = BrokerTimeInForce.day,
+                        ClientOrderId = $"sj-opt-{Guid.NewGuid():N}"[..48], // Within Alpaca's 48-char limit
+                    });
+
+                    _logger.LogInformation(
+                        "[balance-engine] Option order {Result} for {Ticker} ({Symbol}): {Contracts}x @ ${Limit}",
+                        brokerResult.Success ? "PLACED" : "FAILED",
+                        request.Ticker, request.OptionSymbol, (int)request.Quantity, optionLimitPrice);
+                }
+                else if (assetType == PositionAssetType.option)
+                {
+                    // Option position without an OCC symbol — can't route to broker
+                    _logger.LogWarning(
+                        "[balance-engine] Option position for {Ticker} has no OCC symbol — skipping broker order",
+                        request.Ticker);
+                    return null;
+                }
+                else
+                {
+                    // ── Stock order — marketable limit order ──
+                    // Use the CURRENT market price (not the stale prediction entry
+                    // price) so the limit sits just above the live ask. If the stock
+                    // moved since prediction, the old entry price is below the ask
+                    // and the order would never fill. 0.1% buffer above current
+                    // price ensures the order fills in normal conditions.
+                    var priceForLimit = request.CurrentMarketPrice ?? request.EntryPrice;
+                    var limitPrice = Math.Round(priceForLimit * 1.001, 2);
+                    brokerResult = await _broker.PlaceLimitOrderAsync(new BrokerOrderRequest
+                    {
+                        Ticker = request.Ticker,
+                        Quantity = request.Quantity,
+                        Side = BrokerOrderSide.buy,
+                        TimeInForce = BrokerTimeInForce.day,
+                        LimitPrice = limitPrice,
+                        ClientOrderId = $"sj-{Guid.NewGuid():N}", // 35 chars, within Alpaca's 48-char limit
+                    });
+                }
 
                 if (brokerResult.Success && brokerResult.BrokerOrderId is not null)
                 {
@@ -468,7 +494,12 @@ public class PortfolioBalanceEngine
             {
                 // Don't pass quantity — close the full position at broker.
                 // This is more reliable when broker qty drifts from ours.
-                var brokerResult = await _broker.ClosePositionAsync(position.Ticker);
+                // For options, close using the OCC symbol (not the underlying ticker).
+                var closeSymbol = position.AssetType == PositionAssetType.option
+                    && !string.IsNullOrEmpty(position.OptionSymbol)
+                    ? position.OptionSymbol
+                    : position.Ticker;
+                var brokerResult = await _broker.ClosePositionAsync(closeSymbol);
 
                 if (brokerResult.Success)
                 {

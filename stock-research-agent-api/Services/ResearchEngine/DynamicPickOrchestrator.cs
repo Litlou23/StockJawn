@@ -283,8 +283,18 @@ public class DynamicPickOrchestrator
 
         // 5. Auto-open portfolio positions via extracted service
         //    Skip if trend-quality gate flagged regime as untradeable (matches backtest behavior).
+        //    Skip if claude_approval_gate is enabled — Claude reviews predictions first,
+        //    then triggers force-trade for approved picks only.
         var portfolioPositionsOpened = 0;
-        if (regimeTradeable)
+        var overridesForGate = await _researchRepo.GetActiveWeightOverridesAsync();
+        var gateWeights = overridesForGate.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var claudeApprovalGate = gateWeights.GetValueOrDefault("claude_approval_gate", 0.0) >= 1.0;
+
+        if (claudeApprovalGate)
+        {
+            _logger.LogInformation("[dynamic] Claude approval gate ENABLED — skipping auto-open. Predictions saved for Claude review, use force-trade after approval.");
+        }
+        else if (regimeTradeable)
         {
             var actionableCandidates = savedStockCandidates
                 .Where(c => c.IsActionable && c.Status == PaperStockStatus.open)

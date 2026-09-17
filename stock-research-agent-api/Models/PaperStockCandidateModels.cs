@@ -70,6 +70,11 @@ public record PaperStockCandidate
     public PaperStockStatus Status { get; init; } = PaperStockStatus.open;
     public bool QualifiesForOptions { get; init; }
 
+    // ── Option override (in-memory only, not persisted to paper_stock_candidates) ──
+    // Set by force-option-trade to pass option routing through OpenPositionsForCandidatesAsync.
+    public PositionAssetType? AssetTypeOverride { get; init; }
+    public string? OptionSymbol { get; init; }
+
     // Meta-labeler advisory output (Aug 2026). Null when no model is loaded.
     // Not yet used to gate — only observed. See MetaLabelerService.
     public double? MetaProbability { get; init; }

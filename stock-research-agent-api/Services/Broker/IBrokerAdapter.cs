@@ -35,6 +35,9 @@ public interface IBrokerAdapter
     /// <summary>Place a stop order (sell when price drops to stop_price). Returns the broker's order ID.</summary>
     Task<BrokerOrderResult> PlaceStopOrderAsync(BrokerOrderRequest request, double stopPrice);
 
+    /// <summary>Place an option order (buy to open). Uses OCC symbol format. Returns the broker's order ID.</summary>
+    Task<BrokerOrderResult> PlaceOptionOrderAsync(BrokerOptionOrderRequest request);
+
     /// <summary>Replace an existing stop order with a new stop price (cancel + re-place). Returns the new order ID.</summary>
     Task<BrokerOrderResult> ReplaceStopOrderAsync(string existingOrderId, BrokerOrderRequest request, double newStopPrice);
 
@@ -136,6 +139,30 @@ public record BrokerOrderStatus
     public BrokerOrderState Status { get; init; }
     public DateTimeOffset? FilledAt { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
+}
+
+public record BrokerOptionOrderRequest
+{
+    /// <summary>Underlying ticker (e.g., "AAPL").</summary>
+    public string Ticker { get; init; } = "";
+
+    /// <summary>OCC option symbol (e.g., "AAPL260918C00320000").</summary>
+    public string OptionSymbol { get; init; } = "";
+
+    /// <summary>Number of contracts.</summary>
+    public int Contracts { get; init; } = 1;
+
+    /// <summary>buy_to_open or sell_to_close.</summary>
+    public BrokerOrderSide Side { get; init; } = BrokerOrderSide.buy;
+
+    /// <summary>Limit price per contract (recommended for options — market orders get terrible fills).</summary>
+    public double LimitPrice { get; init; }
+
+    /// <summary>day or gtc.</summary>
+    public BrokerTimeInForce TimeInForce { get; init; } = BrokerTimeInForce.day;
+
+    /// <summary>Internal reference for reconciliation.</summary>
+    public string? ClientOrderId { get; init; }
 }
 
 public record BrokerPosition
