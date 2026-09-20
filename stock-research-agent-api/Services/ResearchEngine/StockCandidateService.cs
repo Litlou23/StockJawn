@@ -21,9 +21,9 @@ public class StockCandidateService
     public const int LearningMinConfidenceForOptions = 40;
     public const int LearningMaxRiskForOptions = 75;
     public const double MinStockPriceForOptions = 15.0; // sub-$15 stocks rarely have liquid options
-    public const int ActionableShadowMinConfidence = 40;
+    public const int ActionableShadowMinConfidence = 30;
     public const int ActionableShadowMaxRisk = 75;
-    public const int LiveEligibleMinConfidence = 45;
+    public const int LiveEligibleMinConfidence = 38;
     public const int LiveEligibleMaxRisk = 75;
     public const string ThresholdPolicyVersion = "learning_options_v1";
 
@@ -258,7 +258,10 @@ public class StockCandidateService
             _ => StockTimeframe.one_day,
         };
 
-        var candidateMode = DetermineCandidateMode(pred);
+        // Load DB-configurable thresholds (scoring_weight_overrides), fall back to constants
+        var overrides = await _researchRepo.GetActiveWeightOverridesAsync();
+        var overrideMap = overrides.ToDictionary(o => o.SignalName, o => o.EffectiveWeight);
+        var candidateMode = DetermineCandidateMode(pred, overrideMap);
         var qualityTier = DetermineQualityTier(pred.ConfidenceScore, pred.ActionabilityTier);
         var isActionable = candidateMode != CandidateMode.learning;
         var qualifies = PredictionCategoryHelper.IsDirectional(pred.PredictionType)
@@ -810,20 +813,39 @@ public class StockCandidateService
         return map;
     }
 
-    public static CandidateMode DetermineCandidateMode(PredictionCandidate pred)
+    /// <summary>
+    /// Overload that reads thresholds from DB overrides (scoring_weight_overrides),
+    /// falling back to hardcoded constants when no DB row exists.
+    /// DB keys: actionable_shadow_min_confidence, actionable_shadow_max_risk,
+    ///          live_eligible_min_confidence, live_eligible_max_risk
+    /// </summary>
+    public static CandidateMode DetermineCandidateMode(
+        PredictionCandidate pred, Dictionary<string, double> dbOverrides)
     {
+        var liveMinConf = (int)dbOverrides.GetValueOrDefault("live_eligible_min_confidence", LiveEligibleMinConfidence);
+        var liveMaxRisk = (int)dbOverrides.GetValueOrDefault("live_eligible_max_risk", LiveEligibleMaxRisk);
+        var shadowMinConf = (int)dbOverrides.GetValueOrDefault("actionable_shadow_min_confidence", ActionableShadowMinConfidence);
+        var shadowMaxRisk = (int)dbOverrides.GetValueOrDefault("actionable_shadow_max_risk", ActionableShadowMaxRisk);
+
         if (PredictionCategoryHelper.IsDirectional(pred.PredictionType)
-            && pred.ConfidenceScore >= LiveEligibleMinConfidence
-            && pred.RiskScore <= LiveEligibleMaxRisk)
+            && pred.ConfidenceScore >= liveMinConf
+            && pred.RiskScore <= liveMaxRisk)
             return CandidateMode.live_eligible;
 
         if (PredictionCategoryHelper.IsDirectional(pred.PredictionType)
-            && pred.ConfidenceScore >= ActionableShadowMinConfidence
-            && pred.RiskScore <= ActionableShadowMaxRisk)
+            && pred.ConfidenceScore >= shadowMinConf
+            && pred.RiskScore <= shadowMaxRisk)
             return CandidateMode.actionable_shadow;
 
         return CandidateMode.learning;
     }
+
+    /// <summary>
+    /// Fallback overload using hardcoded constants (used by OptionCandidateService).
+    /// </summary>
+    public static CandidateMode DetermineCandidateMode(PredictionCandidate pred)
+        => DetermineCandidateMode(pred, new Dictionary<string, double>());
+
 
     /// <summary>
     /// Maps ActionabilityTier (from ScoringEngine) to QualityTier (for candidate tracking).

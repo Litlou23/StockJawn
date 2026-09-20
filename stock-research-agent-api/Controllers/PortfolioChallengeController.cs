@@ -973,10 +973,10 @@ public class PortfolioChallengeController : ControllerBase
                     return;
                 }
 
-                // 6. Open positions via the standard portfolio pipeline (bypasses time gate)
+                // 6. Open positions via the standard portfolio pipeline (bypasses ALL gates — it's a force trade)
                 var errors = new List<string>();
                 var opened = await lifecycle.OpenPositionsForCandidatesAsync(
-                    allTradeable, errors, bypassTimeGate: true);
+                    allTradeable, errors, bypassTimeGate: true, bypassAllGates: true);
 
                 var msg = $"Forced {predictions.Count} predictions → {builtCandidates.Count} new candidates → {opened} positions opened.";
                 if (errors.Count > 0)
@@ -1083,7 +1083,7 @@ public class PortfolioChallengeController : ControllerBase
                 };
 
                 var opened = await lifecycle.OpenPositionsForCandidatesAsync(
-                    [candidate], errors, bypassTimeGate: true);
+                    [candidate], errors, bypassTimeGate: true, bypassAllGates: true);
 
                 var resultMsg = $"Option trade: {req.Ticker} {req.Direction} → {saved.OptionSymbol} → {opened} positions opened.";
                 if (errors.Count > 0)

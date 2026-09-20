@@ -114,9 +114,13 @@ public class PortfolioLifecycleService
     public async Task<int> OpenPositionsForCandidatesAsync(
         List<PaperStockCandidate> actionableCandidates,
         List<string> errors,
-        bool bypassTimeGate = false)
+        bool bypassTimeGate = false,
+        bool bypassAllGates = false)
     {
         var portfolioPositionsOpened = 0;
+        if (bypassAllGates)
+            _logger.LogInformation("[portfolio] FORCE MODE: Bypassing all quality gates for {Count} candidates",
+                actionableCandidates.Count);
         var activeChallenges = await _portfolioRepo.GetActiveChallengesAsync();
         if (activeChallenges.Count == 0)
             return 0;
@@ -602,7 +606,7 @@ public class PortfolioLifecycleService
             foreach (var c in eligible)
             {
                 if (opened >= slotsAvailable) break;
-                if (pastCutoff) break; // No new entries after cutoff — exit loop entirely
+                if (pastCutoff && !bypassAllGates) break; // No new entries after cutoff — force-trade bypasses
 
                 // ── Filter candidates by challenge PortfolioMode ──
                 // When the candidate has an explicit AssetTypeOverride (e.g. from force-option-trade),
@@ -668,7 +672,7 @@ public class PortfolioLifecycleService
                         "[portfolio] CONGRESS EXEMPTION: {Ticker} bypassing regime gate ({Regime}) — backed by congressional buy",
                         c.Ticker, marketRegime);
                 }
-                else if (marketRegime is not null)
+                else if (marketRegime is not null && !bypassAllGates)
                 {
                     var isBullish = PredictionCategoryHelper.IsBullish(c.PredictionType);
                     var blocked = (isBullish && marketRegime == "bearish")
@@ -711,7 +715,7 @@ public class PortfolioLifecycleService
 
                 // ── Stop-loss cooldown — don't re-enter tickers that just got stopped out ──
                 // Congress exemption: fresh congressional buy signal overrides previous losses
-                if (stoppedOutTickers.Contains(c.Ticker) && !congressBackedTickers.Contains(c.Ticker))
+                if (!bypassAllGates && stoppedOutTickers.Contains(c.Ticker) && !congressBackedTickers.Contains(c.Ticker))
                 {
                     _logger.LogInformation(
                         "[portfolio] COOLDOWN: Skipping {Ticker} for {Challenge} — stopped out in last 24h. " +
@@ -722,7 +726,7 @@ public class PortfolioLifecycleService
 
                 // ── Repeat loser blacklist — block tickers that keep losing ──
                 // Congress exemption: congressional buys override blacklist
-                if (repeatLoserTickers.Contains(c.Ticker) && !congressBackedTickers.Contains(c.Ticker))
+                if (!bypassAllGates && repeatLoserTickers.Contains(c.Ticker) && !congressBackedTickers.Contains(c.Ticker))
                 {
                     _logger.LogInformation(
                         "[portfolio] BLACKLISTED: Skipping {Ticker} for {Challenge} — 2+ losses in last {Days} days. " +
@@ -733,7 +737,7 @@ public class PortfolioLifecycleService
 
                 // ── Same-day earnings guard — don't enter before a binary event ──
                 // Only applied to broker challenges — paper challenges can experiment freely.
-                if (challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
+                if (!bypassAllGates && challenge.TradingMode is TradingMode.broker_paper or TradingMode.live
                     && earningsToday.Contains(c.Ticker))
                 {
                     _logger.LogInformation(
@@ -753,7 +757,7 @@ public class PortfolioLifecycleService
                 }
                 catch { /* unknown sector won't block entry */ }
 
-                if (!string.IsNullOrEmpty(candidateSector)
+                if (!bypassAllGates && !string.IsNullOrEmpty(candidateSector)
                     && sectorCounts.GetValueOrDefault(candidateSector) >= maxPerSector)
                 {
                     _logger.LogInformation(
@@ -784,7 +788,7 @@ public class PortfolioLifecycleService
                             // A real trader doesn't enter positions in stocks with
                             // no volume — you can't exit when you need to.
                             // Minimum 50K shares traded today (or avg daily volume).
-                            if (currentQuote.Volume < 50_000)
+                            if (!bypassAllGates && currentQuote.Volume < 50_000)
                             {
                                 _logger.LogInformation(
                                     "[portfolio] Skipping {Ticker} — volume {Vol:N0} < 50K minimum",
@@ -797,7 +801,7 @@ public class PortfolioLifecycleService
                             // The system's predictions on junk tickers are 27-33% accurate.
                             // DB-configurable via min_stock_price (default $10).
                             var minStockPrice = weights.GetValueOrDefault("min_stock_price", 10);
-                            if (currentQuote.Price < minStockPrice)
+                            if (!bypassAllGates && currentQuote.Price < minStockPrice)
                             {
                                 _logger.LogInformation(
                                     "[portfolio] PRICE GATE: Skipping {Ticker} — price ${Price:F2} < ${Min} minimum",
@@ -817,7 +821,7 @@ public class PortfolioLifecycleService
                                 var estSpreadDollars = 0.01 + (currentQuote.Price / Math.Sqrt(currentQuote.Volume) * 0.5);
                                 var estSpreadPct = estSpreadDollars / currentQuote.Price * 100;
 
-                                if (estSpreadPct > maxSpreadPct)
+                                if (!bypassAllGates && estSpreadPct > maxSpreadPct)
                                 {
                                     _logger.LogInformation(
                                         "[portfolio] Skipping {Ticker} — estimated spread {Spread:F2}% > {Max}% limit " +
@@ -837,7 +841,7 @@ public class PortfolioLifecycleService
                                 var isChasing = (isBullish && movePercent >= maxChasePercent)
                                              || (!isBullish && movePercent <= -maxChasePercent);
 
-                                if (isChasing)
+                                if (isChasing && !bypassAllGates)
                                 {
                                     _logger.LogInformation(
                                         "[portfolio] Skipping {Ticker} — already moved {Move:F1}% in predicted direction (chase limit {Limit}%)",
@@ -876,7 +880,7 @@ public class PortfolioLifecycleService
                     // ── EV gate — never enter negative-EV trades ──
                     // A real trader would never take a trade where the math says you lose money.
                     // min_ev_threshold defaults to 0.5% — configurable via scoring_weight_overrides.
-                    if (evPercent is not null && evPercent < minEvPercent)
+                    if (!bypassAllGates && evPercent is not null && evPercent < minEvPercent)
                     {
                         _logger.LogInformation(
                             "[portfolio] Skipping {Ticker} — EV {Ev:F1}% below threshold {Min}% (conf={Conf}, gain={Gain:F1}%, loss={Loss:F1}%)",
@@ -898,7 +902,7 @@ public class PortfolioLifecycleService
                         if (lossDist > 0)
                         {
                             var rrRatio = gainDist / lossDist;
-                            if (rrRatio < minRiskRewardRatio)
+                            if (!bypassAllGates && rrRatio < minRiskRewardRatio)
                             {
                                 _logger.LogInformation(
                                     "[portfolio] R:R GATE: Skipping {Ticker} — R:R ratio {RR:F2}:1 below minimum {Min:F1}:1 " +
@@ -915,7 +919,7 @@ public class PortfolioLifecycleService
                     if (!isOptionOverride && livePrice is not null && c.EntryPrice is > 0)
                     {
                         var slippagePct = Math.Abs(livePrice.Value - c.EntryPrice.Value) / c.EntryPrice.Value * 100;
-                        if (slippagePct > maxEntrySlippagePct)
+                        if (!bypassAllGates && slippagePct > maxEntrySlippagePct)
                         {
                             _logger.LogInformation(
                                 "[portfolio] SLIPPAGE GATE: Skipping {Ticker} — live ${Live:F2} is {Slip:F1}% from entry ${Entry:F2} (max {Max:F1}%)",
@@ -929,7 +933,7 @@ public class PortfolioLifecycleService
                     // brokerMinQuality: 0=any, 1=medium+ (filter weak), 2=strong+ (filter medium too)
                     // Skip for option overrides — Claude already approved the trade.
                     var isBrokerMode = challenge.TradingMode is TradingMode.broker_paper or TradingMode.live;
-                    if (isBrokerMode && !isOptionOverride)
+                    if (isBrokerMode && !isOptionOverride && !bypassAllGates)
                     {
                         var tierRank = c.QualityTier switch
                         {
@@ -1004,7 +1008,8 @@ public class PortfolioLifecycleService
                     // Uses Terra model for quality. Only for broker/live modes by default,
                     // or when ai_entry_gate_enabled is set.
                     var shouldRunAiGate = aiEntryGateEnabled
-                        && challenge.TradingMode != TradingMode.paper; // Skip for pure paper to save API cost
+                        && challenge.TradingMode != TradingMode.paper // Skip for pure paper to save API cost
+                        && !bypassAllGates; // Force-trade skips AI gate
                     var aiPositionScale = 1.0;
                     if (shouldRunAiGate)
                     {
