@@ -1,6 +1,13 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { createClient } from '@supabase/supabase-js';
+
+// Public anon key — safe in client code (RLS enforces access)
+const supabase = createClient(
+  'https://pizoqybgkdhfvxrmnhvx.supabase.co',
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpem9xeWJna2RoZnZ4cm1uaHZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MjA2OTksImV4cCI6MjA3NzE5NjY5OX0.r5KxmoFEOafGUxliF9Bj5MBu4KRQCrNqrN3s1g5IhtI'
+);
 
 interface Pick {
   id: string;
@@ -17,6 +24,7 @@ interface Pick {
   approval_status: string;
   sector: string;
   execution_notes?: string;
+  created_at?: string;
 }
 
 export default function ApprovePage() {
@@ -26,22 +34,47 @@ export default function ApprovePage() {
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, { text: string; ok: boolean }>>({});
+  const [storedPin, setStoredPin] = useState<number | null>(null);
+  const [expiryMinutes, setExpiryMinutes] = useState(120);
 
   const fetchPicks = useCallback(async () => {
     try {
-      const res = await fetch('/api/approve');
-      const data = await res.json();
-      setPicks(data.picks || []);
-    } catch {
-      console.error('Failed to fetch picks');
+      const { data: picks, error } = await supabase
+        .from('claude_daily_picks')
+        .select('id, ticker, direction, conviction, entry_price, target_price, stop_price, total_score, notes, catalyst, pick_date, approval_status, sector, execution_notes, created_at')
+        .in('approval_status', ['pending', 'approved', 'executing', 'executed', 'ready'])
+        .order('total_score', { ascending: false });
+
+      if (error) {
+        console.error('Supabase error:', error.message);
+        return;
+      }
+      setPicks(picks || []);
+    } catch (e) {
+      console.error('Failed to fetch picks', e);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Fetch configs (PIN + expiry) once on mount
+  useEffect(() => {
+    async function loadConfigs() {
+      const { data: configs } = await supabase
+        .from('scoring_weight_overrides')
+        .select('signal_name, effective_weight')
+        .in('signal_name', ['approval_pin', 'approval_expiry_minutes']);
+
+      configs?.forEach((c: { signal_name: string; effective_weight: number }) => {
+        if (c.signal_name === 'approval_pin') setStoredPin(c.effective_weight);
+        if (c.signal_name === 'approval_expiry_minutes') setExpiryMinutes(c.effective_weight);
+      });
+    }
+    loadConfigs();
+  }, []);
+
   useEffect(() => {
     fetchPicks();
-    // Refresh every 60 seconds
     const interval = setInterval(fetchPicks, 60000);
     return () => clearInterval(interval);
   }, [fetchPicks]);
@@ -49,20 +82,52 @@ export default function ApprovePage() {
   const handleApprove = async (pickId: string) => {
     setApproving(pickId);
     try {
-      const res = await fetch('/api/approve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pickId, pin }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED', ok: true } }));
-        // Remove from list after brief delay
-        setTimeout(() => {
-          setPicks(p => p.filter(pick => pick.id !== pickId));
-        }, 2000);
+      // Verify PIN client-side against DB value
+      if (storedPin === null || String(storedPin) !== String(pin)) {
+        setMessages(m => ({ ...m, [pickId]: { text: 'Invalid PIN', ok: false } }));
+        setApproving(null);
+        return;
+      }
+
+      // Check expiry
+      const pick = picks.find(p => p.id === pickId);
+      if (pick?.created_at) {
+        const createdAt = new Date(pick.created_at);
+        const expiresAt = new Date(createdAt.getTime() + expiryMinutes * 60 * 1000);
+        if (new Date() > expiresAt) {
+          await supabase
+            .from('claude_daily_picks')
+            .update({ approval_status: 'expired', execution_notes: 'Approval window expired' })
+            .eq('id', pickId);
+          setMessages(m => ({ ...m, [pickId]: { text: 'Pick expired', ok: false } }));
+          setApproving(null);
+          return;
+        }
+      }
+
+      // Approve the pick
+      const { error } = await supabase
+        .from('claude_daily_picks')
+        .update({
+          approval_status: 'approved',
+          approved_at: new Date().toISOString(),
+        })
+        .eq('id', pickId);
+
+      if (error) {
+        setMessages(m => ({ ...m, [pickId]: { text: error.message, ok: false } }));
       } else {
-        setMessages(m => ({ ...m, [pickId]: { text: data.error, ok: false } }));
+        setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED', ok: true } }));
+        setTimeout(() => {
+          setPicks(p => p.map(pick =>
+            pick.id === pickId ? { ...pick, approval_status: 'approved' } : pick
+          ));
+          setMessages(m => {
+            const copy = { ...m };
+            delete copy[pickId];
+            return copy;
+          });
+        }, 2000);
       }
     } catch {
       setMessages(m => ({ ...m, [pickId]: { text: 'Network error', ok: false } }));
@@ -72,12 +137,12 @@ export default function ApprovePage() {
   };
 
   const handleApproveAll = async () => {
-    for (const pick of picks) {
+    const pending = picks.filter(p => p.approval_status === 'pending');
+    for (const pick of pending) {
       await handleApprove(pick.id);
     }
   };
 
-  // Calculate dollar opportunity
   const dollarOpp = (pick: Pick) => {
     if (!pick.entry_price || !pick.target_price) return null;
     const pctMove = Math.abs((pick.target_price - pick.entry_price) / pick.entry_price * 100);
@@ -119,6 +184,8 @@ export default function ApprovePage() {
   }
 
   // Main approval screen
+  const pendingPicks = picks.filter(p => p.approval_status === 'pending');
+
   return (
     <div className="min-h-screen p-4" style={{ background: '#0a0a0c', color: '#e6e6ea' }}>
       <div className="max-w-lg mx-auto">
@@ -276,13 +343,13 @@ export default function ApprovePage() {
             </div>
 
             {/* Approve All */}
-            {picks.length > 1 && (
+            {pendingPicks.length > 1 && (
               <button
                 onClick={handleApproveAll}
                 disabled={approving !== null}
                 className="w-full py-4 rounded-xl font-bold text-lg transition-all active:scale-95 disabled:opacity-50 bg-blue-600 hover:bg-blue-500 text-white mb-8"
               >
-                APPROVE ALL ({picks.length})
+                APPROVE ALL ({pendingPicks.length})
               </button>
             )}
           </>
