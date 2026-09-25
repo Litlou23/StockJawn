@@ -27,6 +27,8 @@ interface Pick {
   price_change_pct: number | null;
   sector: string | null;
   created_at: string;
+  execution_notes: string | null;
+  order_id: string | null;
 }
 
 interface FactorPerf {
@@ -35,15 +37,57 @@ interface FactorPerf {
   times_correct: number;
 }
 
+interface Snapshot {
+  account_balance: number;
+  buying_power: number;
+  open_positions_value: number;
+  spy_price: number | null;
+  qqq_price: number | null;
+  spy_change_pct: number | null;
+  qqq_change_pct: number | null;
+  market_regime: string;
+  notes: string | null;
+  snapshot_date: string;
+}
+
+function parseOptionDetails(notes: string | null): { type: string; strike: string; exp: string; premium: string } | null {
+  if (!notes) return null;
+  const match = notes.match(/OPTION:\s*(CALL|PUT)\s+([\d.]+)\s+([\d-]+)\s+@\s*\$([\d.]+)/i);
+  if (!match) return null;
+  return { type: match[1].toUpperCase(), strike: match[2], exp: match[3], premium: match[4] };
+}
+
+function parseAccountFromNotes(notes: string | null): string | null {
+  if (!notes) return null;
+  const match = notes.match(/Account:\s*\$([\d,.]+)/i);
+  return match ? match[1] : null;
+}
+
+function parseTechnicalsFromNotes(notes: string | null): string | null {
+  if (!notes) return null;
+  const match = notes.match(/Technicals?:\s*(.+?)(?:\||$)/i);
+  return match ? match[1].trim() : null;
+}
+
 export default function HomePage() {
   const [todayPicks, setTodayPicks] = useState<Pick[]>([]);
   const [recentPicks, setRecentPicks] = useState<Pick[]>([]);
   const [stats, setStats] = useState({ total: 0, wins: 0, losses: 0, scratches: 0, pending: 0 });
   const [factors, setFactors] = useState<FactorPerf[]>([]);
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchData = useCallback(async () => {
     try {
+      // System snapshot (latest)
+      const { data: snapData } = await supabase
+        .from('system_snapshots')
+        .select('*')
+        .order('snapshot_date', { ascending: false })
+        .limit(1);
+
+      if (snapData && snapData.length > 0) setSnapshot(snapData[0]);
+
       // Today's picks
       const today = new Date().toISOString().split('T')[0];
       const { data: todayData } = await supabase
@@ -61,6 +105,7 @@ export default function HomePage() {
         .from('claude_daily_picks')
         .select('*')
         .neq('ticker', 'CASH')
+        .neq('ticker', 'EXEC_LOG')
         .gte('pick_date', thirtyDaysAgo)
         .order('pick_date', { ascending: false })
         .limit(50);
@@ -71,7 +116,8 @@ export default function HomePage() {
       const { data: allPicks } = await supabase
         .from('claude_daily_picks')
         .select('outcome')
-        .neq('ticker', 'CASH');
+        .neq('ticker', 'CASH')
+        .neq('ticker', 'EXEC_LOG');
 
       if (allPicks) {
         setStats({
@@ -113,11 +159,22 @@ export default function HomePage() {
     );
   }
 
+  const regimeLabel: Record<string, { text: string; color: string; mode: string }> = {
+    strong_bull: { text: 'Strong Bull', color: 'text-green-400', mode: 'CALLS' },
+    mild_bull: { text: 'Mild Bull', color: 'text-green-300', mode: 'CALLS' },
+    mild_bull_pullback: { text: 'Pullback', color: 'text-yellow-400', mode: 'SELECTIVE' },
+    flat: { text: 'Flat / Choppy', color: 'text-gray-400', mode: 'SELECTIVE' },
+    mild_bear: { text: 'Mild Bear', color: 'text-orange-400', mode: 'PUTS' },
+    strong_bear: { text: 'Strong Bear', color: 'text-red-400', mode: 'PUTS' },
+    unknown: { text: 'Unknown', color: 'text-gray-500', mode: '--' },
+  };
+  const regime = regimeLabel[snapshot?.market_regime || 'unknown'] || regimeLabel.unknown;
+
   return (
     <div className="min-h-screen p-4 pb-20 md:pb-4" style={{ background: '#0a0a0c', color: '#e6e6ea' }}>
       <div className="max-w-2xl mx-auto">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center justify-between mb-4">
           <div>
             <h1 className="text-2xl font-bold">StockJawn</h1>
             <p className="text-xs text-gray-500">Options Trading Agent</p>
@@ -129,6 +186,63 @@ export default function HomePage() {
             Approve Picks
           </Link>
         </div>
+
+        {/* Market + Account Banner */}
+        {snapshot && (
+          <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4 mb-4">
+            <div className="grid grid-cols-2 gap-4">
+              {/* Market */}
+              <div>
+                <div className="text-[10px] text-gray-500 uppercase mb-2">Market</div>
+                <div className="flex items-center gap-2 mb-1">
+                  <span className={`text-sm font-bold ${regime.color}`}>{regime.text}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 font-mono">{regime.mode}</span>
+                </div>
+                <div className="flex gap-3 text-xs">
+                  <div>
+                    <span className="text-gray-500">SPY </span>
+                    <span className="font-mono">${snapshot.spy_price?.toFixed(0)}</span>
+                    {snapshot.spy_change_pct != null && (
+                      <span className={`ml-1 font-mono ${snapshot.spy_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {snapshot.spy_change_pct >= 0 ? '+' : ''}{snapshot.spy_change_pct.toFixed(1)}%
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <span className="text-gray-500">QQQ </span>
+                    <span className="font-mono">${snapshot.qqq_price?.toFixed(0)}</span>
+                    {snapshot.qqq_change_pct != null && (
+                      <span className={`ml-1 font-mono ${snapshot.qqq_change_pct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                        {snapshot.qqq_change_pct >= 0 ? '+' : ''}{snapshot.qqq_change_pct.toFixed(1)}%
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {snapshot.notes && (
+                  <div className="text-[10px] text-gray-600 mt-1 leading-tight">{snapshot.notes}</div>
+                )}
+              </div>
+              {/* Account */}
+              <div className="text-right">
+                <div className="text-[10px] text-gray-500 uppercase mb-2">Account</div>
+                <div className="text-xl font-bold font-mono">
+                  ${Number(snapshot.account_balance || 0).toFixed(2)}
+                </div>
+                <div className="text-xs text-gray-400">
+                  <span className="text-gray-500">Buying Power: </span>
+                  <span className="font-mono">${Number(snapshot.buying_power || 0).toFixed(2)}</span>
+                </div>
+                {snapshot.open_positions_value > 0 && (
+                  <div className="text-xs text-gray-400">
+                    <span className="text-gray-500">In Positions: </span>
+                    <span className="font-mono">${Number(snapshot.open_positions_value).toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="text-[10px] text-gray-600 mt-1">{snapshot.snapshot_date}</div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Stats Cards */}
         <div className="grid grid-cols-4 gap-3 mb-6">
@@ -168,7 +282,7 @@ export default function HomePage() {
             </div>
           ) : (
             <div className="space-y-2">
-              {recentPicks.slice(0, 10).map(pick => (
+              {recentPicks.slice(0, 15).map(pick => (
                 <RecentPickRow key={pick.id} pick={pick} />
               ))}
             </div>
@@ -267,8 +381,27 @@ function StatCard({ label, value, color }: { label: string; value: string | numb
 }
 
 function PickCard({ pick }: { pick: Pick }) {
-  const isOption = pick.notes?.includes('OPTION:');
+  const option = parseOptionDetails(pick.notes);
   const isBearish = pick.direction === 'bearish';
+  const technicals = parseTechnicalsFromNotes(pick.notes);
+  const accountBal = parseAccountFromNotes(pick.notes);
+
+  // Calculate P&L
+  let pnl: number | null = null;
+  let pnlPct: number | null = null;
+  if (pick.entry_price && pick.current_price) {
+    if (isBearish) {
+      pnl = (Number(pick.entry_price) - Number(pick.current_price));
+    } else {
+      pnl = (Number(pick.current_price) - Number(pick.entry_price));
+    }
+    pnlPct = Number(pick.price_change_pct);
+    // For options, 1 contract = 100 shares
+    if (option) {
+      pnl = pnl * 100;
+    }
+  }
+
   const statusColors: Record<string, string> = {
     pending: 'bg-yellow-900/30 text-yellow-400',
     approved: 'bg-blue-900/30 text-blue-400',
@@ -282,6 +415,7 @@ function PickCard({ pick }: { pick: Pick }) {
 
   return (
     <div className="rounded-xl border border-gray-800 bg-gray-900/50 p-4">
+      {/* Header: Ticker + Score */}
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <span className="text-lg font-bold">{pick.ticker}</span>
@@ -290,8 +424,14 @@ function PickCard({ pick }: { pick: Pick }) {
           }`}>
             {isBearish ? 'PUT' : 'CALL'}
           </span>
-          {isOption && (
-            <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900/50 text-purple-400">OPTION</span>
+          {pick.conviction && (
+            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+              pick.conviction === 'high' ? 'bg-green-900/30 text-green-400' :
+              pick.conviction === 'medium' ? 'bg-yellow-900/30 text-yellow-400' :
+              'bg-gray-800 text-gray-500'
+            }`}>
+              {pick.conviction.toUpperCase()}
+            </span>
           )}
         </div>
         <div className="text-right">
@@ -304,12 +444,42 @@ function PickCard({ pick }: { pick: Pick }) {
         </div>
       </div>
 
+      {/* Option Contract Details */}
+      {option && (
+        <div className="rounded-lg bg-purple-950/30 border border-purple-900/30 px-3 py-2 mb-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-purple-400 font-bold text-sm">{option.type}</span>
+              <span className="text-gray-300 font-mono text-sm">${option.strike}</span>
+              <span className="text-gray-500 text-xs">{option.exp}</span>
+            </div>
+            <div className="text-right">
+              <span className="text-[10px] text-gray-500">Premium </span>
+              <span className="text-purple-300 font-mono font-bold">${option.premium}</span>
+              <span className="text-[10px] text-gray-600 ml-1">(${(parseFloat(option.premium) * 100).toFixed(0)} total)</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Prices: Entry / Current / Target / Stop */}
       {pick.entry_price && (
-        <div className="grid grid-cols-3 gap-2 text-center text-sm mb-2">
+        <div className={`grid ${pick.current_price ? 'grid-cols-4' : 'grid-cols-3'} gap-2 text-center text-sm mb-2`}>
           <div>
             <div className="text-[10px] text-gray-500">Entry</div>
             <div className="font-mono">${Number(pick.entry_price).toFixed(2)}</div>
           </div>
+          {pick.current_price && (
+            <div>
+              <div className="text-[10px] text-gray-500">Current</div>
+              <div className={`font-mono font-bold ${
+                Number(pick.current_price) > Number(pick.entry_price) ? 'text-green-400' :
+                Number(pick.current_price) < Number(pick.entry_price) ? 'text-red-400' : ''
+              }`}>
+                ${Number(pick.current_price).toFixed(2)}
+              </div>
+            </div>
+          )}
           <div>
             <div className="text-[10px] text-green-600">Target</div>
             <div className="font-mono text-green-400">${pick.target_price ? Number(pick.target_price).toFixed(2) : '--'}</div>
@@ -321,24 +491,50 @@ function PickCard({ pick }: { pick: Pick }) {
         </div>
       )}
 
+      {/* P&L Bar */}
+      {pnl !== null && (
+        <div className={`rounded-lg px-3 py-1.5 mb-2 text-center font-mono text-sm font-bold ${
+          pnl > 0 ? 'bg-green-900/20 text-green-400' : pnl < 0 ? 'bg-red-900/20 text-red-400' : 'bg-gray-800 text-gray-400'
+        }`}>
+          {pnl >= 0 ? '+' : ''}{pnlPct?.toFixed(1)}% &middot; {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+        </div>
+      )}
+
+      {/* Catalyst */}
       {pick.catalyst && (
         <div className="text-xs text-yellow-500/70 mb-2 truncate">{pick.catalyst}</div>
       )}
 
-      {isOption && pick.notes && (
-        <div className="text-xs text-purple-400 font-mono mb-2">
-          {pick.notes.match(/OPTION:.*/)?.[0]}
-        </div>
+      {/* Technicals */}
+      {technicals && (
+        <div className="text-[10px] text-cyan-400/60 mb-2 truncate">Technicals: {technicals}</div>
       )}
 
-      <div className={`text-center py-1.5 rounded-lg text-xs font-medium ${statusColors[pick.approval_status] || 'bg-gray-800 text-gray-500'}`}>
-        {pick.approval_status.toUpperCase()}
+      {/* Execution notes */}
+      {pick.execution_notes && (
+        <div className="text-[10px] text-gray-500 mb-2 truncate">{pick.execution_notes}</div>
+      )}
+
+      {/* Status */}
+      <div className="flex items-center justify-between">
+        <div className={`flex-1 text-center py-1.5 rounded-lg text-xs font-medium ${statusColors[pick.approval_status] || 'bg-gray-800 text-gray-500'}`}>
+          {pick.approval_status.toUpperCase()}
+          {pick.outcome && pick.outcome !== 'pending' && (
+            <span className="ml-2 opacity-70">
+              &middot; {pick.outcome.toUpperCase()}
+            </span>
+          )}
+        </div>
+        {pick.sector && (
+          <span className="text-[10px] text-gray-600 ml-2">{pick.sector}</span>
+        )}
       </div>
     </div>
   );
 }
 
 function RecentPickRow({ pick }: { pick: Pick }) {
+  const option = parseOptionDetails(pick.notes);
   const outcomeColors: Record<string, string> = {
     win: 'text-green-400',
     loss: 'text-red-400',
@@ -348,24 +544,54 @@ function RecentPickRow({ pick }: { pick: Pick }) {
   const outcome = pick.outcome || 'pending';
   const pctStr = pick.price_change_pct != null ? `${pick.price_change_pct > 0 ? '+' : ''}${Number(pick.price_change_pct).toFixed(1)}%` : null;
 
+  // Dollar P&L for options
+  let dollarPnl: string | null = null;
+  if (option && pick.entry_price && pick.current_price) {
+    const diff = pick.direction === 'bearish'
+      ? Number(pick.entry_price) - Number(pick.current_price)
+      : Number(pick.current_price) - Number(pick.entry_price);
+    const total = diff * 100;
+    dollarPnl = `${total >= 0 ? '+' : ''}$${total.toFixed(0)}`;
+  }
+
   return (
-    <div className="flex items-center justify-between rounded-lg border border-gray-800/50 bg-gray-900/30 px-4 py-2.5">
-      <div className="flex items-center gap-3">
-        <span className="font-bold text-sm w-14">{pick.ticker}</span>
-        <span className={`text-xs ${pick.direction === 'bearish' ? 'text-red-400' : 'text-green-400'}`}>
-          {pick.direction === 'bearish' ? 'PUT' : 'CALL'}
-        </span>
-        <span className="text-xs text-gray-600">{pick.pick_date}</span>
-      </div>
-      <div className="flex items-center gap-3">
-        {pctStr && (
-          <span className={`text-xs font-mono ${Number(pick.price_change_pct) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-            {pctStr}
+    <div className="rounded-lg border border-gray-800/50 bg-gray-900/30 px-4 py-2.5">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-sm w-14">{pick.ticker}</span>
+          <span className={`text-xs ${pick.direction === 'bearish' ? 'text-red-400' : 'text-green-400'}`}>
+            {pick.direction === 'bearish' ? 'PUT' : 'CALL'}
           </span>
-        )}
-        <span className={`text-xs font-medium uppercase ${outcomeColors[outcome] || 'text-gray-500'}`}>
-          {outcome}
-        </span>
+          {option && (
+            <span className="text-[10px] text-purple-400 font-mono">
+              ${option.strike} {option.exp.slice(5)}
+            </span>
+          )}
+          <span className="text-[10px] text-gray-600">{pick.pick_date.slice(5)}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {pctStr && (
+            <span className={`text-xs font-mono ${Number(pick.price_change_pct) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+              {pctStr}
+            </span>
+          )}
+          {dollarPnl && (
+            <span className={`text-[10px] font-mono ${dollarPnl.startsWith('+') ? 'text-green-400' : 'text-red-400'}`}>
+              {dollarPnl}
+            </span>
+          )}
+          <span className={`text-xs font-medium uppercase w-16 text-right ${outcomeColors[outcome] || 'text-gray-500'}`}>
+            {outcome}
+          </span>
+        </div>
+      </div>
+      {/* Second row: entry/current/score */}
+      <div className="flex items-center gap-3 mt-1 text-[10px] text-gray-500">
+        {pick.entry_price && <span>Entry ${Number(pick.entry_price).toFixed(2)}</span>}
+        {pick.current_price && <span>Current ${Number(pick.current_price).toFixed(2)}</span>}
+        {pick.total_score && <span>Score {pick.total_score}</span>}
+        {pick.conviction && <span className="uppercase">{pick.conviction}</span>}
+        {pick.catalyst && <span className="truncate max-w-[120px] text-yellow-600">{pick.catalyst}</span>}
       </div>
     </div>
   );
