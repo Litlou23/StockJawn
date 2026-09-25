@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Stock Research Agent",
-  description: "Private personal stock research dashboard — not financial advice.",
+  title: "StockJawn",
+  description: "Options trading agent — not financial advice.",
 };
 
 export default function RootLayout({

@@ -80,54 +80,19 @@ const SystemIcon = (
 
 export const navEntries: NavEntry[] = [
   {
-    label: 'Chat',
-    icon: ChatIcon,
-    href: '/chat',
-  },
-  {
     label: 'Dashboard',
     icon: DashboardIcon,
-    href: '/dashboard',
+    href: '/',
   },
   {
-    label: 'Research',
+    label: 'Approve',
+    icon: OptionsIcon,
+    href: '/approve',
+  },
+  {
+    label: 'History',
     icon: ResearchIcon,
-    children: [
-      { href: '/stock-lab', label: 'Practice Stocks' },
-      { href: '/watchlist', label: 'Watchlist' },
-      { href: '/predictions', label: 'Predictions' },
-      { href: '/congress-trades', label: 'Congress Intel' },
-      { href: '/results', label: 'Results' },
-      { href: '/history', label: 'History' },
-      { href: '/backtest', label: 'Backtest' },
-      { href: '/meta-labeler', label: 'Meta-Labeler' },
-    ],
-  },
-  {
-    label: 'Portfolio',
-    icon: PortfolioIcon,
-    children: [
-      { href: '/portfolio', label: 'Portfolio' },
-      { href: '/broker', label: 'Broker' },
-    ],
-  },
-  {
-    label: 'Profiles',
-    icon: ProfilesIcon,
-    children: [
-      { href: '/profiles', label: 'Profiles' },
-      { href: '/profiles/analytics', label: 'Profile Analytics' },
-    ],
-  },
-  {
-    label: 'System',
-    icon: SystemIcon,
-    children: [
-      { href: '/learning', label: 'System Learning' },
-      { href: '/pipeline-health', label: 'Pipeline Health' },
-      { href: '/connectivity', label: 'Connection Status' },
-      { href: '/settings', label: 'Settings' },
-    ],
+    href: '/history',
   },
 ];
 
