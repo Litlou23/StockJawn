@@ -37,6 +37,12 @@ interface FactorPerf {
   times_correct: number;
 }
 
+interface Investor {
+  name: string;
+  initial_deposit: number;
+  deposit_date: string;
+}
+
 interface Snapshot {
   account_balance: number;
   buying_power: number;
@@ -75,6 +81,7 @@ export default function HomePage() {
   const [stats, setStats] = useState({ total: 0, wins: 0, losses: 0, scratches: 0, pending: 0 });
   const [factors, setFactors] = useState<FactorPerf[]>([]);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [investors, setInvestors] = useState<Investor[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchData = useCallback(async () => {
@@ -136,6 +143,15 @@ export default function HomePage() {
         .order('times_used', { ascending: false });
 
       setFactors(factorData || []);
+
+      // Investors
+      const { data: investorData } = await supabase
+        .from('account_investors')
+        .select('name, initial_deposit, deposit_date')
+        .eq('active', true)
+        .order('deposit_date', { ascending: true });
+
+      setInvestors(investorData || []);
     } catch (e) {
       console.error('Failed to fetch data', e);
     } finally {
@@ -241,6 +257,44 @@ export default function HomePage() {
                 <div className="text-[10px] text-gray-600 mt-1">{snapshot.snapshot_date}</div>
               </div>
             </div>
+
+            {/* Investor Split */}
+            {investors.length > 1 && (() => {
+              const totalDeposited = investors.reduce((s, i) => s + Number(i.initial_deposit), 0);
+              const accountVal = Number(snapshot.account_balance || 0);
+              const gainPct = totalDeposited > 0 ? ((accountVal - totalDeposited) / totalDeposited) * 100 : 0;
+              return (
+                <div className="mt-3 pt-3 border-t border-gray-800">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] text-gray-500 uppercase">Investor Split</span>
+                    <span className={`text-[10px] font-mono ${gainPct >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {gainPct >= 0 ? '+' : ''}{gainPct.toFixed(1)}% overall
+                    </span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {investors.map(inv => {
+                      const share = totalDeposited > 0 ? Number(inv.initial_deposit) / totalDeposited : 0;
+                      const currentVal = accountVal * share;
+                      const pnl = currentVal - Number(inv.initial_deposit);
+                      return (
+                        <div key={inv.name} className="flex items-center justify-between text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="text-gray-300 font-medium">{inv.name}</span>
+                            <span className="text-[10px] text-gray-600">{(share * 100).toFixed(0)}%</span>
+                          </div>
+                          <div className="flex items-center gap-2 font-mono">
+                            <span className="text-gray-300">${currentVal.toFixed(2)}</span>
+                            <span className={`text-[10px] ${pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                              {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
