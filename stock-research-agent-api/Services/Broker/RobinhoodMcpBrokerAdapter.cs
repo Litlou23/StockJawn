@@ -40,10 +40,15 @@ public record RobinhoodOrderLookup
     public JsonNode? MatchedOrder { get; init; }
 }
 
+public record OptionOrderSpec(string Ticker, string OptionId, int Contracts, double LimitPrice, string RefId, DateTimeOffset? Since = null);
+
 public record RobinhoodReadiness
 {
     public bool Ready { get; init; }
     public List<string> Problems { get; init; } = [];
+    // Options are checked separately so an options problem never blocks stock trading.
+    public bool OptionsReady { get; init; }
+    public List<string> OptionProblems { get; init; } = [];
     public JsonArray Tools { get; init; } = [];
 }
 
@@ -62,6 +67,13 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"{{market_hours}}"}""";
     private const string DefaultGetOrdersArgs =
         """{"account_number":"{{account_number}}","symbol":"{{ticker}}","placed_agent":"agentic"}""";
+    // Single-leg buy-to-open, always regular hours + GFD (option tools don't take equity extended sessions).
+    private const string DefaultPlaceOptionArgs =
+        """{"account_number":"{{account_number}}","legs":[{"option_id":"{{option_id}}","side":"buy","position_effect":"open"}],"type":"limit","quantity":"{{quantity}}","price":"{{limit_price}}","time_in_force":"gfd","market_hours":"regular_hours","ref_id":"{{ref_id}}"}""";
+    private const string DefaultReviewOptionArgs =
+        """{"account_number":"{{account_number}}","legs":[{"option_id":"{{option_id}}","side":"buy","position_effect":"open"}],"type":"limit","quantity":"{{quantity}}","price":"{{limit_price}}","time_in_force":"gfd","market_hours":"regular_hours","chain_symbol":"{{ticker}}","underlying_type":"equity"}""";
+    private const string DefaultGetOptionOrdersArgs =
+        """{"account_number":"{{account_number}}","placed_agent":"agentic","created_at_gte":"{{since}}"}""";
 
     private static readonly string[] OrderIdKeys = ["order_id", "orderId", "id"];
     private static readonly string[] OrderStateKeys = ["state", "status", "order_status"];
@@ -86,6 +98,10 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
     private readonly string _getOrdersArgsTemplate;
     private readonly string _orderIdPath;
     private string _accountNumber = "";
+    private string _optionLevel = "";
+    private readonly string _placeOptionArgsTemplate = DefaultPlaceOptionArgs;
+    private readonly string _reviewOptionArgsTemplate = DefaultReviewOptionArgs;
+    private readonly string _getOptionOrdersArgsTemplate = DefaultGetOptionOrdersArgs;
 
     private string? _sessionId;
     private bool _initialized;
@@ -152,13 +168,31 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         CheckTool(tools, _reviewOrderTool, _reviewOrderArgsTemplate, problems);
         CheckTool(tools, _getOrdersTool, _getOrdersArgsTemplate, problems);
 
-        return new() { Ready = problems.Count == 0, Problems = problems, Tools = tools };
+        var optionProblems = new List<string>();
+        if (accountProblem is not null) optionProblems.Add(accountProblem);
+        else if (_optionLevel is not ("option_level_2" or "option_level_3"))
+            optionProblems.Add($"Agentic account option level is '{(_optionLevel.Length > 0 ? _optionLevel : "none")}' — needs option_level_2 or 3");
+        CheckTool(tools, "place_option_order", _placeOptionArgsTemplate, optionProblems);
+        CheckTool(tools, "review_option_order", _reviewOptionArgsTemplate, optionProblems);
+        CheckTool(tools, "get_option_orders", _getOptionOrdersArgsTemplate, optionProblems);
+        if (!tools.Any(t => t?["name"]?.ToString() == "get_option_quotes"))
+            optionProblems.Add("Tool 'get_option_quotes' not offered by the server");
+
+        return new()
+        {
+            Ready = problems.Count == 0,
+            Problems = problems,
+            OptionsReady = optionProblems.Count == 0,
+            OptionProblems = optionProblems,
+            Tools = tools,
+        };
     }
 
     // get_accounts says exactly one account is agent-tradable; use it, and refuse to guess if that's not true.
     private async Task<string?> ResolveAgenticAccountAsync(CancellationToken ct)
     {
         _accountNumber = "";
+        _optionLevel = "";
         JsonNode? payload;
         try
         {
@@ -174,14 +208,14 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
 
         var tradable = accounts
             .Where(a => a["agentic_allowed"]?.ToString().Equals("true", StringComparison.OrdinalIgnoreCase) == true)
-            .Select(a => a["account_number"]?.ToString())
-            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Where(a => !string.IsNullOrWhiteSpace(a["account_number"]?.ToString()))
             .ToList();
 
         if (tradable.Count != 1)
             return $"Expected exactly 1 agent-tradable Robinhood account, found {tradable.Count}";
 
-        _accountNumber = tradable[0]!;
+        _accountNumber = tradable[0]["account_number"]!.ToString();
+        _optionLevel = tradable[0]["option_level"]?.ToString() ?? "";
         return null;
     }
 
@@ -362,6 +396,291 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         };
     }
 
+    // ── Account value, order status, exits ──────────────────────────
+
+    public record PortfolioSnapshot(double TotalValue, double BuyingPower, double Cash, JsonNode? Raw);
+
+    // get_portfolio → data.total_value, data.cash, data.buying_power.buying_power (strings).
+    public async Task<(PortfolioSnapshot? Snapshot, string? Error)> GetPortfolioAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = await CallToolAsync("get_portfolio", new JsonObject { ["account_number"] = _accountNumber }, ct);
+            var data = payload?["data"] ?? payload;
+            var total = ParseD(data?["total_value"]);
+            var cash = ParseD(data?["cash"]);
+            var bp = ParseD(data?["buying_power"]?["buying_power"]) ?? cash;
+            if (total is null || bp is null) return (null, "get_portfolio had no total_value / buying_power");
+            return (new PortfolioSnapshot(total.Value, bp.Value, cash ?? 0, payload), null);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    public record OrderState(string State, double FilledQuantity, double? AveragePrice, string? LastTransactionAt, JsonNode Raw);
+
+    // Equity: state, cumulative_quantity, average_price. Option: state, processed_quantity, processed_premium / legs executions.
+    public async Task<(OrderState? Order, string? Error)> GetOrderStateAsync(string orderId, bool isOption, CancellationToken ct = default)
+    {
+        try
+        {
+            var tool = isOption ? "get_option_orders" : "get_equity_orders";
+            var payload = await CallToolAsync(tool, new JsonObject { ["account_number"] = _accountNumber, ["order_id"] = orderId }, ct);
+            var order = FindOrderList(payload).FirstOrDefault(o => o["id"]?.ToString() == orderId);
+            if (order is null) return (null, $"Order {orderId} not found");
+
+            var state = order["state"]?.ToString() ?? "unknown";
+            double filled;
+            double? avg;
+            if (isOption)
+            {
+                filled = ParseD(order["processed_quantity"]) ?? 0;
+                var execs = (order["legs"] as JsonArray)?.OfType<JsonObject>()
+                    .SelectMany(l => (l["executions"] as JsonArray)?.OfType<JsonObject>() ?? []).ToList() ?? [];
+                var qty = execs.Sum(e => ParseD(e["quantity"]) ?? 0);
+                avg = qty > 0 ? execs.Sum(e => (ParseD(e["price"]) ?? 0) * (ParseD(e["quantity"]) ?? 0)) / qty : null;
+            }
+            else
+            {
+                filled = ParseD(order["cumulative_quantity"]) ?? 0;
+                avg = ParseD(order["average_price"]);
+            }
+            return (new OrderState(state, filled, avg, order["last_transaction_at"]?.ToString(), order.DeepClone()), null);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    // get_equity_quotes → data.results[].quote.last_trade_price (regular hours).
+    public async Task<double?> GetEquityLastPriceAsync(string ticker, CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = await CallToolAsync("get_equity_quotes",
+                new JsonObject { ["symbols"] = new JsonArray(JsonValue.Create(ticker)) }, ct);
+            var q = FindArray(payload, "results")?.OfType<JsonObject>().FirstOrDefault()?["quote"];
+            return ParseD(q?["last_trade_price"]) is > 0 and var p ? p : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Sell orders for exits: stop_market (GTC) for the stop, marketable limit for take-profit.
+    public async Task<RobinhoodOrderOutcome> PlaceEquitySellAsync(
+        string ticker, double quantity, string type, double price, string refId, CancellationToken ct = default)
+    {
+        var args = new JsonObject
+        {
+            ["account_number"] = _accountNumber,
+            ["symbol"] = ticker,
+            ["side"] = "sell",
+            ["type"] = type,
+            ["quantity"] = quantity.ToString("0.########", CultureInfo.InvariantCulture),
+            ["time_in_force"] = "gtc",
+            ["market_hours"] = "regular_hours",
+            ["ref_id"] = refId,
+        };
+        args[type == "stop_market" ? "stop_price" : "limit_price"] = price.ToString("F2", CultureInfo.InvariantCulture);
+
+        _logger.LogInformation("[robinhood-mcp] Placing SELL {Type} {Qty} {Ticker} @ {Price} ref={Ref}", type, quantity, ticker, price, refId);
+        JsonNode? payload;
+        try
+        {
+            payload = await CallToolAsync("place_equity_order", args, ct);
+        }
+        catch (RobinhoodMcpException ex)
+        {
+            return Failed(args, ex.Message, ex.NotPlaced);
+        }
+
+        var orderId = ExtractOrderId(payload);
+        var state = MapState(FindString(payload, OrderStateKeys));
+        var ok = !string.IsNullOrWhiteSpace(orderId) && state is not (BrokerOrderState.rejected or BrokerOrderState.canceled or BrokerOrderState.expired);
+        return new RobinhoodOrderOutcome
+        {
+            Result = new BrokerOrderResult
+            {
+                Success = ok,
+                BrokerOrderId = orderId,
+                ClientOrderId = refId,
+                Status = string.IsNullOrWhiteSpace(orderId) ? BrokerOrderState.unknown : state,
+                ErrorMessage = ok ? null : string.IsNullOrWhiteSpace(orderId) ? "No order id returned" : $"Sell came back {state}",
+            },
+            ToolArguments = args,
+            RawResponse = payload,
+        };
+    }
+
+    public async Task<(bool Accepted, string? Error)> CancelEquityOrderByIdAsync(string orderId, CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = await CallToolAsync("cancel_equity_order",
+                new JsonObject { ["account_number"] = _accountNumber, ["order_id"] = orderId }, ct);
+            var accepted = (payload?["data"]?["accepted"] ?? payload?["accepted"])?.ToString().Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+            return (accepted, accepted ? null : "Cancel not accepted");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    private static double? ParseD(JsonNode? node)
+        => double.TryParse(node?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : null;
+
+    // ── Options (single-leg buy-to-open) ────────────────────────────
+
+    public async Task<(double? Mid, JsonNode? Raw, string? Error)> GetOptionMidPriceAsync(string optionId, CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = await CallToolAsync("get_option_quotes",
+                new JsonObject { ["instrument_ids"] = new JsonArray(JsonValue.Create(optionId)) }, ct);
+            // PORT-LATER: quote field names are a best guess until a real get_option_quotes response is seen.
+            JsonNode? quote = payload is JsonArray arr ? arr.OfType<JsonObject>().FirstOrDefault()
+                : (FindArray(payload, "results") ?? FindArray(payload, "quotes") ?? FindArray(payload, "data"))?.OfType<JsonObject>().FirstOrDefault()
+                  ?? payload;
+            var bid = FindDouble(quote, ["bid_price", "bid"]);
+            var ask = FindDouble(quote, ["ask_price", "ask"]);
+            var mark = FindDouble(quote, ["mark_price", "adjusted_mark_price", "mark"]);
+            double? mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : mark > 0 ? mark : null;
+            return (mid, payload, mid is null ? "Quote had no usable bid/ask/mark" : null);
+        }
+        catch (Exception ex)
+        {
+            return (null, null, ex.Message);
+        }
+    }
+
+    public async Task<RobinhoodReviewOutcome> ReviewOptionOrderAsync(OptionOrderSpec spec, CancellationToken ct = default)
+    {
+        JsonObject args;
+        try { args = BuildOptionArgs(_reviewOptionArgsTemplate, spec); }
+        catch (Exception ex) when (ex is RobinhoodMcpException or JsonException) { return new() { Error = ex.Message }; }
+
+        try
+        {
+            var payload = await CallToolAsync("review_option_order", args, ct);
+            var blocking = FindArray(payload, "errors");
+            if (blocking is { Count: > 0 })
+                return new() { Error = $"Review blocked: {Truncate(blocking.ToJsonString())}", ToolArguments = args, RawResponse = payload };
+            return new() { Ok = true, ToolArguments = args, RawResponse = payload };
+        }
+        catch (Exception ex)
+        {
+            return new() { Error = $"Review failed: {ex.Message}", ToolArguments = args };
+        }
+    }
+
+    public async Task<RobinhoodOrderOutcome> PlaceOptionContractOrderAsync(OptionOrderSpec spec, CancellationToken ct = default)
+    {
+        if (!IsConfigured)
+            return Failed(new JsonObject(), "Robinhood MCP adapter is not configured");
+
+        JsonObject args;
+        try { args = BuildOptionArgs(_placeOptionArgsTemplate, spec); }
+        catch (Exception ex) when (ex is RobinhoodMcpException or JsonException) { return Failed(new JsonObject(), ex.Message); }
+
+        _logger.LogInformation("[robinhood-mcp] Placing OPTION buy {Qty}x {Option} ({Ticker}) limit={Limit} ref={Ref}",
+            spec.Contracts, spec.OptionId, spec.Ticker, spec.LimitPrice, spec.RefId);
+
+        JsonNode? payload;
+        try
+        {
+            payload = await CallToolAsync("place_option_order", args, ct);
+        }
+        catch (RobinhoodMcpException ex)
+        {
+            return Failed(args, ex.Message, ex.NotPlaced);
+        }
+
+        var orderId = ExtractOrderId(payload);
+        var state = MapState(FindString(payload, OrderStateKeys));
+        if (string.IsNullOrWhiteSpace(orderId))
+        {
+            return new RobinhoodOrderOutcome
+            {
+                Result = new BrokerOrderResult { Success = false, ClientOrderId = spec.RefId, ErrorMessage = "Tool call returned no order id", Status = BrokerOrderState.unknown },
+                ToolArguments = args,
+                RawResponse = payload,
+            };
+        }
+
+        var rejected = state is BrokerOrderState.rejected or BrokerOrderState.canceled or BrokerOrderState.expired;
+        return new RobinhoodOrderOutcome
+        {
+            Result = new BrokerOrderResult
+            {
+                Success = !rejected,
+                BrokerOrderId = orderId,
+                ClientOrderId = spec.RefId,
+                ErrorMessage = rejected ? $"Order {orderId} came back {state}" : null,
+                Status = state,
+            },
+            ToolArguments = args,
+            RawResponse = payload,
+        };
+    }
+
+    // Unknown outcome: find by ref_id, else by the contract id placed after `since`.
+    public async Task<RobinhoodOrderLookup> FindOptionOrderAsync(OptionOrderSpec spec, DateTimeOffset since, CancellationToken ct = default)
+    {
+        JsonNode? payload;
+        try
+        {
+            var args = BuildOptionArgs(_getOptionOrdersArgsTemplate, spec with { Since = since.AddMinutes(-1) });
+            payload = await CallToolAsync("get_option_orders", args, ct);
+        }
+        catch (Exception ex)
+        {
+            return new() { Error = ex.Message };
+        }
+
+        var orders = FindOrderList(payload);
+        var match = orders.FirstOrDefault(o => ContainsValue(o, spec.RefId));
+        var matchedBy = match is null ? "" : "ref_id";
+        if (match is null)
+        {
+            match = orders.FirstOrDefault(o => ContainsValue(o, spec.OptionId));
+            if (match is not null) matchedBy = "option_id_after_claim";
+        }
+
+        if (match is null) return new() { LookupSucceeded = true, Found = false };
+        return new()
+        {
+            LookupSucceeded = true,
+            Found = true,
+            OrderId = ExtractOrderId(match),
+            Status = MapState(FindString(match, OrderStateKeys)),
+            MatchedBy = matchedBy,
+            MatchedOrder = match.DeepClone(),
+        };
+    }
+
+    private JsonObject BuildOptionArgs(string template, OptionOrderSpec spec)
+    {
+        var values = new Dictionary<string, JsonNode?>
+        {
+            ["account_number"] = _accountNumber,
+            ["ticker"] = spec.Ticker,
+            ["option_id"] = spec.OptionId,
+            ["quantity"] = spec.Contracts.ToString(CultureInfo.InvariantCulture),
+            ["limit_price"] = spec.LimitPrice.ToString("F2", CultureInfo.InvariantCulture),
+            ["ref_id"] = spec.RefId,
+            ["since"] = (spec.Since ?? DateTimeOffset.UtcNow.AddDays(-1)).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
+        };
+        var parsed = JsonNode.Parse(template) as JsonObject
+            ?? throw new RobinhoodMcpException("Argument template must be a JSON object", notPlaced: true);
+        return (JsonObject)Fill(parsed, values)!;
+    }
+
     public async Task<BrokerOrderResult> PlaceMarketOrderAsync(BrokerOrderRequest request)
         => (await PlaceEquityOrderAsync(request, "market")).Result;
 
@@ -397,6 +716,7 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
 
     // PORT-LATER: the rest of IBrokerAdapter isn't wired yet.
     public Task<BrokerOrderResult> PlaceStopOrderAsync(BrokerOrderRequest request, double stopPrice) => NotSupported(nameof(PlaceStopOrderAsync));
+    // Needs Robinhood's instrument UUID, which BrokerOptionOrderRequest (OCC symbol only) doesn't carry — use PlaceOptionContractOrderAsync.
     public Task<BrokerOrderResult> PlaceOptionOrderAsync(BrokerOptionOrderRequest request) => NotSupported(nameof(PlaceOptionOrderAsync));
     public Task<BrokerOrderResult> ReplaceStopOrderAsync(string existingOrderId, BrokerOrderRequest request, double newStopPrice) => NotSupported(nameof(ReplaceStopOrderAsync));
     public Task<BrokerOrderResult> ClosePositionAsync(string ticker, double? quantity = null) => NotSupported(nameof(ClosePositionAsync));

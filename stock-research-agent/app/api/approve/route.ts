@@ -51,6 +51,22 @@ export async function POST(req: NextRequest) {
 
   const sb = getSupabaseClient();
 
+  // Lock approvals after too many wrong PINs in 15 minutes (a 4-digit PIN is otherwise guessable).
+  const { data: maxFailConfig } = await sb
+    .from('scoring_weight_overrides')
+    .select('effective_weight')
+    .eq('signal_name', 'approval_pin_max_failures')
+    .maybeSingle();
+  const maxFailures = Number(maxFailConfig?.effective_weight ?? 5);
+  const windowStart = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  const { count: recentFailures } = await sb
+    .from('approval_pin_failures')
+    .select('id', { count: 'exact', head: true })
+    .gte('attempted_at', windowStart);
+  if ((recentFailures ?? 0) >= maxFailures) {
+    return NextResponse.json({ error: 'Too many wrong PINs — approvals are locked for 15 minutes' }, { status: 429 });
+  }
+
   // Verify PIN
   const { data: pinConfig } = await sb
     .from('scoring_weight_overrides')
@@ -59,6 +75,7 @@ export async function POST(req: NextRequest) {
     .single();
 
   if (!pinConfig || String(pinConfig.effective_weight) !== String(pin)) {
+    await sb.from('approval_pin_failures').insert({});
     return NextResponse.json({ error: 'Invalid PIN' }, { status: 403 });
   }
 

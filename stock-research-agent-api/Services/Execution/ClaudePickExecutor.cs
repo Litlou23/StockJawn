@@ -21,8 +21,11 @@ public class ClaudePickExecutor
     private readonly RobinhoodMcpBrokerAdapter _broker;
     private readonly MarketDataService _marketData;
     private readonly ILogger<ClaudePickExecutor> _logger;
-    private readonly bool _enabled;
-    private readonly bool _dryRun;
+    private readonly bool _enabledFallback;
+    private readonly bool _dryRunFallback;
+    private bool _dryRun = true;
+    private RobinhoodReadiness? _lastReadiness;
+    private RiskContext? _risk;
 
     public ClaudePickExecutor(
         SupabaseClient db,
@@ -35,8 +38,9 @@ public class ClaudePickExecutor
         _broker = broker;
         _marketData = marketData;
         _logger = logger;
-        _enabled = configuration["ROBINHOOD_EXECUTOR_ENABLED"]?.ToLowerInvariant() == "true";
-        _dryRun = configuration["ROBINHOOD_EXECUTOR_DRY_RUN"]?.ToLowerInvariant() != "false";
+        // Only used when the DB rows (executor_enabled / executor_dry_run) don't exist.
+        _enabledFallback = configuration["ROBINHOOD_EXECUTOR_ENABLED"]?.ToLowerInvariant() == "true";
+        _dryRunFallback = configuration["ROBINHOOD_EXECUTOR_DRY_RUN"]?.ToLowerInvariant() != "false";
     }
 
     public Task<RobinhoodReadiness> CheckReadinessAsync(CancellationToken ct = default)
@@ -44,17 +48,32 @@ public class ClaudePickExecutor
 
     public async Task<PickExecutionRunResult> ExecuteApprovedPicksAsync(CancellationToken ct = default)
     {
-        if (!_enabled)
-            return new("Executor disabled (ROBINHOOD_EXECUTOR_ENABLED is not true) — no picks touched", []);
         if (!_db.IsConfigured)
             return new("", ["Supabase not configured"]);
+
+        // Switches live in scoring_weight_overrides so they can be flipped without touching Azure.
+        var enabled = await GetDbConfigNumberAsync("executor_enabled", _enabledFallback ? 1 : 0) >= 1;
+        if (!enabled)
+            return new("Executor disabled (executor_enabled = 0) — no picks touched", []);
 
         if (!await RunLock.WaitAsync(0, ct))
             return new("Another execution run is already in progress — skipped", []);
 
         try
         {
-            return await RunAsync(ct);
+            _dryRun = await GetDbConfigNumberAsync("executor_dry_run", _dryRunFallback ? 1 : 0) >= 1;
+            _lastReadiness = null;
+            _risk = null;
+            var result = await RunAsync(ct);
+
+            // Fills, exits and stuck-pick checks run every live cycle, even when nothing new was approved.
+            if (_dryRun || _lastReadiness is not { Ready: true }) return result;
+            var monitor = new PickLifecycleMonitor(_db, _broker, _logger);
+            var (lines, errors) = await monitor.RunAsync(ct);
+            if (lines.Count == 0 && errors.Count == 0) return result;
+            return new(
+                string.Join(" || ", new[] { result.Summary, lines.Count > 0 ? "monitor: " + string.Join(" | ", lines) : "" }.Where(x => x.Length > 0)),
+                result.Errors.Concat(errors).ToList());
         }
         finally
         {
@@ -67,6 +86,7 @@ public class ClaudePickExecutor
         RobinhoodReadiness? readiness = null;
         if (!_dryRun || _broker.IsConfigured)
             readiness = await _broker.CheckReadinessAsync(ct);
+        _lastReadiness = readiness;
 
         if (!_dryRun && readiness is { Ready: false })
         {
@@ -87,7 +107,7 @@ public class ClaudePickExecutor
             Table,
             filter: $"approval_status=eq.approved&ticker=not.in.(CASH,EXEC_LOG)&pick_date=gte.{today}",
             order: "total_score.desc",
-            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at");
+            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration");
 
         var readyNote = readiness is null ? "robinhood=not configured"
             : readiness.Ready ? "robinhood=READY"
@@ -101,6 +121,23 @@ public class ClaudePickExecutor
         var lines = new List<string>();
         var canTalkToBroker = readiness is { Ready: true };
 
+        if (canTalkToBroker)
+        {
+            var (risk, riskError) = await new ExecutionRiskLoader(_db, _broker, _logger).LoadAsync(recordSnapshot: !_dryRun, ct);
+            if (risk is null)
+            {
+                // Can't check limits → don't trade; picks stay approved for the next cycle.
+                if (!_dryRun) return new($"[{mode}] {readyNote}", [riskError!]);
+                lines.Add($"risk: {riskError}");
+            }
+            else
+            {
+                _risk = risk;
+                readyNote += $" — risk: {risk.Describe()}" + (risk.BreakerTripped is not null ? $" — {risk.BreakerTripped}" : "");
+            }
+        }
+        var optionsCfg = picks.Any(IsOptionPick) ? await LoadOptionsConfigAsync() : new OptionsConfig(false, 0);
+
         foreach (var pick in picks)
         {
             ct.ThrowIfCancellationRequested();
@@ -108,9 +145,19 @@ public class ClaudePickExecutor
             var ticker = pick["ticker"]?.ToString() ?? "?";
             try
             {
-                lines.Add(_dryRun
-                    ? await DryRunOneAsync(pick, canTalkToBroker, ct)
-                    : await ExecuteOneAsync(pick, marketHours, ct));
+                if (IsOptionPick(pick))
+                {
+                    var op = PickFields.From(pick);
+                    lines.Add(_dryRun
+                        ? await DryRunOptionAsync(op, optionsCfg, readiness, ct)
+                        : await ExecuteOptionAsync(op, optionsCfg, readiness, ct));
+                }
+                else
+                {
+                    lines.Add(_dryRun
+                        ? await DryRunOneAsync(pick, canTalkToBroker, ct)
+                        : await ExecuteOneAsync(pick, marketHours, ct));
+                }
             }
             catch (Exception ex)
             {
@@ -130,6 +177,10 @@ public class ClaudePickExecutor
 
         var (price, source) = await GetOrderPriceAsync(p.Ticker, p.EntryPrice);
         if (price <= 0) return $"{p.Ticker}: dry-run — would fail, no price available";
+
+        var (sized, sizeError) = SizeStock(p, price);
+        if (sized is null) return $"{p.Ticker}: dry-run — {sizeError}";
+        p = sized;
 
         var marketHours = await GetDbConfigStringAsync("broker_market_hours", "regular_hours");
         var request = BuildRequest(p, price, marketHours);
@@ -169,8 +220,17 @@ public class ClaudePickExecutor
             return $"{p.Ticker}: failed — {msg}";
         }
 
+        var (sized, sizeError) = SizeStock(p, price);
+        if (sized is null)
+        {
+            await MarkFailedAsync(p, sizeError!, null);
+            return $"{p.Ticker}: failed — {sizeError}";
+        }
+        p = sized;
+
         var request = BuildRequest(p, price, marketHours);
         var details = BaseDetails(request, price, priceSource);
+        details["sizing"] = p.Quantity == PickFields.From(pick).Quantity ? "order_quantity" : "auto";
 
         // Step 1: pre-trade review. Nothing is placed yet, so any problem hands off to the manual fallback.
         var review = await _broker.ReviewEquityOrderAsync(request, "limit", CancellationToken.None);
@@ -204,7 +264,10 @@ public class ClaudePickExecutor
         }
 
         if (outcome is { Result.Success: true })
+        {
+            if (_risk is not null) _risk.BuyingPower -= p.Quantity * request.LimitPrice!.Value;
             return await MarkExecutedAsync(p, request, outcome.Result.BrokerOrderId!, outcome.Result.Status.ToString(), details, "place response");
+        }
 
         if (outcome is not null && outcome.Result.Status is BrokerOrderState.rejected or BrokerOrderState.canceled or BrokerOrderState.expired)
         {
@@ -246,20 +309,25 @@ public class ClaudePickExecutor
         if (p.Direction != "bullish")
             return $"PORT-LATER: no execution rule for direction '{p.Direction}' (only bullish buys are wired)";
 
-        // PORT-LATER: position sizing lived in the missing Claude job prompt; until it's ported, the pick must carry order_quantity.
-        if (p.Quantity <= 0)
-            return "PORT-LATER: order_quantity is not set — sizing rule not ported yet";
-
         return null;
     }
 
-    // PORT-LATER: rules that exist only in the missing Claude job prompt. Nothing here is enforced yet:
-    //  - max_position_pct (scoring_weight_overrides, currently 25) — stored, never enforced in code
-    //  - circuit_breaker_weekly_loss_pct (scoring_weight_overrides, currently 10) — stored, never enforced in code
-    //  - "max per trade $80" / "min stock price $4" — seen in Claude's nightly research output only
-    //  - stop order after entry (the table has stop_order_id; the Claude job set it)
-    //  - fallback when Robinhood isn't configured/reachable (the ready fallback is wired for review/rejected orders only)
+    // Risk limits now live in ExecutionRisk.cs (per-trade cap, position %, buying power, min price, weekly breaker);
+    // stops/take-profit/fill tracking live in PickLifecycleMonitor.cs.
+    // PORT-LATER: fallback when Robinhood isn't configured/reachable (ready fallback covers review/rejected orders only).
     private static string? PortLaterRiskChecks() => null;
+
+    // Uses order_quantity when set, otherwise the biggest whole-share buy the risk limits allow.
+    private (PickFields? Sized, string? Error) SizeStock(PickFields p, double price)
+    {
+        if (_risk is null) return (null, "Risk limits could not be loaded");
+        var limit = Math.Round(price * 1.001, 2);
+        var qty = p.Quantity > 0 ? p.Quantity : Math.Floor(_risk.TradeBudget / limit);
+        if (qty < 1)
+            return (null, $"Can't afford 1 share at ${limit:F2} within limits ({_risk.Describe()})");
+        if (_risk.Check(qty * limit, price) is { } block) return (null, block);
+        return (p with { Quantity = qty }, null);
+    }
 
     private static BrokerOrderRequest BuildRequest(PickFields p, double price, string marketHours = "regular_hours") => new()
     {
@@ -288,8 +356,12 @@ public class ClaudePickExecutor
         return rows.Count == 1;
     }
 
-    private async Task<string> MarkExecutedAsync(
+    private Task<string> MarkExecutedAsync(
         PickFields p, BrokerOrderRequest request, string orderId, string status, JsonObject details, string how)
+        => MarkExecutedCoreAsync(p, orderId, status, $"buy {request.Quantity} {p.Ticker} limit ${request.LimitPrice:F2}", details, how);
+
+    private async Task<string> MarkExecutedCoreAsync(
+        PickFields p, string orderId, string status, string orderNote, JsonObject details, string how)
     {
         var saved = await _db.UpdateAsync(Table, $"id=eq.{p.Id}&approval_status=eq.executing", new Dictionary<string, object?>
         {
@@ -297,7 +369,7 @@ public class ClaudePickExecutor
             ["order_id"] = orderId,
             ["executed_at"] = DateTimeOffset.UtcNow,
             ["order_details"] = details,
-            ["execution_notes"] = $"Robinhood order {orderId} ({status}, {how}) — buy {request.Quantity} {p.Ticker} limit ${request.LimitPrice:F2}",
+            ["execution_notes"] = $"Robinhood order {orderId} ({status}, {how}) — {orderNote}",
         });
 
         if (!saved)
@@ -312,14 +384,16 @@ public class ClaudePickExecutor
     }
 
     // Same fallback the old Claude job used: status "ready" plus manual-order instructions.
-    private async Task MarkReadyForManualAsync(PickFields p, string error, BrokerOrderRequest request, JsonObject details)
+    private Task MarkReadyForManualAsync(PickFields p, string error, BrokerOrderRequest request, JsonObject details)
+        => MarkReadyCoreAsync(p, error, $"Suggested: BUY {request.Quantity} share(s) {p.Ticker} limit ~${request.LimitPrice:F2}, GFD.", details);
+
+    private async Task MarkReadyCoreAsync(PickFields p, string error, string suggestion, JsonObject details)
     {
         var ok = await _db.UpdateAsync(Table, $"id=eq.{p.Id}&approval_status=eq.executing", new Dictionary<string, object?>
         {
             ["approval_status"] = "ready",
             ["execution_error"] = error,
-            ["execution_notes"] = $"Robinhood order not placed ({error}) — place manually on Robinhood. " +
-                $"Suggested: BUY {request.Quantity} share(s) {p.Ticker} limit ~${request.LimitPrice:F2}, GFD.",
+            ["execution_notes"] = $"Robinhood order not placed ({error}) — place manually on Robinhood. {suggestion}",
             ["order_details"] = details,
         });
         if (!ok)
@@ -388,14 +462,215 @@ public class ClaudePickExecutor
         }
     }
 
+    // ── Options path (call/put picks). Mirrors the stock flow: claim → validate → quote → review → place → reconcile.
+
+    private sealed record OptionsConfig(bool Enabled, double MaxContractPrice);
+
+    private async Task<OptionsConfig> LoadOptionsConfigAsync()
+    {
+        var enabled = await GetDbConfigNumberAsync("options_enabled", 0) >= 1;
+        var max = await GetDbConfigNumberAsync("options_max_contract_price", 0);
+        return new OptionsConfig(enabled, max);
+    }
+
+    private static string? ValidateOption(PickFields p, OptionsConfig cfg, RobinhoodReadiness? readiness)
+    {
+        if (!cfg.Enabled) return "Options are switched off (options_enabled = 0)";
+        if (readiness is not { OptionsReady: true })
+            return $"Robinhood options NOT READY ({string.Join("; ", readiness?.OptionProblems ?? ["not checked"])})";
+        if (string.IsNullOrWhiteSpace(p.Ticker)) return "Pick has no ticker";
+        if (string.IsNullOrWhiteSpace(p.OptionContractId)) return "Option pick has no option_contract_id";
+        if (p.OrderType == "call" && p.Direction != "bullish") return "Call picks must be bullish";
+        if (p.OrderType == "put" && p.Direction != "bearish") return "Put picks must be bearish";
+        if (p.Quantity < 1 || p.Quantity != Math.Floor(p.Quantity)) return "order_quantity must be a whole number of contracts (1+)";
+        if (cfg.MaxContractPrice <= 0) return "options_max_contract_price is not set";
+        return null;
+    }
+
+    private async Task<(OptionOrderSpec? Spec, JsonObject Details, string? Error)> BuildOptionSpecAsync(PickFields p, OptionsConfig cfg, CancellationToken ct)
+    {
+        var (mid, rawQuote, quoteError) = await _broker.GetOptionMidPriceAsync(p.OptionContractId!, ct);
+        var details = new JsonObject
+        {
+            ["broker"] = "robinhood_mcp",
+            ["asset"] = "option",
+            ["order_type"] = p.OrderType,
+            ["option_contract_id"] = p.OptionContractId,
+            ["option_contract_symbol"] = p.OptionContractSymbol,
+            ["option_strike"] = p.OptionStrike,
+            ["option_expiration"] = p.OptionExpiration,
+            ["contracts"] = (int)p.Quantity,
+            ["quote"] = rawQuote?.DeepClone(),
+        };
+
+        // No entry_price fallback for options: a stale premium can be far off, so no live quote = no order.
+        if (mid is not > 0) return (null, details, $"No live option quote ({quoteError})");
+
+        // Existing StockJawn option rule (PortfolioBalanceEngine): limit at mid × 1.02.
+        var limit = Math.Round(mid.Value * 1.02, 2, MidpointRounding.AwayFromZero);
+        details["mid_price"] = mid.Value;
+        details["limit_price"] = limit;
+
+        var perContract = limit * 100;
+        details["cost_per_contract"] = perContract;
+        if (perContract > cfg.MaxContractPrice)
+            return (null, details, $"Contract costs ${perContract:F2}, over options_max_contract_price ${cfg.MaxContractPrice:F2}");
+
+        if (_risk is null) return (null, details, "Risk limits could not be loaded");
+        var total = perContract * (int)p.Quantity;
+        if (_risk.Check(total, null) is { } riskBlock) return (null, details, riskBlock);
+
+        return (new OptionOrderSpec(p.Ticker, p.OptionContractId!, (int)p.Quantity, limit, p.Id), details, null);
+    }
+
+    private async Task<string> DryRunOptionAsync(PickFields p, OptionsConfig cfg, RobinhoodReadiness? readiness, CancellationToken ct)
+    {
+        var err = ValidateOption(p, cfg, readiness);
+        if (err is not null) return $"{p.Ticker} {p.OrderType}: dry-run — {err}";
+
+        var (spec, _, specErr) = await BuildOptionSpecAsync(p, cfg, ct);
+        if (spec is null) return $"{p.Ticker} {p.OrderType}: dry-run — {specErr}";
+
+        var review = await _broker.ReviewOptionOrderAsync(spec, ct);
+        var plan = $"would buy {spec.Contracts}x {DescribeContract(p)} @ limit ${spec.LimitPrice:F2}";
+        plan += review.Ok ? "; review OK" : $"; review says: {review.Error}";
+        return $"{p.Ticker} {p.OrderType}: dry-run — {plan}";
+    }
+
+    private async Task<string> ExecuteOptionAsync(PickFields p, OptionsConfig cfg, RobinhoodReadiness? readiness, CancellationToken ct)
+    {
+        var claimedAt = DateTimeOffset.UtcNow;
+        if (!await ClaimAsync(p.Id, claimedAt))
+            return $"{p.Ticker}: skipped (already claimed)";
+
+        var err = ValidateOption(p, cfg, readiness);
+        if (err is not null)
+        {
+            await MarkFailedAsync(p, err, null);
+            return $"{p.Ticker} {p.OrderType}: failed — {err}";
+        }
+
+        var (spec, details, specErr) = await BuildOptionSpecAsync(p, cfg, CancellationToken.None);
+        if (spec is null)
+        {
+            await MarkFailedAsync(p, specErr!, details);
+            return $"{p.Ticker} {p.OrderType}: failed — {specErr}";
+        }
+
+        var contract = DescribeContract(p);
+        var manual = $"Suggested: BUY {spec.Contracts}x {contract} limit ~${spec.LimitPrice:F2}, GFD.";
+
+        var review = await _broker.ReviewOptionOrderAsync(spec, CancellationToken.None);
+        details["review_arguments"] = review.ToolArguments.DeepClone();
+        details["review_response"] = review.RawResponse?.DeepClone();
+        if (!review.Ok)
+        {
+            var msg = review.Error ?? "Review did not pass";
+            await MarkReadyCoreAsync(p, msg, manual, details);
+            return $"{p.Ticker} {p.OrderType}: ready (manual) — {msg}";
+        }
+
+        RobinhoodOrderOutcome? outcome = null;
+        string? thrown = null;
+        try
+        {
+            outcome = await _broker.PlaceOptionContractOrderAsync(spec, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            thrown = $"{ex.GetType().Name}: {ex.Message}";
+            _logger.LogError(ex, "[pick-executor] {Ticker} ({Id}) option order call threw", p.Ticker, p.Id);
+        }
+
+        if (outcome is not null)
+        {
+            details["broker_status"] = outcome.Result.Status.ToString();
+            details["tool_arguments"] = outcome.ToolArguments.DeepClone();
+            details["tool_response"] = outcome.RawResponse?.DeepClone();
+        }
+
+        var note = $"buy {spec.Contracts}x {contract} limit ${spec.LimitPrice:F2}";
+        if (outcome is { Result.Success: true })
+        {
+            if (_risk is not null) _risk.BuyingPower -= spec.LimitPrice * 100 * spec.Contracts;
+            return await MarkExecutedCoreAsync(p, outcome.Result.BrokerOrderId!, outcome.Result.Status.ToString(), note, details, "place response");
+        }
+
+        if (outcome is not null && outcome.Result.Status is BrokerOrderState.rejected or BrokerOrderState.canceled or BrokerOrderState.expired)
+        {
+            var msg = outcome.Result.ErrorMessage ?? "Order rejected";
+            await MarkReadyCoreAsync(p, msg, manual, details);
+            return $"{p.Ticker} {p.OrderType}: ready (manual) — {msg}";
+        }
+
+        var unknownReason = thrown ?? outcome?.Result.ErrorMessage ?? "unknown";
+        details["unknown_reason"] = unknownReason;
+        await Task.Delay(ReconcileDelay, CancellationToken.None);
+        var lookup = await _broker.FindOptionOrderAsync(spec, claimedAt, CancellationToken.None);
+        details["reconcile"] = new JsonObject
+        {
+            ["lookup_succeeded"] = lookup.LookupSucceeded,
+            ["found"] = lookup.Found,
+            ["matched_by"] = lookup.MatchedBy,
+            ["error"] = lookup.Error,
+            ["order"] = lookup.MatchedOrder?.DeepClone(),
+        };
+
+        if (lookup is { LookupSucceeded: true, Found: true } && !string.IsNullOrWhiteSpace(lookup.OrderId))
+            return await MarkExecutedCoreAsync(p, lookup.OrderId!, lookup.Status.ToString(), note, details, $"reconciled by {lookup.MatchedBy}");
+
+        var failMsg = lookup.LookupSucceeded
+            ? $"Order outcome unknown ({unknownReason}); not found in Robinhood option orders"
+            : $"Order outcome unknown ({unknownReason}); lookup also failed ({lookup.Error}) — check Robinhood for ref {spec.RefId} before retrying";
+        await MarkFailedAsync(p, failMsg, details);
+        return $"{p.Ticker} {p.OrderType}: failed — {failMsg}";
+    }
+
+    private static string DescribeContract(PickFields p)
+    {
+        var strike = p.OptionStrike is > 0 ? $"${p.OptionStrike.Value.ToString("0.##", CultureInfo.InvariantCulture)} " : "";
+        var exp = DateTime.TryParse(p.OptionExpiration, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? $" {d:MM/dd} exp" : "";
+        return $"{p.Ticker} {strike}{p.OrderType}{exp}";
+    }
+
+    private async Task<double> GetDbConfigNumberAsync(string signalName, double fallback)
+    {
+        try
+        {
+            var row = await _db.SelectSingleAsync("scoring_weight_overrides", $"signal_name=eq.{signalName}&status=eq.active");
+            return double.TryParse(row?["effective_weight"]?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[pick-executor] Failed to read DB config '{Signal}', using {Fallback}", signalName, fallback);
+            return fallback;
+        }
+    }
+
+    private static bool IsOptionPick(JsonObject row)
+        => (row["order_type"]?.ToString() ?? "stock").ToLowerInvariant() is "call" or "put";
+
     private sealed record PickFields(string Id, string Ticker, string Direction, double Quantity, double EntryPrice)
     {
+        public string OrderType { get; init; } = "stock";
+        public string? OptionContractId { get; init; }
+        public string? OptionContractSymbol { get; init; }
+        public double? OptionStrike { get; init; }
+        public string? OptionExpiration { get; init; }
+
         public static PickFields From(JsonObject row) => new(
             row["id"]?.ToString() ?? "",
             (row["ticker"]?.ToString() ?? "").ToUpperInvariant(),
             (row["direction"]?.ToString() ?? "").ToLowerInvariant(),
             ReadDouble(row, "order_quantity"),
-            ReadDouble(row, "entry_price"));
+            ReadDouble(row, "entry_price"))
+        {
+            OrderType = (row["order_type"]?.ToString() ?? "stock").ToLowerInvariant(),
+            OptionContractId = row["option_contract_id"]?.ToString(),
+            OptionContractSymbol = row["option_contract_symbol"]?.ToString(),
+            OptionStrike = ReadDouble(row, "option_strike") is var k && k > 0 ? k : null,
+            OptionExpiration = row["option_expiration"]?.ToString(),
+        };
 
         private static double ReadDouble(JsonObject row, string key)
             => double.TryParse(row[key]?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : 0;

@@ -27,6 +27,11 @@ interface Pick {
   created_at?: string;
   executed_at?: string;
   order_id?: string;
+  order_type?: 'stock' | 'call' | 'put';
+  order_quantity?: number | null;
+  option_strike?: number | null;
+  option_expiration?: string | null;
+  option_contract_symbol?: string | null;
 }
 
 function today() {
@@ -94,7 +99,7 @@ export default function ApprovePage() {
       if (r.ok) {
         setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED — executor picks up in ~30s', ok: true } }));
       } else {
-        const text = r.status === 403 ? 'Wrong PIN' : r.status === 410 ? 'Expired' : (r.error || 'Failed');
+        const text = r.status === 403 ? 'Wrong PIN' : r.status === 410 ? 'Expired' : r.status === 429 ? 'Locked — too many wrong PINs' : (r.error || 'Failed');
         setMessages(m => ({ ...m, [pickId]: { text, ok: false } }));
         if (r.status === 403) {
           setTimeout(() => setMessages(m => { const c = { ...m }; delete c[pickId]; return c; }), 2000);
@@ -182,7 +187,8 @@ export default function ApprovePage() {
   const skippedPicks = picks.filter(p => ['skipped', 'failed'].includes(p.approval_status));
 
   const renderCard = (pick: Pick, showActions: boolean) => {
-    const isOption = pick.notes?.includes('OPTION:');
+    const isContract = pick.order_type === 'call' || pick.order_type === 'put';
+    const isOption = isContract || pick.notes?.includes('OPTION:');
     const isBearish = pick.direction === 'bearish';
     const isCash = pick.ticker === 'CASH';
     const msg = messages[pick.id];
@@ -235,7 +241,7 @@ export default function ApprovePage() {
                 background: isBearish ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)',
                 color: isBearish ? '#f87171' : '#4ade80'
               }}>
-                {isBearish ? 'PUT' : 'CALL'}
+                {isContract ? pick.order_type!.toUpperCase() : isBearish ? 'PUT' : 'CALL'}
               </span>
               {isOption && (
                 <span style={{
@@ -295,8 +301,20 @@ export default function ApprovePage() {
           </div>
         )}
 
+        {/* Contract the executor will buy */}
+        {isContract && (
+          <div style={{
+            margin: '4px 16px 0', padding: '6px 10px', borderRadius: '8px',
+            background: 'rgba(168,85,247,0.08)', fontSize: '12px', color: '#c084fc', fontFamily: 'monospace'
+          }}>
+            {pick.order_quantity ?? '?'}x {pick.ticker} {pick.option_strike != null ? `$${Number(pick.option_strike)}` : ''} {pick.order_type!.toUpperCase()}
+            {pick.option_expiration ? ` · exp ${pick.option_expiration}` : ''}
+            {pick.option_contract_symbol ? ` · ${pick.option_contract_symbol}` : ''}
+          </div>
+        )}
+
         {/* Option details */}
-        {isOption && optionLine && (
+        {isOption && !isContract && optionLine && (
           <div style={{
             margin: '4px 16px 0', padding: '6px 10px', borderRadius: '8px',
             background: 'rgba(168,85,247,0.08)', fontSize: '11px', color: '#c084fc',
