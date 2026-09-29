@@ -1,31 +1,41 @@
+using System.Globalization;
+using StockResearchAgent.Api.Services.Supabase;
+
 namespace StockResearchAgent.Api.Services.Execution;
 
 /// <summary>
-/// Polls Supabase every 30 seconds during US market hours for approved picks
+/// Polls Supabase every 30 seconds during configurable market hours for approved picks
 /// and hands them to ClaudePickExecutor. This replaces the Netlify → Azure
 /// trigger chain: the approval page just writes to Supabase and this service
 /// picks it up automatically.
+///
+/// Poll window is DB-configurable via scoring_weight_overrides:
+///   signal_name='broker_poll_window', reason='09:25,16:05' (comma-delimited start,end ET times)
+/// Change the DB row to widen/narrow the window without redeploying.
 /// </summary>
 public class PickExecutorPollingService : BackgroundService
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
 
-    // US Eastern market hours: 9:30 AM – 4:00 PM ET.
-    // Poll from 9:25 AM (catch approvals right before open) to 4:05 PM (catch last-minute fills).
-    private static readonly TimeSpan MarketOpenPoll = new(9, 25, 0);
-    private static readonly TimeSpan MarketClosePoll = new(16, 5, 0);
+    // Defaults if DB config is missing or unparseable.
+    private static readonly TimeSpan DefaultOpen = new(9, 25, 0);
+    private static readonly TimeSpan DefaultClose = new(16, 5, 0);
+
+    // Re-read DB config every 5 minutes so changes take effect without restart.
+    private static readonly TimeSpan ConfigRefreshInterval = TimeSpan.FromMinutes(5);
 
     private readonly IServiceScopeFactory _scopeFactory;
-    private readonly IConfiguration _configuration;
     private readonly ILogger<PickExecutorPollingService> _logger;
+
+    private TimeSpan _pollOpen = DefaultOpen;
+    private TimeSpan _pollClose = DefaultClose;
+    private DateTime _lastConfigRead = DateTime.MinValue;
 
     public PickExecutorPollingService(
         IServiceScopeFactory scopeFactory,
-        IConfiguration configuration,
         ILogger<PickExecutorPollingService> logger)
     {
         _scopeFactory = scopeFactory;
-        _configuration = configuration;
         _logger = logger;
     }
 
@@ -41,6 +51,8 @@ public class PickExecutorPollingService : BackgroundService
         {
             try
             {
+                await RefreshConfigIfNeededAsync();
+
                 if (IsMarketHours())
                 {
                     await RunOnceAsync(stoppingToken);
@@ -78,7 +90,54 @@ public class PickExecutorPollingService : BackgroundService
         }
     }
 
-    private static bool IsMarketHours()
+    /// <summary>
+    /// Reads broker_poll_window from DB every 5 minutes.
+    /// Format: "HH:mm,HH:mm" (start,end in ET), e.g. "09:25,20:00" for extended hours.
+    /// </summary>
+    private async Task RefreshConfigIfNeededAsync()
+    {
+        if (DateTime.UtcNow - _lastConfigRead < ConfigRefreshInterval)
+            return;
+
+        _lastConfigRead = DateTime.UtcNow;
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<SupabaseClient>();
+            if (!db.IsConfigured) return;
+
+            var row = await db.SelectSingleAsync(
+                "scoring_weight_overrides",
+                "signal_name=eq.broker_poll_window&status=eq.active");
+
+            var value = row?["reason"]?.ToString();
+            if (string.IsNullOrWhiteSpace(value)) return;
+
+            var parts = value.Split(',');
+            if (parts.Length == 2
+                && TimeSpan.TryParseExact(parts[0].Trim(), @"hh\:mm", CultureInfo.InvariantCulture, out var open)
+                && TimeSpan.TryParseExact(parts[1].Trim(), @"hh\:mm", CultureInfo.InvariantCulture, out var close))
+            {
+                if (_pollOpen != open || _pollClose != close)
+                {
+                    _logger.LogInformation("[pick-poller] Poll window updated: {Open} – {Close} ET", open, close);
+                }
+                _pollOpen = open;
+                _pollClose = close;
+            }
+            else
+            {
+                _logger.LogWarning("[pick-poller] Invalid broker_poll_window format '{Value}', expected 'HH:mm,HH:mm'", value);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[pick-poller] Failed to refresh poll window config, keeping {Open} – {Close}", _pollOpen, _pollClose);
+        }
+    }
+
+    private bool IsMarketHours()
     {
         var eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
         var now = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, eastern);
@@ -88,6 +147,6 @@ public class PickExecutorPollingService : BackgroundService
             return false;
 
         var time = now.TimeOfDay;
-        return time >= MarketOpenPoll && time <= MarketClosePoll;
+        return time >= _pollOpen && time <= _pollClose;
     }
 }

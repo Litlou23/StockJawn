@@ -95,6 +95,9 @@ public record BrokerOrderRequest
     /// <summary>day or gtc (good-til-cancelled).</summary>
     public BrokerTimeInForce TimeInForce { get; init; } = BrokerTimeInForce.day;
 
+    /// <summary>Robinhood market session: regular_hours, extended_hours, or all_day_hours.</summary>
+    public string MarketHours { get; init; } = "regular_hours";
+
     /// <summary>
     /// Internal reference — StockJawn position ID so we can reconcile fills.
     /// Stored as client_order_id on the broker side.

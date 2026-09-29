@@ -76,6 +76,11 @@ public class ClaudePickExecutor
             return new("", [$"Executor NOT READY — {why}"]);
         }
 
+        // Read DB-configurable market hours (regular_hours, extended_hours, all_day_hours).
+        // Stored in scoring_weight_overrides.reason for signal_name='broker_market_hours'.
+        var marketHours = await GetDbConfigStringAsync("broker_market_hours", "regular_hours");
+        _logger.LogDebug("[pick-executor] broker_market_hours={MarketHours}", marketHours);
+
         // Same "today" window as GET /api/approve so we only act on picks the approval page shows.
         var today = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var picks = await _db.SelectAsync(
@@ -105,7 +110,7 @@ public class ClaudePickExecutor
             {
                 lines.Add(_dryRun
                     ? await DryRunOneAsync(pick, canTalkToBroker, ct)
-                    : await ExecuteOneAsync(pick, ct));
+                    : await ExecuteOneAsync(pick, marketHours, ct));
             }
             catch (Exception ex)
             {
@@ -126,7 +131,8 @@ public class ClaudePickExecutor
         var (price, source) = await GetOrderPriceAsync(p.Ticker, p.EntryPrice);
         if (price <= 0) return $"{p.Ticker}: dry-run — would fail, no price available";
 
-        var request = BuildRequest(p, price);
+        var marketHours = await GetDbConfigStringAsync("broker_market_hours", "regular_hours");
+        var request = BuildRequest(p, price, marketHours);
         var plan = $"would buy {p.Quantity} @ limit ${request.LimitPrice:F2} ({source})";
 
         // review_equity_order is a simulation, so it's safe to call in dry-run.
@@ -140,7 +146,7 @@ public class ClaudePickExecutor
         return $"{p.Ticker}: dry-run — {plan}";
     }
 
-    private async Task<string> ExecuteOneAsync(JsonObject pick, CancellationToken ct)
+    private async Task<string> ExecuteOneAsync(JsonObject pick, string marketHours, CancellationToken ct)
     {
         var p = PickFields.From(pick);
         var validationError = Validate(p) ?? PortLaterRiskChecks();
@@ -163,7 +169,7 @@ public class ClaudePickExecutor
             return $"{p.Ticker}: failed — {msg}";
         }
 
-        var request = BuildRequest(p, price);
+        var request = BuildRequest(p, price, marketHours);
         var details = BaseDetails(request, price, priceSource);
 
         // Step 1: pre-trade review. Nothing is placed yet, so any problem hands off to the manual fallback.
@@ -255,14 +261,16 @@ public class ClaudePickExecutor
     //  - fallback when Robinhood isn't configured/reachable (the ready fallback is wired for review/rejected orders only)
     private static string? PortLaterRiskChecks() => null;
 
-    private static BrokerOrderRequest BuildRequest(PickFields p, double price) => new()
+    private static BrokerOrderRequest BuildRequest(PickFields p, double price, string marketHours = "regular_hours") => new()
     {
         Ticker = p.Ticker,
         Quantity = p.Quantity,
         Side = BrokerOrderSide.buy,
         // Existing StockJawn broker rule (PortfolioBalanceEngine): marketable limit at price × 1.001, day order.
         LimitPrice = Math.Round(price * 1.001, 2),
-        TimeInForce = BrokerTimeInForce.day,
+        // Extended/all_day hours require GTC — Robinhood rejects GFD outside regular hours.
+        TimeInForce = marketHours == "regular_hours" ? BrokerTimeInForce.day : BrokerTimeInForce.gtc,
+        MarketHours = marketHours,
         // The pick's own UUID doubles as Robinhood's ref_id: deterministic, so retries dedupe and reconcile can find it.
         ClientOrderId = p.Id,
     };
@@ -355,7 +363,30 @@ public class ClaudePickExecutor
         ["base_price"] = basePrice,
         ["price_source"] = priceSource,
         ["time_in_force"] = request.TimeInForce.ToString(),
+        ["market_hours"] = request.MarketHours,
     };
+
+    /// <summary>
+    /// Reads a string config from scoring_weight_overrides.reason column.
+    /// DB row: signal_name = <paramref name="signalName"/>, value stored in 'reason' field.
+    /// Supports comma-delimited values — caller decides how to parse.
+    /// </summary>
+    private async Task<string> GetDbConfigStringAsync(string signalName, string fallback)
+    {
+        try
+        {
+            var row = await _db.SelectSingleAsync(
+                "scoring_weight_overrides",
+                $"signal_name=eq.{signalName}&status=eq.active");
+            var value = row?["reason"]?.ToString();
+            return string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[pick-executor] Failed to read DB config '{Signal}', using fallback '{Fallback}'", signalName, fallback);
+            return fallback;
+        }
+    }
 
     private sealed record PickFields(string Id, string Ticker, string Direction, double Quantity, double EntryPrice)
     {

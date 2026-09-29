@@ -57,9 +57,9 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
 
     // Matches Robinhood's live tools/list schemas (checked 2026-09-29); CheckReadinessAsync re-verifies every run.
     private const string DefaultPlaceOrderArgs =
-        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"regular_hours","ref_id":"{{ref_id}}"}""";
+        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"{{market_hours}}","ref_id":"{{ref_id}}"}""";
     private const string DefaultReviewOrderArgs =
-        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"regular_hours"}""";
+        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"{{market_hours}}"}""";
     private const string DefaultGetOrdersArgs =
         """{"account_number":"{{account_number}}","symbol":"{{ticker}}","placed_agent":"agentic"}""";
 
@@ -564,6 +564,7 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
             ["type"] = orderType,
             ["limit_price"] = request.LimitPrice is double lp ? lp.ToString("F2", CultureInfo.InvariantCulture) : null,
             ["time_in_force"] = request.TimeInForce == BrokerTimeInForce.gtc ? "gtc" : "gfd",
+            ["market_hours"] = request.MarketHours ?? "regular_hours",
             ["client_order_id"] = request.ClientOrderId,
             ["ref_id"] = request.ClientOrderId,
         };
