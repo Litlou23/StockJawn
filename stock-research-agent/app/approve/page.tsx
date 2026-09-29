@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createClient } from '@supabase/supabase-js';
 
-// Public anon key — safe in client code (RLS enforces access)
 const supabase = createClient(
   'https://pizoqybgkdhfvxrmnhvx.supabase.co',
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpem9xeWJna2RoZnZ4cm1uaHZ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE2MjA2OTksImV4cCI6MjA3NzE5NjY5OX0.r5KxmoFEOafGUxliF9Bj5MBu4KRQCrNqrN3s1g5IhtI'
@@ -20,11 +19,18 @@ interface Pick {
   total_score: number;
   notes: string;
   catalyst: string;
+  reason: string;
   pick_date: string;
   approval_status: string;
   sector: string;
   execution_notes?: string;
   created_at?: string;
+  executed_at?: string;
+  order_id?: string;
+}
+
+function today() {
+  return new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
 }
 
 export default function ApprovePage() {
@@ -36,35 +42,41 @@ export default function ApprovePage() {
   const [messages, setMessages] = useState<Record<string, { text: string; ok: boolean }>>({});
   const [storedPin, setStoredPin] = useState<number | null>(null);
   const [expiryMinutes, setExpiryMinutes] = useState(120);
+  const [showHistory, setShowHistory] = useState(false);
+  const [expandedNotes, setExpandedNotes] = useState<Set<string>>(new Set());
 
   const fetchPicks = useCallback(async () => {
     try {
-      const { data: picks, error } = await supabase
+      const dateFilter = showHistory
+        ? new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0]
+        : today();
+
+      const { data, error } = await supabase
         .from('claude_daily_picks')
-        .select('id, ticker, direction, conviction, entry_price, target_price, stop_price, total_score, notes, catalyst, pick_date, approval_status, sector, execution_notes, created_at')
-        .in('approval_status', ['pending', 'approved', 'executing', 'executed', 'ready'])
+        .select('*')
+        .gte('pick_date', dateFilter)
+        .neq('approval_status', 'expired')
+        .order('pick_date', { ascending: false })
         .order('total_score', { ascending: false });
 
       if (error) {
         console.error('Supabase error:', error.message);
         return;
       }
-      setPicks(picks || []);
+      setPicks(data || []);
     } catch (e) {
       console.error('Failed to fetch picks', e);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showHistory]);
 
-  // Fetch configs (PIN + expiry) once on mount
   useEffect(() => {
     async function loadConfigs() {
       const { data: configs } = await supabase
         .from('scoring_weight_overrides')
         .select('signal_name, effective_weight')
         .in('signal_name', ['approval_pin', 'approval_expiry_minutes']);
-
       configs?.forEach((c: { signal_name: string; effective_weight: number }) => {
         if (c.signal_name === 'approval_pin') setStoredPin(c.effective_weight);
         if (c.signal_name === 'approval_expiry_minutes') setExpiryMinutes(c.effective_weight);
@@ -75,59 +87,40 @@ export default function ApprovePage() {
 
   useEffect(() => {
     fetchPicks();
-    const interval = setInterval(fetchPicks, 60000);
+    const interval = setInterval(fetchPicks, 15000); // poll every 15s for executor updates
     return () => clearInterval(interval);
   }, [fetchPicks]);
 
   const handleApprove = async (pickId: string) => {
     setApproving(pickId);
     try {
-      // Verify PIN client-side against DB value
       if (storedPin === null || String(storedPin) !== String(pin)) {
-        setMessages(m => ({ ...m, [pickId]: { text: 'Invalid PIN', ok: false } }));
+        setMessages(m => ({ ...m, [pickId]: { text: 'Wrong PIN', ok: false } }));
+        setTimeout(() => setMessages(m => { const c = { ...m }; delete c[pickId]; return c; }), 2000);
         setApproving(null);
         return;
       }
-
-      // Check expiry
       const pick = picks.find(p => p.id === pickId);
       if (pick?.created_at) {
-        const createdAt = new Date(pick.created_at);
-        const expiresAt = new Date(createdAt.getTime() + expiryMinutes * 60 * 1000);
+        const expiresAt = new Date(new Date(pick.created_at).getTime() + expiryMinutes * 60 * 1000);
         if (new Date() > expiresAt) {
-          await supabase
-            .from('claude_daily_picks')
+          await supabase.from('claude_daily_picks')
             .update({ approval_status: 'expired', execution_notes: 'Approval window expired' })
             .eq('id', pickId);
-          setMessages(m => ({ ...m, [pickId]: { text: 'Pick expired', ok: false } }));
+          setMessages(m => ({ ...m, [pickId]: { text: 'Expired', ok: false } }));
+          fetchPicks();
           setApproving(null);
           return;
         }
       }
-
-      // Approve the pick
-      const { error } = await supabase
-        .from('claude_daily_picks')
-        .update({
-          approval_status: 'approved',
-          approved_at: new Date().toISOString(),
-        })
+      const { error } = await supabase.from('claude_daily_picks')
+        .update({ approval_status: 'approved', approved_at: new Date().toISOString() })
         .eq('id', pickId);
-
       if (error) {
         setMessages(m => ({ ...m, [pickId]: { text: error.message, ok: false } }));
       } else {
         setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED', ok: true } }));
-        setTimeout(() => {
-          setPicks(p => p.map(pick =>
-            pick.id === pickId ? { ...pick, approval_status: 'approved' } : pick
-          ));
-          setMessages(m => {
-            const copy = { ...m };
-            delete copy[pickId];
-            return copy;
-          });
-        }, 2000);
+        fetchPicks();
       }
     } catch {
       setMessages(m => ({ ...m, [pickId]: { text: 'Network error', ok: false } }));
@@ -136,229 +129,420 @@ export default function ApprovePage() {
     }
   };
 
+  const handleSkip = async (pickId: string) => {
+    await supabase.from('claude_daily_picks')
+      .update({ approval_status: 'skipped', execution_notes: 'Skipped by user' })
+      .eq('id', pickId);
+    fetchPicks();
+  };
+
   const handleApproveAll = async () => {
-    const pending = picks.filter(p => p.approval_status === 'pending');
+    const pending = picks.filter(p => p.approval_status === 'pending' && p.pick_date === today());
     for (const pick of pending) {
       await handleApprove(pick.id);
     }
   };
 
-  const dollarOpp = (pick: Pick) => {
-    if (!pick.entry_price || !pick.target_price) return null;
-    const pctMove = Math.abs((pick.target_price - pick.entry_price) / pick.entry_price * 100);
-    return pctMove.toFixed(1);
+  const toggleNotes = (id: string) => {
+    setExpandedNotes(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   };
 
-  // PIN entry screen
+  // PIN screen
   if (!pinSubmitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-4" style={{ background: '#0a0a0c' }}>
-        <div className="w-full max-w-xs">
-          <div className="text-center mb-8">
-            <h1 className="text-2xl font-bold text-white mb-2">StockJawn</h1>
-            <p className="text-gray-400 text-sm">Trade Approval</p>
+      <div style={{
+        minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: '16px', background: '#09090b'
+      }}>
+        <div style={{ width: '100%', maxWidth: '320px' }}>
+          <div style={{ textAlign: 'center', marginBottom: '32px' }}>
+            <div style={{ fontSize: '28px', fontWeight: 800, color: '#fff', marginBottom: '4px' }}>StockJawn</div>
+            <div style={{ fontSize: '13px', color: '#71717a' }}>Trade Approval</div>
           </div>
-          <div className="space-y-4">
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              maxLength={4}
-              placeholder="Enter 4-digit PIN"
-              value={pin}
-              onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
-              className="w-full text-center text-3xl tracking-[0.5em] py-4 px-4 rounded-xl border border-gray-700 bg-gray-900 text-white focus:outline-none focus:border-blue-500"
-              autoFocus
-            />
-            <button
-              onClick={() => pin.length === 4 && setPinSubmitted(true)}
-              disabled={pin.length !== 4}
-              className="w-full py-4 rounded-xl font-bold text-lg transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-blue-600 hover:bg-blue-500 text-white"
-            >
-              Unlock
-            </button>
-          </div>
+          <input
+            type="password"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            maxLength={4}
+            placeholder="PIN"
+            value={pin}
+            onChange={e => setPin(e.target.value.replace(/\D/g, ''))}
+            autoFocus
+            style={{
+              width: '100%', textAlign: 'center', fontSize: '36px', letterSpacing: '0.4em',
+              padding: '16px', borderRadius: '16px', border: '1px solid #27272a',
+              background: '#18181b', color: '#fff', outline: 'none', boxSizing: 'border-box',
+              marginBottom: '12px'
+            }}
+          />
+          <button
+            onClick={() => pin.length === 4 && setPinSubmitted(true)}
+            disabled={pin.length !== 4}
+            style={{
+              width: '100%', padding: '16px', borderRadius: '16px', border: 'none',
+              fontSize: '18px', fontWeight: 700, cursor: pin.length === 4 ? 'pointer' : 'default',
+              background: pin.length === 4 ? '#2563eb' : '#27272a',
+              color: pin.length === 4 ? '#fff' : '#52525b',
+              transition: 'all 0.2s'
+            }}
+          >
+            Unlock
+          </button>
         </div>
       </div>
     );
   }
 
-  // Main approval screen
+  // Categorize picks
   const pendingPicks = picks.filter(p => p.approval_status === 'pending');
+  const activePicks = picks.filter(p => ['approved', 'executing'].includes(p.approval_status));
+  const completedPicks = picks.filter(p => ['executed', 'ready'].includes(p.approval_status));
+  const skippedPicks = picks.filter(p => ['skipped', 'failed'].includes(p.approval_status));
 
-  return (
-    <div className="min-h-screen p-4" style={{ background: '#0a0a0c', color: '#e6e6ea' }}>
-      <div className="max-w-lg mx-auto">
-        <div className="flex items-center justify-between mb-6">
-          <h1 className="text-xl font-bold">Today&apos;s Picks</h1>
-          <span className="text-xs text-gray-500">
-            {new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+  const renderCard = (pick: Pick, showActions: boolean) => {
+    const isOption = pick.notes?.includes('OPTION:');
+    const isBearish = pick.direction === 'bearish';
+    const isCash = pick.ticker === 'CASH';
+    const msg = messages[pick.id];
+    const optionLine = pick.notes?.match(/OPTION:[^\n]*/)?.[0];
+    const pct = pick.entry_price && pick.target_price
+      ? Math.abs((pick.target_price - pick.entry_price) / pick.entry_price * 100).toFixed(1)
+      : null;
+    const rr = pick.entry_price && pick.target_price && pick.stop_price
+      ? ((pick.target_price - pick.entry_price) / (pick.entry_price - pick.stop_price)).toFixed(1)
+      : null;
+    const isExpanded = expandedNotes.has(pick.id);
+
+    if (isCash) {
+      return (
+        <div key={pick.id} style={{
+          borderRadius: '16px', border: '1px solid #27272a', background: '#18181b',
+          padding: '16px', marginBottom: '12px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '20px', fontWeight: 700, color: '#a1a1aa' }}>CASH</span>
+              <span style={{
+                fontSize: '11px', padding: '2px 8px', borderRadius: '99px',
+                background: '#27272a', color: '#a1a1aa', fontWeight: 600
+              }}>NO TRADE</span>
+            </div>
+            <span style={{ fontSize: '12px', color: '#52525b' }}>{pick.pick_date}</span>
+          </div>
+          {pick.reason && (
+            <div style={{ fontSize: '12px', color: '#71717a', marginTop: '8px', lineHeight: '1.4' }}>
+              {pick.reason.slice(0, 120)}{pick.reason.length > 120 ? '...' : ''}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div key={pick.id} style={{
+        borderRadius: '16px', border: '1px solid #27272a', background: '#18181b',
+        overflow: 'hidden', marginBottom: '12px'
+      }}>
+        {/* Header row */}
+        <div style={{ padding: '16px 16px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+              <span style={{ fontSize: '22px', fontWeight: 800, color: '#fff' }}>{pick.ticker}</span>
+              <span style={{
+                fontSize: '11px', padding: '2px 8px', borderRadius: '99px', fontWeight: 600,
+                background: isBearish ? 'rgba(239,68,68,0.15)' : 'rgba(34,197,94,0.15)',
+                color: isBearish ? '#f87171' : '#4ade80'
+              }}>
+                {isBearish ? 'PUT' : 'CALL'}
+              </span>
+              {isOption && (
+                <span style={{
+                  fontSize: '11px', padding: '2px 8px', borderRadius: '99px', fontWeight: 600,
+                  background: 'rgba(168,85,247,0.15)', color: '#c084fc'
+                }}>OPT</span>
+              )}
+            </div>
+            {pick.sector && (
+              <div style={{ fontSize: '11px', color: '#52525b' }}>{pick.sector}</div>
+            )}
+          </div>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{ fontSize: '28px', fontWeight: 800, color: '#fff', lineHeight: 1 }}>{pick.total_score}</div>
+            <div style={{ fontSize: '10px', color: '#52525b', fontWeight: 600 }}>SCORE</div>
+          </div>
+        </div>
+
+        {/* Price grid */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1px',
+          margin: '0 16px', borderRadius: '10px', overflow: 'hidden', background: '#27272a'
+        }}>
+          <div style={{ background: '#18181b', padding: '8px', textAlign: 'center' }}>
+            <div style={{ fontSize: '10px', color: '#71717a', fontWeight: 600, marginBottom: '2px' }}>ENTRY</div>
+            <div style={{ fontSize: '15px', fontWeight: 700, color: '#fff', fontFamily: 'monospace' }}>
+              ${Number(pick.entry_price).toFixed(2)}
+            </div>
+          </div>
+          <div style={{ background: '#18181b', padding: '8px', textAlign: 'center' }}>
+            <div style={{ fontSize: '10px', color: '#4ade80', fontWeight: 600, marginBottom: '2px' }}>TARGET</div>
+            <div style={{ fontSize: '15px', fontWeight: 700, color: '#4ade80', fontFamily: 'monospace' }}>
+              ${Number(pick.target_price).toFixed(2)}
+            </div>
+          </div>
+          <div style={{ background: '#18181b', padding: '8px', textAlign: 'center' }}>
+            <div style={{ fontSize: '10px', color: '#f87171', fontWeight: 600, marginBottom: '2px' }}>STOP</div>
+            <div style={{ fontSize: '15px', fontWeight: 700, color: '#f87171', fontFamily: 'monospace' }}>
+              ${Number(pick.stop_price).toFixed(2)}
+            </div>
+          </div>
+        </div>
+
+        {/* Stats row */}
+        <div style={{ padding: '8px 16px', display: 'flex', gap: '16px', fontSize: '12px', color: '#a1a1aa' }}>
+          {pct && <span>{pct}% move needed</span>}
+          {rr && <span>R:R {rr}:1</span>}
+          <span style={{ color: pick.conviction === 'high' ? '#4ade80' : pick.conviction === 'medium' ? '#facc15' : '#71717a' }}>
+            {pick.conviction?.toUpperCase()}
           </span>
         </div>
 
-        {loading && (
-          <div className="text-center py-12 text-gray-500">Loading picks...</div>
-        )}
-
-        {!loading && picks.length === 0 && (
-          <div className="text-center py-12">
-            <p className="text-gray-400 text-lg mb-2">No picks awaiting approval</p>
-            <p className="text-gray-600 text-sm">Check back after the morning task runs</p>
+        {/* Catalyst */}
+        {pick.catalyst && pick.catalyst !== 'Pipeline test - no real catalyst' && (
+          <div style={{ padding: '0 16px 4px', fontSize: '12px', color: '#eab308', lineHeight: '1.3' }}>
+            {pick.catalyst.slice(0, 100)}{pick.catalyst.length > 100 ? '...' : ''}
           </div>
         )}
 
-        {picks.length > 0 && (
-          <>
-            <div className="space-y-4 mb-6">
-              {picks.map(pick => {
-                const isOption = pick.notes?.includes('OPTION:');
-                const pct = dollarOpp(pick);
-                const msg = messages[pick.id];
-                const isBearish = pick.direction === 'bearish';
-
-                return (
-                  <div key={pick.id} className="rounded-xl border border-gray-800 bg-gray-900/50 overflow-hidden">
-                    {/* Header */}
-                    <div className="flex items-center justify-between p-4 pb-2">
-                      <div className="flex items-center gap-3">
-                        <span className="text-xl font-bold">{pick.ticker}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                          isBearish ? 'bg-red-900/50 text-red-400' : 'bg-green-900/50 text-green-400'
-                        }`}>
-                          {isBearish ? 'PUT' : 'BUY'}
-                        </span>
-                        {isOption && (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-purple-900/50 text-purple-400">
-                            OPTION
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        <span className="text-lg font-mono font-bold">{pick.total_score}</span>
-                        <span className="text-xs text-gray-500 ml-1">/100</span>
-                      </div>
-                    </div>
-
-                    {/* Price details */}
-                    <div className="grid grid-cols-3 gap-2 px-4 py-2 text-center">
-                      <div>
-                        <div className="text-[10px] text-gray-500 uppercase">Entry</div>
-                        <div className="font-mono text-sm">${Number(pick.entry_price).toFixed(2)}</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-green-600 uppercase">Target</div>
-                        <div className="font-mono text-sm text-green-400">${Number(pick.target_price).toFixed(2)}</div>
-                      </div>
-                      <div>
-                        <div className="text-[10px] text-red-600 uppercase">Stop</div>
-                        <div className="font-mono text-sm text-red-400">${Number(pick.stop_price).toFixed(2)}</div>
-                      </div>
-                    </div>
-
-                    {/* Move needed */}
-                    {pct && (
-                      <div className="px-4 py-1">
-                        <div className="text-xs text-gray-500">
-                          Needs {pct}% move to hit target
-                          {pick.sector && <span> &middot; {pick.sector}</span>}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Catalyst */}
-                    {pick.catalyst && (
-                      <div className="px-4 py-1">
-                        <div className="text-xs text-yellow-500/70 truncate">{pick.catalyst}</div>
-                      </div>
-                    )}
-
-                    {/* Option details from notes */}
-                    {isOption && pick.notes && (
-                      <div className="px-4 py-1">
-                        <div className="text-xs text-purple-400 font-mono">
-                          {pick.notes.match(/OPTION:.*/)?.[0]}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Action area based on status */}
-                    <div className="p-4 pt-3">
-                      {msg ? (
-                        <div className={`text-center py-3 rounded-lg font-bold ${
-                          msg.ok ? 'bg-green-900/30 text-green-400' : 'bg-red-900/30 text-red-400'
-                        }`}>
-                          {msg.text}
-                        </div>
-                      ) : pick.approval_status === 'pending' ? (
-                        <button
-                          onClick={() => handleApprove(pick.id)}
-                          disabled={approving === pick.id}
-                          className="w-full py-3 rounded-lg font-bold text-lg transition-all active:scale-95 disabled:opacity-50 bg-green-600 hover:bg-green-500 text-white"
-                        >
-                          {approving === pick.id ? 'Approving...' : 'GO'}
-                        </button>
-                      ) : pick.approval_status === 'approved' ? (
-                        <div className="text-center py-3 rounded-lg bg-yellow-900/20 text-yellow-400 font-medium text-sm">
-                          Approved — waiting for executor...
-                        </div>
-                      ) : pick.approval_status === 'executing' ? (
-                        <div className="text-center py-3 rounded-lg bg-blue-900/20 text-blue-400 font-medium text-sm animate-pulse">
-                          Placing order...
-                        </div>
-                      ) : pick.approval_status === 'executed' ? (
-                        <div className="space-y-2">
-                          <div className="text-center py-3 rounded-lg bg-green-900/20 text-green-400 font-bold">
-                            EXECUTED
-                          </div>
-                          {pick.execution_notes && (
-                            <div className="text-xs text-gray-400 text-center">{pick.execution_notes}</div>
-                          )}
-                        </div>
-                      ) : pick.approval_status === 'ready' ? (
-                        <div className="space-y-2">
-                          <div className="text-center py-3 rounded-lg bg-blue-900/20 text-blue-400 font-bold">
-                            ORDER READY
-                          </div>
-                          {pick.execution_notes && (
-                            <div className="text-xs text-gray-400 text-center">{pick.execution_notes}</div>
-                          )}
-                          <a
-                            href={`https://robinhood.com/stocks/${pick.ticker}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="block w-full py-3 rounded-lg font-bold text-center transition-all active:scale-95 bg-green-600 hover:bg-green-500 text-white"
-                          >
-                            Open in Robinhood
-                          </a>
-                        </div>
-                      ) : (
-                        <div className="text-center py-3 rounded-lg bg-gray-800 text-gray-500 font-medium text-sm">
-                          {pick.approval_status}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Approve All */}
-            {pendingPicks.length > 1 && (
-              <button
-                onClick={handleApproveAll}
-                disabled={approving !== null}
-                className="w-full py-4 rounded-xl font-bold text-lg transition-all active:scale-95 disabled:opacity-50 bg-blue-600 hover:bg-blue-500 text-white mb-8"
-              >
-                APPROVE ALL ({pendingPicks.length})
-              </button>
-            )}
-          </>
+        {/* Option details */}
+        {isOption && optionLine && (
+          <div style={{
+            margin: '4px 16px 0', padding: '6px 10px', borderRadius: '8px',
+            background: 'rgba(168,85,247,0.08)', fontSize: '11px', color: '#c084fc',
+            fontFamily: 'monospace', lineHeight: '1.4', wordBreak: 'break-all'
+          }}>
+            {optionLine.slice(0, 120)}{optionLine.length > 120 ? '...' : ''}
+          </div>
         )}
 
-        <div className="text-center text-[10px] text-gray-700 mt-8 pb-4">
+        {/* Expandable notes */}
+        {pick.notes && (
+          <div style={{ padding: '4px 16px' }}>
+            <button
+              onClick={() => toggleNotes(pick.id)}
+              style={{
+                background: 'none', border: 'none', color: '#52525b', fontSize: '11px',
+                cursor: 'pointer', padding: '4px 0', display: 'flex', alignItems: 'center', gap: '4px'
+              }}
+            >
+              {isExpanded ? '▼ Hide details' : '▶ Show details'}
+            </button>
+            {isExpanded && (
+              <div style={{
+                fontSize: '11px', color: '#71717a', lineHeight: '1.5', padding: '4px 0 8px',
+                whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '200px', overflowY: 'auto'
+              }}>
+                {pick.notes}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Action area */}
+        <div style={{ padding: '8px 16px 16px' }}>
+          {msg ? (
+            <div style={{
+              textAlign: 'center', padding: '12px', borderRadius: '12px', fontWeight: 700,
+              background: msg.ok ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+              color: msg.ok ? '#4ade80' : '#f87171'
+            }}>
+              {msg.text}
+            </div>
+          ) : showActions && pick.approval_status === 'pending' ? (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                onClick={() => handleSkip(pick.id)}
+                style={{
+                  flex: '0 0 auto', padding: '14px 20px', borderRadius: '12px', border: '1px solid #27272a',
+                  background: '#18181b', color: '#a1a1aa', fontSize: '15px', fontWeight: 700,
+                  cursor: 'pointer', transition: 'all 0.15s'
+                }}
+              >
+                SKIP
+              </button>
+              <button
+                onClick={() => handleApprove(pick.id)}
+                disabled={approving === pick.id}
+                style={{
+                  flex: 1, padding: '14px', borderRadius: '12px', border: 'none',
+                  background: approving === pick.id ? '#1e40af' : '#2563eb',
+                  color: '#fff', fontSize: '17px', fontWeight: 800,
+                  cursor: approving === pick.id ? 'wait' : 'pointer',
+                  transition: 'all 0.15s'
+                }}
+              >
+                {approving === pick.id ? 'Approving...' : 'APPROVE'}
+              </button>
+            </div>
+          ) : pick.approval_status === 'approved' ? (
+            <div style={{
+              textAlign: 'center', padding: '12px', borderRadius: '12px',
+              background: 'rgba(234,179,8,0.08)', color: '#facc15', fontWeight: 600, fontSize: '13px',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
+            }}>
+              <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#facc15', animation: 'pulse 1.5s infinite' }} />
+              Approved — executor will pick up shortly
+            </div>
+          ) : pick.approval_status === 'executing' ? (
+            <div style={{
+              textAlign: 'center', padding: '12px', borderRadius: '12px',
+              background: 'rgba(59,130,246,0.08)', color: '#60a5fa', fontWeight: 600, fontSize: '13px'
+            }}>
+              Placing order...
+            </div>
+          ) : pick.approval_status === 'executed' ? (
+            <div style={{
+              textAlign: 'center', padding: '12px', borderRadius: '12px',
+              background: 'rgba(34,197,94,0.1)', color: '#4ade80', fontWeight: 700, fontSize: '14px'
+            }}>
+              EXECUTED {pick.execution_notes ? `— ${pick.execution_notes.slice(0, 60)}` : ''}
+            </div>
+          ) : pick.approval_status === 'skipped' ? (
+            <div style={{
+              textAlign: 'center', padding: '12px', borderRadius: '12px',
+              background: 'rgba(113,113,122,0.08)', color: '#71717a', fontWeight: 600, fontSize: '13px'
+            }}>
+              Skipped
+            </div>
+          ) : (
+            <div style={{
+              textAlign: 'center', padding: '12px', borderRadius: '12px',
+              background: '#27272a', color: '#71717a', fontWeight: 600, fontSize: '13px'
+            }}>
+              {pick.approval_status}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div style={{
+      minHeight: '100dvh', padding: '0', background: '#09090b', color: '#e4e4e7',
+      maxWidth: '100vw', overflowX: 'hidden'
+    }}>
+      {/* Top bar */}
+      <div style={{
+        position: 'sticky', top: 0, zIndex: 10, background: '#09090b',
+        borderBottom: '1px solid #1a1a1e', padding: '12px 16px',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+      }}>
+        <div>
+          <span style={{ fontSize: '18px', fontWeight: 800 }}>StockJawn</span>
+          <span style={{ fontSize: '12px', color: '#52525b', marginLeft: '8px' }}>
+            {new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+          </span>
+        </div>
+        <button
+          onClick={() => { setShowHistory(!showHistory); setLoading(true); }}
+          style={{
+            background: showHistory ? '#2563eb' : '#27272a', border: 'none', borderRadius: '8px',
+            padding: '6px 12px', color: showHistory ? '#fff' : '#a1a1aa',
+            fontSize: '12px', fontWeight: 600, cursor: 'pointer'
+          }}
+        >
+          {showHistory ? '7d' : 'Today'}
+        </button>
+      </div>
+
+      <div style={{ padding: '12px 16px', maxWidth: '480px', margin: '0 auto' }}>
+        {loading && (
+          <div style={{ textAlign: 'center', padding: '48px 0', color: '#52525b' }}>Loading...</div>
+        )}
+
+        {!loading && picks.length === 0 && (
+          <div style={{ textAlign: 'center', padding: '64px 16px' }}>
+            <div style={{ fontSize: '48px', marginBottom: '12px' }}>📭</div>
+            <div style={{ fontSize: '16px', color: '#a1a1aa', marginBottom: '4px' }}>No picks today</div>
+            <div style={{ fontSize: '13px', color: '#52525b' }}>Morning scan runs at 8:08 AM ET</div>
+          </div>
+        )}
+
+        {/* PENDING — needs action */}
+        {pendingPicks.length > 0 && (
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginBottom: '12px'
+            }}>
+              <div style={{ fontSize: '13px', fontWeight: 700, color: '#facc15', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Needs Approval ({pendingPicks.length})
+              </div>
+              {pendingPicks.length > 1 && (
+                <button
+                  onClick={handleApproveAll}
+                  disabled={approving !== null}
+                  style={{
+                    background: '#2563eb', border: 'none', borderRadius: '8px',
+                    padding: '6px 14px', color: '#fff', fontSize: '12px', fontWeight: 700,
+                    cursor: 'pointer'
+                  }}
+                >
+                  APPROVE ALL
+                </button>
+              )}
+            </div>
+            {pendingPicks.map(p => renderCard(p, true))}
+          </div>
+        )}
+
+        {/* ACTIVE — approved, waiting for executor */}
+        {activePicks.length > 0 && (
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 700, color: '#60a5fa', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '12px' }}>
+              In Progress ({activePicks.length})
+            </div>
+            {activePicks.map(p => renderCard(p, false))}
+          </div>
+        )}
+
+        {/* COMPLETED — executed */}
+        {completedPicks.length > 0 && (
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 700, color: '#4ade80', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '12px' }}>
+              Executed ({completedPicks.length})
+            </div>
+            {completedPicks.map(p => renderCard(p, false))}
+          </div>
+        )}
+
+        {/* SKIPPED */}
+        {skippedPicks.length > 0 && (
+          <div style={{ marginBottom: '24px' }}>
+            <div style={{ fontSize: '13px', fontWeight: 700, color: '#52525b', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '12px' }}>
+              Skipped ({skippedPicks.length})
+            </div>
+            {skippedPicks.map(p => renderCard(p, false))}
+          </div>
+        )}
+
+        <div style={{ textAlign: 'center', fontSize: '10px', color: '#3f3f46', padding: '16px 0 32px' }}>
           StockJawn Agent &middot; Not financial advice
         </div>
       </div>
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
+        }
+        * { -webkit-tap-highlight-color: transparent; }
+        button:active { transform: scale(0.97); }
+      `}</style>
     </div>
   );
 }

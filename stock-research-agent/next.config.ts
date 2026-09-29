@@ -8,6 +8,21 @@ const nextConfig: NextConfig = {
       static: 0,
     },
   },
+  async redirects() {
+    // Old pages from pre-Robinhood system — all dead, redirect to home
+    const deadRoutes = [
+      '/broker', '/connectivity', '/portfolio', '/dashboard',
+      '/stock-lab', '/congress-trades', '/demo', '/chat',
+      '/options-lab', '/options-research', '/paper-options',
+      '/results', '/pipeline-health', '/predictions', '/watchlist',
+      '/settings', '/learning', '/profiles', '/meta-labeler', '/backtest',
+    ];
+    return deadRoutes.map(source => ({
+      source,
+      destination: '/',
+      permanent: false,
+    }));
+  },
 };
 
 export default nextConfig;
