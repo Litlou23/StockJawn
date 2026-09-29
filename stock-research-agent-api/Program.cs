@@ -17,6 +17,7 @@ using StockResearchAgent.Api.Services.ResearchSignals.Providers;
 using StockResearchAgent.Api.Services.TradeDecision;
 using StockResearchAgent.Api.Services.TradeDecision.Filters;
 using StockResearchAgent.Api.Services.Broker;
+using StockResearchAgent.Api.Services.Execution;
 using StockResearchAgent.Api.Services.Portfolio;
 using StockResearchAgent.Api.Services.MarketRegime;
 using StockResearchAgent.Api.Services.AdaptiveLearning;
@@ -261,6 +262,12 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<AlpacaBrokerAdapter>();
     builder.Services.AddSingleton<IBrokerAdapter>(sp => sp.GetRequiredService<AlpacaBrokerAdapter>());
     builder.Services.AddSingleton<BrokerSyncService>();
+
+    // Robinhood Agentic Trading via MCP — used only by ClaudePickExecutor, not the Alpaca portfolio pipeline.
+    builder.Services.AddSingleton<RobinhoodOAuthService>();
+    builder.Services.AddSingleton<IRobinhoodMcpTokenProvider, RobinhoodMcpTokenProvider>();
+    builder.Services.AddSingleton<RobinhoodMcpBrokerAdapter>();
+    builder.Services.AddSingleton<ClaudePickExecutor>();
 
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 

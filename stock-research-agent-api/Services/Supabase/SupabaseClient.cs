@@ -294,6 +294,38 @@ public class SupabaseClient
         }
     }
 
+    // Returns the rows actually changed, so callers can tell whether a conditional update won.
+    public async Task<List<JsonObject>> UpdateReturningAsync(string table, string filter, object data)
+    {
+        if (!_configured) return [];
+
+        var url = $"{_baseUrl}/{table}?{filter}";
+        var json = JsonSerializer.Serialize(data, JsonOpts);
+        var req = new HttpRequestMessage(HttpMethod.Patch, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        req.Headers.Add("Prefer", "return=representation");
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        try
+        {
+            var resp = await _http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[supabase] UPDATE {Table} failed: {Status} {Body}", table, resp.StatusCode, body);
+                return [];
+            }
+            return JsonSerializer.Deserialize<List<JsonObject>>(body) ?? [];
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[supabase] UPDATE {Table} error", table);
+            return [];
+        }
+    }
+
     // -----------------------------------------------------------------------
     // DELETE
     // -----------------------------------------------------------------------

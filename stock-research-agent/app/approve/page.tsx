@@ -40,8 +40,6 @@ export default function ApprovePage() {
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState<string | null>(null);
   const [messages, setMessages] = useState<Record<string, { text: string; ok: boolean }>>({});
-  const [storedPin, setStoredPin] = useState<number | null>(null);
-  const [expiryMinutes, setExpiryMinutes] = useState(120);
   const [showHistory, setShowHistory] = useState(false);
   const [expandedNotes, setExpandedNotes] = useState<Set<string>>(new Set());
 
@@ -71,19 +69,6 @@ export default function ApprovePage() {
     }
   }, [showHistory]);
 
-  useEffect(() => {
-    async function loadConfigs() {
-      const { data: configs } = await supabase
-        .from('scoring_weight_overrides')
-        .select('signal_name, effective_weight')
-        .in('signal_name', ['approval_pin', 'approval_expiry_minutes']);
-      configs?.forEach((c: { signal_name: string; effective_weight: number }) => {
-        if (c.signal_name === 'approval_pin') setStoredPin(c.effective_weight);
-        if (c.signal_name === 'approval_expiry_minutes') setExpiryMinutes(c.effective_weight);
-      });
-    }
-    loadConfigs();
-  }, []);
 
   useEffect(() => {
     fetchPicks();
@@ -91,37 +76,31 @@ export default function ApprovePage() {
     return () => clearInterval(interval);
   }, [fetchPicks]);
 
+  // All writes go through /api/approve, which checks the PIN server-side.
+  const postDecision = async (pickId: string, action: 'approve' | 'skip') => {
+    const res = await fetch('/api/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pickId, pin, action }),
+    });
+    const json = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, error: json.error as string | undefined };
+  };
+
   const handleApprove = async (pickId: string) => {
     setApproving(pickId);
     try {
-      if (storedPin === null || String(storedPin) !== String(pin)) {
-        setMessages(m => ({ ...m, [pickId]: { text: 'Wrong PIN', ok: false } }));
-        setTimeout(() => setMessages(m => { const c = { ...m }; delete c[pickId]; return c; }), 2000);
-        setApproving(null);
-        return;
-      }
-      const pick = picks.find(p => p.id === pickId);
-      if (pick?.created_at) {
-        const expiresAt = new Date(new Date(pick.created_at).getTime() + expiryMinutes * 60 * 1000);
-        if (new Date() > expiresAt) {
-          await supabase.from('claude_daily_picks')
-            .update({ approval_status: 'expired', execution_notes: 'Approval window expired' })
-            .eq('id', pickId);
-          setMessages(m => ({ ...m, [pickId]: { text: 'Expired', ok: false } }));
-          fetchPicks();
-          setApproving(null);
-          return;
+      const r = await postDecision(pickId, 'approve');
+      if (r.ok) {
+        setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED', ok: true } }));
+      } else {
+        const text = r.status === 403 ? 'Wrong PIN' : r.status === 410 ? 'Expired' : (r.error || 'Failed');
+        setMessages(m => ({ ...m, [pickId]: { text, ok: false } }));
+        if (r.status === 403) {
+          setTimeout(() => setMessages(m => { const c = { ...m }; delete c[pickId]; return c; }), 2000);
         }
       }
-      const { error } = await supabase.from('claude_daily_picks')
-        .update({ approval_status: 'approved', approved_at: new Date().toISOString() })
-        .eq('id', pickId);
-      if (error) {
-        setMessages(m => ({ ...m, [pickId]: { text: error.message, ok: false } }));
-      } else {
-        setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED', ok: true } }));
-        fetchPicks();
-      }
+      fetchPicks();
     } catch {
       setMessages(m => ({ ...m, [pickId]: { text: 'Network error', ok: false } }));
     } finally {
@@ -130,9 +109,8 @@ export default function ApprovePage() {
   };
 
   const handleSkip = async (pickId: string) => {
-    await supabase.from('claude_daily_picks')
-      .update({ approval_status: 'skipped', execution_notes: 'Skipped by user' })
-      .eq('id', pickId);
+    const r = await postDecision(pickId, 'skip');
+    if (!r.ok) setMessages(m => ({ ...m, [pickId]: { text: r.status === 403 ? 'Wrong PIN' : (r.error || 'Failed'), ok: false } }));
     fetchPicks();
   };
 

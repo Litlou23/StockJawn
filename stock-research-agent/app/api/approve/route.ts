@@ -25,7 +25,7 @@ export async function GET() {
   const { data: configs } = await sb
     .from('scoring_weight_overrides')
     .select('signal_name, effective_weight')
-    .in('signal_name', ['approval_pin', 'approval_expiry_minutes', 'max_position_pct', 'circuit_breaker_weekly_loss_pct']);
+    .in('signal_name', ['approval_expiry_minutes', 'max_position_pct', 'circuit_breaker_weekly_loss_pct']);
 
   const configMap: Record<string, number> = {};
   configs?.forEach((c: { signal_name: string; effective_weight: number }) => {
@@ -35,7 +35,7 @@ export async function GET() {
   return NextResponse.json({ picks: picks || [], configs: configMap });
 }
 
-// POST: approve a pick
+// POST: approve or skip a pick. The only write path for approvals — the browser can no longer write this table.
 export async function POST(req: NextRequest) {
   if (!isSupabaseConfigured()) {
     return NextResponse.json({ error: 'DB not configured' }, { status: 500 });
@@ -43,6 +43,7 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json();
   const { pickId, pin } = body;
+  const action: 'approve' | 'skip' = body.action === 'skip' ? 'skip' : 'approve';
 
   if (!pickId || !pin) {
     return NextResponse.json({ error: 'Missing pickId or pin' }, { status: 400 });
@@ -85,6 +86,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `Pick already ${pick.approval_status}` }, { status: 409 });
   }
 
+  if (action === 'skip') {
+    const { error: skipError } = await sb
+      .from('claude_daily_picks')
+      .update({ approval_status: 'skipped', execution_notes: 'Skipped by user' })
+      .eq('id', pickId)
+      .eq('approval_status', 'pending');
+    if (skipError) {
+      return NextResponse.json({ error: skipError.message }, { status: 500 });
+    }
+    return NextResponse.json({ success: true, message: `${pick.id} skipped` });
+  }
+
   // Check if expired (created_at + expiry minutes < now)
   const createdAt = new Date(pick.created_at);
   const expiresAt = new Date(createdAt.getTime() + expiryMinutes * 60 * 1000);
@@ -104,7 +117,8 @@ export async function POST(req: NextRequest) {
       approval_status: 'approved',
       approved_at: new Date().toISOString(),
     })
-    .eq('id', pickId);
+    .eq('id', pickId)
+    .eq('approval_status', 'pending');
 
   if (updateError) {
     return NextResponse.json({ error: updateError.message }, { status: 500 });
