@@ -124,5 +124,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
-  return NextResponse.json({ success: true, message: `${pick.id} approved — executor will place the order on the next cycle.` });
+  return NextResponse.json({
+    success: true,
+    message: `${pick.id} approved — executor will pick it up within 30 seconds.`,
+  });
 }

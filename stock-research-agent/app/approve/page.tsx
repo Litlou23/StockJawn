@@ -92,7 +92,7 @@ export default function ApprovePage() {
     try {
       const r = await postDecision(pickId, 'approve');
       if (r.ok) {
-        setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED', ok: true } }));
+        setMessages(m => ({ ...m, [pickId]: { text: 'APPROVED — executor picks up in ~30s', ok: true } }));
       } else {
         const text = r.status === 403 ? 'Wrong PIN' : r.status === 410 ? 'Expired' : (r.error || 'Failed');
         setMessages(m => ({ ...m, [pickId]: { text, ok: false } }));

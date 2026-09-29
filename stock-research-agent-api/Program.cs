@@ -268,6 +268,7 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<IRobinhoodMcpTokenProvider, RobinhoodMcpTokenProvider>();
     builder.Services.AddSingleton<RobinhoodMcpBrokerAdapter>();
     builder.Services.AddSingleton<ClaudePickExecutor>();
+    builder.Services.AddHostedService<PickExecutorPollingService>();
 
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 
