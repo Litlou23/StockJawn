@@ -55,9 +55,13 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
     private const string DefaultUrl = "https://agent.robinhood.com/mcp/trading";
     private const string DefaultProtocolVersion = "2025-06-18";
 
-    // PORT-LATER: argument names are a guess; CheckReadinessAsync refuses to trade until they match the real schema.
-    private const string DefaultOrderArgs =
-        """{"symbol":"{{ticker}}","side":"{{side}}","quantity":"{{quantity}}","type":"{{type}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","client_order_id":"{{client_order_id}}"}""";
+    // Matches Robinhood's live tools/list schemas (checked 2026-09-29); CheckReadinessAsync re-verifies every run.
+    private const string DefaultPlaceOrderArgs =
+        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"regular_hours","ref_id":"{{ref_id}}"}""";
+    private const string DefaultReviewOrderArgs =
+        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","side":"{{side}}","type":"{{type}}","quantity":"{{quantity}}","limit_price":"{{limit_price}}","time_in_force":"{{time_in_force}}","market_hours":"regular_hours"}""";
+    private const string DefaultGetOrdersArgs =
+        """{"account_number":"{{account_number}}","symbol":"{{ticker}}","placed_agent":"agentic"}""";
 
     private static readonly string[] OrderIdKeys = ["order_id", "orderId", "id"];
     private static readonly string[] OrderStateKeys = ["state", "status", "order_status"];
@@ -81,6 +85,7 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
     private readonly string _reviewOrderArgsTemplate;
     private readonly string _getOrdersArgsTemplate;
     private readonly string _orderIdPath;
+    private string _accountNumber = "";
 
     private string? _sessionId;
     private bool _initialized;
@@ -104,9 +109,9 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         _reviewOrderTool = Cfg(configuration, "ROBINHOOD_MCP_TOOL_REVIEW_ORDER", "review_equity_order");
         _getOrdersTool = Cfg(configuration, "ROBINHOOD_MCP_TOOL_GET_ORDERS", "get_equity_orders");
         _getAccountTool = configuration["ROBINHOOD_MCP_TOOL_GET_ACCOUNT"] ?? "";
-        _placeOrderArgsTemplate = Cfg(configuration, "ROBINHOOD_MCP_PLACE_ORDER_ARGS", DefaultOrderArgs);
-        _reviewOrderArgsTemplate = Cfg(configuration, "ROBINHOOD_MCP_REVIEW_ORDER_ARGS", _placeOrderArgsTemplate);
-        _getOrdersArgsTemplate = Cfg(configuration, "ROBINHOOD_MCP_GET_ORDERS_ARGS", "{}");
+        _placeOrderArgsTemplate = Cfg(configuration, "ROBINHOOD_MCP_PLACE_ORDER_ARGS", DefaultPlaceOrderArgs);
+        _reviewOrderArgsTemplate = Cfg(configuration, "ROBINHOOD_MCP_REVIEW_ORDER_ARGS", DefaultReviewOrderArgs);
+        _getOrdersArgsTemplate = Cfg(configuration, "ROBINHOOD_MCP_GET_ORDERS_ARGS", DefaultGetOrdersArgs);
         _orderIdPath = configuration["ROBINHOOD_MCP_ORDER_ID_FIELD"] ?? "";
 
         var timeout = int.TryParse(configuration["ROBINHOOD_MCP_TIMEOUT_SECONDS"], out var s) && s > 0 ? s : 30;
@@ -141,11 +146,43 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         }
 
         var problems = new List<string>();
+        var accountProblem = await ResolveAgenticAccountAsync(ct);
+        if (accountProblem is not null) problems.Add(accountProblem);
         CheckTool(tools, _placeOrderTool, _placeOrderArgsTemplate, problems);
         CheckTool(tools, _reviewOrderTool, _reviewOrderArgsTemplate, problems);
         CheckTool(tools, _getOrdersTool, _getOrdersArgsTemplate, problems);
 
         return new() { Ready = problems.Count == 0, Problems = problems, Tools = tools };
+    }
+
+    // get_accounts says exactly one account is agent-tradable; use it, and refuse to guess if that's not true.
+    private async Task<string?> ResolveAgenticAccountAsync(CancellationToken ct)
+    {
+        _accountNumber = "";
+        JsonNode? payload;
+        try
+        {
+            payload = await CallToolAsync("get_accounts", new JsonObject(), ct);
+        }
+        catch (Exception ex)
+        {
+            return $"Could not look up the Agentic account: {ex.Message}";
+        }
+
+        var accounts = payload is JsonArray top ? top.OfType<JsonObject>().ToList()
+            : (FindArray(payload, "accounts") ?? FindArray(payload, "results") ?? FindArray(payload, "data"))?.OfType<JsonObject>().ToList() ?? [];
+
+        var tradable = accounts
+            .Where(a => a["agentic_allowed"]?.ToString().Equals("true", StringComparison.OrdinalIgnoreCase) == true)
+            .Select(a => a["account_number"]?.ToString())
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .ToList();
+
+        if (tradable.Count != 1)
+            return $"Expected exactly 1 agent-tradable Robinhood account, found {tradable.Count}";
+
+        _accountNumber = tradable[0]!;
+        return null;
     }
 
     public async Task<JsonArray> ListToolsAsync(CancellationToken ct = default)
@@ -515,17 +552,20 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
 
     // ── Helpers ─────────────────────────────────────────────────────
 
-    private static JsonObject BuildArgs(string template, BrokerOrderRequest request, string orderType)
+    // Robinhood's schema takes numbers as strings and uses gfd/gtc for time in force.
+    private JsonObject BuildArgs(string template, BrokerOrderRequest request, string orderType)
     {
         var values = new Dictionary<string, JsonNode?>
         {
+            ["account_number"] = _accountNumber,
             ["ticker"] = request.Ticker,
             ["side"] = request.Side.ToString(),
-            ["quantity"] = request.Quantity,
+            ["quantity"] = request.Quantity.ToString("0.########", CultureInfo.InvariantCulture),
             ["type"] = orderType,
-            ["limit_price"] = request.LimitPrice is double lp ? JsonValue.Create(lp) : null,
-            ["time_in_force"] = request.TimeInForce.ToString(),
+            ["limit_price"] = request.LimitPrice is double lp ? lp.ToString("F2", CultureInfo.InvariantCulture) : null,
+            ["time_in_force"] = request.TimeInForce == BrokerTimeInForce.gtc ? "gtc" : "gfd",
             ["client_order_id"] = request.ClientOrderId,
+            ["ref_id"] = request.ClientOrderId,
         };
 
         var parsed = JsonNode.Parse(template) as JsonObject

@@ -263,8 +263,8 @@ public class ClaudePickExecutor
         // Existing StockJawn broker rule (PortfolioBalanceEngine): marketable limit at price × 1.001, day order.
         LimitPrice = Math.Round(price * 1.001, 2),
         TimeInForce = BrokerTimeInForce.day,
-        // Deterministic per pick, so a reconcile lookup can find exactly this order.
-        ClientOrderId = $"sj-pick-{p.Id.Replace("-", "")}",
+        // The pick's own UUID doubles as Robinhood's ref_id: deterministic, so retries dedupe and reconcile can find it.
+        ClientOrderId = p.Id,
     };
 
     private async Task<bool> ClaimAsync(string id, DateTimeOffset at)
