@@ -1,0 +1,95 @@
+STOCKJAWN OPTIONS TRADING — SCOPE
+==================================
+What it takes to add automated options execution to the pick executor.
+
+STATUS TODAY
+------------
+- ClaudePickExecutor handles STOCK BUYS only (PlaceLimitOrderAsync)
+- RobinhoodMcpBrokerAdapter has PlaceOptionOrderAsync stubbed as NotSupported
+- IBrokerAdapter already defines BrokerOptionOrderRequest (ticker, OCC symbol, contracts, side, limit price, TIF)
+- Robinhood MCP place_option_order exists and works — needs account_number, legs array, quantity, price, type, time_in_force
+- Robinhood MCP get_option_chains + get_option_instruments exist for contract discovery
+- Account 697458438 is option_level_3 (spreads supported)
+- claude_daily_picks table has no option-specific columns yet
+
+
+WHAT NEEDS TO CHANGE
+---------------------
+
+1. DATABASE — claude_daily_picks (small)
+   Add columns:
+   - order_type: text default 'stock'  (stock | call | put)
+   - option_expiration: date           (contract expiration)
+   - option_strike: numeric            (strike price)
+   - option_contract_symbol: text      (OCC symbol, e.g. "NIO261002C00004000")
+   - option_contract_id: text          (Robinhood instrument UUID)
+   Effort: 1 migration, ~10 min
+
+2. PREMARKET-PICKS TASK — pick generation (medium)
+   The scheduled task that generates picks needs to:
+   - Decide stock vs call vs put per pick (based on direction + price + account size)
+   - When option: call get_option_chains → get_option_instruments to find the best contract
+   - Contract selection logic: nearest weekly expiration (3-7 days out), strike near ATM or 1 strike OTM, sufficient open interest/volume
+   - Write order_type, option_expiration, option_strike, option_contract_symbol to the pick row
+   Effort: ~2-3 hours. This is the hardest part — contract selection is where bad picks happen.
+
+3. ROBINHOOD MCP BROKER ADAPTER — PlaceOptionOrderAsync (medium)
+   Wire up the real implementation:
+   - Build the legs array: [{option_id, side: "buy", position_effect: "open"}]
+   - Map BrokerOptionOrderRequest fields to Robinhood's place_option_order params
+   - Add ReviewOptionOrderAsync (review_option_order) for pre-trade check
+   - Add FindOptionOrderAsync for reconciliation (get_option_orders)
+   - Add argument templates like the equity ones (DefaultPlaceOptionOrderArgs etc.)
+   - Add to CheckReadinessAsync tool validation
+   Effort: ~2 hours. Mostly copy-paste from the equity path with different field names.
+
+4. CLAUDE PICK EXECUTOR — option routing (medium)
+   In ExecuteOneAsync:
+   - Read order_type from the pick row
+   - If "call" or "put": route to PlaceOptionOrderAsync instead of PlaceLimitOrderAsync
+   - Build BrokerOptionOrderRequest from pick fields + option columns
+   - Same review → place → reconcile flow, just different order type
+   - Update execution_notes to say "buy 1 NIO $4 call 10/2 exp" instead of "buy 1 NIO"
+   In Validate:
+   - Allow direction "bearish" when order_type is "put"
+   - Require option_contract_id to be set for option picks
+   Effort: ~1-2 hours
+
+5. APPROVAL PAGE — show option details (small)
+   Update yvyofficial.com dashboard to show:
+   - "CALL" or "PUT" badge next to ticker
+   - Strike price and expiration date
+   - Contract price (premium) instead of share price
+   Effort: ~30 min
+
+6. EXIT/SELL LOGIC (future — not blocking)
+   - sell_to_close for options (currently no sell logic at all for stocks either)
+   - Options decay faster so exit timing matters more
+   - This is a PORT-LATER item for both stocks and options
+
+
+TOTAL EFFORT: ~6-8 hours of coding across 2-3 sessions
+
+RISKS
+------
+- Contract selection is critical — wrong strike/expiration = guaranteed loss
+- Options have wider spreads on cheap stocks, limit orders may not fill
+- Robinhood's option_level_3 allows spreads but we'd start with single-leg (calls/puts) only
+- Extended hours options trading is more limited than equity
+
+RECOMMENDED ORDER
+------------------
+1. DB migration (columns)
+2. Broker adapter (PlaceOptionOrderAsync)
+3. Executor routing (call vs put vs stock)
+4. Premarket picks (contract selection)
+5. Dashboard UI update
+6. Test with a real cheap option ($0.05-0.10 contract)
+
+DB CONFIGS TO ADD
+------------------
+- options_enabled: 0/1 (kill switch, default 0)
+- options_max_contract_price: max premium per contract in dollars (e.g. 50)
+- options_min_open_interest: minimum OI to consider a contract (e.g. 100)
+- options_preferred_dte: target days to expiration (e.g. 5)
+- options_strike_preference: atm / otm_1 / itm_1
