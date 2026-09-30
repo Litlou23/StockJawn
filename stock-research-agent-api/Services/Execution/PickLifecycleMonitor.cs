@@ -255,8 +255,8 @@ public class PickLifecycleMonitor
     }
 
     // ── Option exit logic ─────────────────────────────────────────
-    // Options can't have GTC stop orders on Robinhood (most accounts), so we poll the underlying
-    // stock price against stop_price/target_price and sell-to-close when either is hit.
+    // Options can't have GTC stop orders on Robinhood (most accounts), so we poll the option's
+    // premium against stop_price/target_price and sell-to-close when either is hit.
     // exit_status flow: null → watching → option_sell_placed → closed_stop | closed_target
     //                                                       → exit_failed (terminal)
 
@@ -284,32 +284,21 @@ public class PickLifecycleMonitor
                     await SetExitAsync(id, "manual_exit", "No stop or target price — can't automate exit");
                     return "filled — no stop/target, manual exit";
                 }
-                await SetExitAsync(id, "watching", $"Monitoring {ticker}: stop ${stop:F2} / target ${target:F2}");
-                return $"option filled — monitoring underlying (stop ${stop:F2}, target ${target:F2})";
+                await SetExitAsync(id, "watching", $"Monitoring {ticker} option premium: stop ${stop:F2} / target ${target:F2}");
+                return $"option filled — monitoring premium (stop ${stop:F2}, target ${target:F2})";
             }
 
             case "watching":
             {
-                // Poll the underlying stock price
-                var last = await _broker.GetEquityLastPriceAsync(ticker, ct);
-                if (last is null) return null; // quote not available this cycle
+                // Option picks store stop/target as PREMIUM (e.g. entry 0.66, target 1.00, stop 0.33), not the
+                // underlying's price — comparing against the stock price would fire the target instantly.
+                var (premium, _, _) = await _broker.GetOptionMidPriceAsync(optionId, ct);
+                if (premium is not > 0) return null;
+                var last = premium;
 
-                var orderType = row["order_type"]?.ToString() ?? "call";
-                var isCall = orderType == "call";
-
-                // For calls: stop when underlying drops to stop_price, target when it rises to target_price
-                // For puts: stop when underlying rises to stop_price, target when it drops to target_price
-                bool hitStop, hitTarget;
-                if (isCall)
-                {
-                    hitStop = stop > 0 && last <= stop;
-                    hitTarget = target > 0 && last >= target;
-                }
-                else
-                {
-                    hitStop = stop > 0 && last >= stop;
-                    hitTarget = target > 0 && last <= target;
-                }
+                // We're long the contract for both calls and puts, so the rule is the same.
+                var hitStop = stop > 0 && last <= stop;
+                var hitTarget = target > 0 && last >= target;
 
                 if (!hitStop && !hitTarget) return null; // price is between stop and target, do nothing
 
@@ -350,7 +339,7 @@ public class PickLifecycleMonitor
         if (mid is not > 0)
         {
             _logger.LogWarning("[pick-monitor] {Ticker} {Reason} hit but no option quote ({Err}) — will retry", ticker, reason, err);
-            return $"{reason} hit (underlying ${underlyingPrice:F2}) but no option quote — retrying next cycle";
+            return $"{reason} hit (premium ${underlyingPrice:F2}) but no option quote — retrying next cycle";
         }
 
         // Sell at mid × 0.98 (slight discount to fill quickly)
@@ -366,9 +355,9 @@ public class PickLifecycleMonitor
             {
                 ["exit_order_id"] = outcome.Result.BrokerOrderId,
                 ["exit_status"] = "option_sell_placed",
-                ["exit_reason"] = $"Option {reason} exit: {contracts}x @ ${limit:F2} (underlying ${underlyingPrice:F2})",
+                ["exit_reason"] = $"Option {reason} exit: {contracts}x @ ${limit:F2} (premium ${underlyingPrice:F2})",
             });
-            return $"option {reason} exit placed — {contracts}x @ ${limit:F2} (underlying ${underlyingPrice:F2})";
+            return $"option {reason} exit placed — {contracts}x @ ${limit:F2} (premium ${underlyingPrice:F2})";
         }
 
         if (outcome.Result.Status == BrokerOrderState.unknown)
