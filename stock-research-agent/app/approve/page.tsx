@@ -81,15 +81,19 @@ export default function ApprovePage() {
     return () => clearInterval(interval);
   }, [fetchPicks]);
 
-  // All writes go through /api/approve, which checks the PIN server-side.
+  // All writes go through the approve_pick RPC function in Supabase (SECURITY DEFINER).
+  // This avoids needing the service role key on Netlify.
   const postDecision = async (pickId: string, action: 'approve' | 'skip') => {
-    const res = await fetch('/api/approve', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pickId, pin, action }),
+    const { data, error } = await supabase.rpc('approve_pick', {
+      p_pick_id: pickId,
+      p_pin: pin,
+      p_action: action,
     });
-    const json = await res.json().catch(() => ({}));
-    return { ok: res.ok, status: res.status, error: json.error as string | undefined };
+    if (error) {
+      return { ok: false, status: 500, error: error.message };
+    }
+    const result = data as { ok: boolean; error?: string; status?: number; message?: string };
+    return { ok: result.ok, status: result.status || (result.ok ? 200 : 500), error: result.error };
   };
 
   const handleApprove = async (pickId: string) => {
