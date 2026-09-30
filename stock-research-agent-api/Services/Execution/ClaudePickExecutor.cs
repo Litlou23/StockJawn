@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 
 namespace StockResearchAgent.Api.Services.Execution;
 
@@ -20,6 +21,7 @@ public class ClaudePickExecutor
     private readonly SupabaseClient _db;
     private readonly RobinhoodMcpBrokerAdapter _broker;
     private readonly MarketDataService _marketData;
+    private readonly FinnhubProvider _finnhub;
     private readonly ILogger<ClaudePickExecutor> _logger;
     private readonly bool _enabledFallback;
     private readonly bool _dryRunFallback;
@@ -31,12 +33,14 @@ public class ClaudePickExecutor
         SupabaseClient db,
         RobinhoodMcpBrokerAdapter broker,
         MarketDataService marketData,
+        FinnhubProvider finnhub,
         IConfiguration configuration,
         ILogger<ClaudePickExecutor> logger)
     {
         _db = db;
         _broker = broker;
         _marketData = marketData;
+        _finnhub = finnhub;
         _logger = logger;
         // Only used when the DB rows (executor_enabled / executor_dry_run) don't exist.
         _enabledFallback = configuration["ROBINHOOD_EXECUTOR_ENABLED"]?.ToLowerInvariant() == "true";
@@ -107,7 +111,7 @@ public class ClaudePickExecutor
             Table,
             filter: $"approval_status=eq.approved&ticker=not.in.(CASH,EXEC_LOG)&pick_date=gte.{today}",
             order: "total_score.desc",
-            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration,trigger_price,trigger_direction,trigger_hit_at");
+            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration,trigger_price,trigger_direction,trigger_hit_at,exit_by_date");
 
         var readyNote = readiness is null ? "robinhood=not configured"
             : readiness.Ready ? "robinhood=READY"
@@ -139,7 +143,7 @@ public class ClaudePickExecutor
                 readyNote += $" — risk: {risk.Describe()}" + (risk.BreakerTripped is not null ? $" — {risk.BreakerTripped}" : "");
             }
         }
-        var optionsCfg = picks.Any(IsOptionPick) ? await LoadOptionsConfigAsync() : new OptionsConfig(false, 0);
+        var optionsCfg = picks.Any(IsOptionPick) ? await LoadOptionsConfigAsync() : new OptionsConfig(false, 0, 0);
 
         foreach (var pick in picks)
         {
@@ -152,6 +156,13 @@ public class ClaudePickExecutor
                 if (wait is not null)
                 {
                     lines.Add(wait);
+                    continue;
+                }
+
+                var earnings = await EarningsBlockAsync(PickFields.From(pick));
+                if (earnings is not null)
+                {
+                    lines.Add(_dryRun ? $"{ticker}: dry-run — would fail, {earnings}" : await FailBlockedAsync(PickFields.From(pick), earnings));
                     continue;
                 }
 
@@ -523,6 +534,41 @@ public class ClaudePickExecutor
         return _dryRun ? $"{p.Ticker}: dry-run — trigger hit (${price:F2} {side} ${trigger:F2}), would buy now" : null;
     }
 
+    // We hold overnight (PDT), so an earnings report inside the hold is a coin flip we don't want.
+    // A report this morning (bmo) is fine — that's trading the reaction.
+    private async Task<string?> EarningsBlockAsync(PickFields p)
+    {
+        if (await GetDbConfigNumberAsync("block_earnings_during_hold", 1) < 1 || !_finnhub.IsConfigured) return null;
+        var today = NowEastern().Date;
+        var holdEnd = NextTradingDay(today);
+        if (DateTime.TryParse(p.ExitByDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var exitBy) && exitBy.Date > holdEnd)
+            holdEnd = exitBy.Date;
+
+        var calendar = await _finnhub.GetUpcomingEarningsAsync((holdEnd - today).Days + 1);
+        foreach (var e in calendar.Where(e => e.Ticker.Equals(p.Ticker, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!DateTime.TryParse(e.Date, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
+            if (d.Date == today && e.Hour == "bmo") continue;
+            if (d.Date >= today && d.Date <= holdEnd)
+                return $"earnings on {d:MM/dd}{(string.IsNullOrEmpty(e.Hour) ? "" : $" ({e.Hour})")} during the hold";
+        }
+        return null;
+    }
+
+    private static DateTime NextTradingDay(DateTime d)
+    {
+        var n = d.AddDays(1);
+        while (n.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) n = n.AddDays(1);
+        return n;
+    }
+
+    private async Task<string> FailBlockedAsync(PickFields p, string why)
+    {
+        if (!await ClaimAsync(p.Id, DateTimeOffset.UtcNow)) return $"{p.Ticker}: skipped (already claimed)";
+        await MarkFailedAsync(p, $"Blocked: {why}", null);
+        return $"{p.Ticker}: failed — blocked, {why}";
+    }
+
     // Approved picks whose trigger never broke don't carry over to another day.
     private async Task ExpireMissedTriggersAsync(TriggerConfig cfg)
     {
@@ -551,13 +597,14 @@ public class ClaudePickExecutor
 
     // ── Options path (call/put picks). Mirrors the stock flow: claim → validate → quote → review → place → reconcile.
 
-    private sealed record OptionsConfig(bool Enabled, double MaxContractPrice);
+    private sealed record OptionsConfig(bool Enabled, double MaxContractPrice, double MinDaysToExpiry);
 
     private async Task<OptionsConfig> LoadOptionsConfigAsync()
     {
         var enabled = await GetDbConfigNumberAsync("options_enabled", 0) >= 1;
         var max = await GetDbConfigNumberAsync("options_max_contract_price", 0);
-        return new OptionsConfig(enabled, max);
+        var minDays = await GetDbConfigNumberAsync("options_min_days_to_expiry", 7);
+        return new OptionsConfig(enabled, max, minDays);
     }
 
     private static string? ValidateOption(PickFields p, OptionsConfig cfg, RobinhoodReadiness? readiness)
@@ -571,6 +618,14 @@ public class ClaudePickExecutor
         if (p.OrderType == "put" && p.Direction != "bearish") return "Put picks must be bearish";
         if (p.Quantity < 1 || p.Quantity != Math.Floor(p.Quantity)) return "order_quantity must be a whole number of contracts (1+)";
         if (cfg.MaxContractPrice <= 0) return "options_max_contract_price is not set";
+        // Overnight holds eat time value fast on near-dated contracts.
+        if (cfg.MinDaysToExpiry > 0)
+        {
+            if (!DateTime.TryParse(p.OptionExpiration, CultureInfo.InvariantCulture, DateTimeStyles.None, out var exp))
+                return "Option pick has no option_expiration";
+            var days = (exp.Date - NowEastern().Date).Days;
+            if (days < cfg.MinDaysToExpiry) return $"Contract expires in {days} day(s), under options_min_days_to_expiry ({cfg.MinDaysToExpiry})";
+        }
         return null;
     }
 
@@ -747,6 +802,7 @@ public class ClaudePickExecutor
         public double? TriggerPrice { get; init; }
         public string? TriggerDirection { get; init; }
         public string? TriggerHitAt { get; init; }
+        public string? ExitByDate { get; init; }
 
         public static PickFields From(JsonObject row) => new(
             row["id"]?.ToString() ?? "",
@@ -762,6 +818,7 @@ public class ClaudePickExecutor
             OptionExpiration = row["option_expiration"]?.ToString(),
             TriggerPrice = ReadDouble(row, "trigger_price") is var t && t > 0 ? t : null,
             TriggerDirection = row["trigger_direction"]?.ToString()?.ToLowerInvariant(),
+            ExitByDate = row["exit_by_date"]?.ToString(),
             TriggerHitAt = string.IsNullOrWhiteSpace(row["trigger_hit_at"]?.ToString()) ? null : row["trigger_hit_at"]!.ToString(),
         };
 

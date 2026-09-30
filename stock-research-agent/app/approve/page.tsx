@@ -32,6 +32,13 @@ interface Pick {
   option_strike?: number | null;
   option_expiration?: string | null;
   option_contract_symbol?: string | null;
+  trigger_price?: number | null;
+  trigger_direction?: 'above' | 'below' | null;
+  trigger_hit_at?: string | null;
+  trigger_hit_price?: number | null;
+  level_target?: number | null;
+  level_stop?: number | null;
+  exit_by_date?: string | null;
 }
 
 function today() {
@@ -204,6 +211,8 @@ export default function ApprovePage() {
       ? ((pick.target_price - pick.entry_price) / (pick.entry_price - pick.stop_price)).toFixed(1)
       : null;
     const isExpanded = expandedNotes.has(pick.id);
+    const hasTrigger = pick.trigger_price != null;
+    const triggerSide = pick.trigger_direction ?? (pick.order_type === 'put' || isBearish ? 'below' : 'above');
 
     if (isCash) {
       return (
@@ -288,6 +297,29 @@ export default function ApprovePage() {
             </div>
           </div>
         </div>
+
+        {/* Setup: StockJawn only buys once the stock breaks the trigger */}
+        {hasTrigger && (
+          <div style={{
+            margin: '8px 16px 0', padding: '8px 10px', borderRadius: '8px',
+            background: 'rgba(59,130,246,0.08)', fontSize: '12px', color: '#93c5fd', lineHeight: '1.5'
+          }}>
+            <div style={{ fontWeight: 700 }}>
+              Buys only if {pick.ticker} goes {triggerSide} ${Number(pick.trigger_price).toFixed(2)}
+            </div>
+            <div style={{ color: '#a1a1aa' }}>
+              {pick.level_target != null && <>Target ${Number(pick.level_target).toFixed(2)}</>}
+              {pick.level_stop != null && <> · Out at ${Number(pick.level_stop).toFixed(2)}</>}
+              {pick.exit_by_date && <> · Sell by {pick.exit_by_date}</>}
+              {isContract && <> · stock price levels</>}
+            </div>
+            {pick.trigger_hit_at && (
+              <div style={{ color: '#4ade80' }}>
+                Triggered{pick.trigger_hit_price != null ? ` at $${Number(pick.trigger_hit_price).toFixed(2)}` : ''}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Stats row */}
         <div style={{ padding: '8px 16px', display: 'flex', gap: '16px', fontSize: '12px', color: '#a1a1aa' }}>
@@ -394,7 +426,9 @@ export default function ApprovePage() {
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px'
             }}>
               <span style={{ display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: '#facc15', animation: 'pulse 1.5s infinite' }} />
-              Approved — executor will pick up shortly
+              {hasTrigger && !pick.trigger_hit_at
+                ? `Approved — waiting for ${pick.ticker} ${triggerSide} $${Number(pick.trigger_price).toFixed(2)} (until 3:30 PM ET)`
+                : 'Approved — executor will pick up shortly'}
             </div>
           ) : pick.approval_status === 'executing' ? (
             <div style={{

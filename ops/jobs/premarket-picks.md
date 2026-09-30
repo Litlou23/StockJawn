@@ -74,7 +74,7 @@ only buys when the stock breaks the trigger. If it never breaks by the cutoff (1
 - Log it as a normal share pick on the ETF itself: `order_type` = stock, `direction` = bullish (we own the ETF),
   `trigger_direction` = above, trigger = the ETF's pre-market or yesterday's high (it rises when SPY breaks down).
   Stop/target levels are on the ETF's price too.
-- **Always set `exit_by_date` = the next trading day after the buy** (2-day max hold). These lose value every day they're held;
+- **Set `exit_by_date` = the next trading day after the pick** (shorter than normal picks). These lose value every day they're held;
   StockJawn sells on that day whatever the price.
 - Sizing is the same as any share pick (40% budget, whole shares).
 
@@ -279,10 +279,11 @@ So every setup must work as a 1–2 day hold, not an intraday scalp.
 5. `level_target` is a real next level, and (target − trigger) ÷ (trigger − stop) ≥ 1.5.
 6. Shares: `stop_price` = level_stop and `target_price` = level_target (the GTC stop goes in the morning after the buy).
 7. Options: `option_contract_id` is the Robinhood instrument UUID, expiration is at least 7 days out (overnight holds eat time value),
-   bid/ask spread < 20% of the ask, `order_quantity` = whole contracts, `stop_price` = 50% of premium, `target_price` = 2x premium.
-8. Not an FOMC day, and no earnings for that stock before tomorrow's close (an overnight hold would gamble the report) — unless the setup IS the earnings reaction.
+   (StockJawn refuses contracts under `options_min_days_to_expiry`, default 7), bid/ask spread < 20% of the ask, `order_quantity` = whole contracts, `stop_price` = 50% of premium, `target_price` = 2x premium.
+8. Not an FOMC day, and no earnings for that stock before exit_by_date (StockJawn also blocks this itself via the earnings calendar) (an overnight hold would gamble the report) — unless the setup IS the earnings reaction.
 9. The side agrees with the SPY read (puts on a weak SPY day, calls when SPY broke resistance), unless it's a news setup with a dated catalyst.
-10. `notes` has the one-line setup: "MGM puts below $33.30 → target $31.50, out above $34.00 (after-hours -10% on 9/23)".
+10. `exit_by_date` is set (2 trading days out; inverse ETFs 1).
+11. `notes` has the one-line setup: "MGM puts below $33.30 → target $31.50, out above $34.00 (after-hours -10% on 9/23)".
 
 After inserting, re-read the rows and confirm every field landed:
 ```sql
@@ -291,7 +292,8 @@ SELECT ticker, order_type, direction, trigger_price, trigger_direction, level_ta
 FROM claude_daily_picks
 WHERE pick_date = CURRENT_DATE AND approval_status = 'pending' AND ticker <> 'CASH';
 ```
-Any NULL trigger_price / trigger_direction / level_stop / level_target (or option_contract_id on an option) → fix it or delete the row.
+Any NULL trigger_price / trigger_direction / level_stop / level_target / exit_by_date (or option_contract_id on an option) → fix it or delete the row.
+Add `exit_by_date` to the SELECT above when you run it.
 
 ## DATABASE FIELDS (claude_daily_picks) — StockJawn's executor reads these, not the notes
 - `trigger_price` — the stock price that must break before buying (REQUIRED for every pick)
@@ -301,7 +303,8 @@ Any NULL trigger_price / trigger_direction / level_stop / level_target (or optio
 - Options: `order_type` = call/put, `option_contract_id` (Robinhood instrument UUID), `option_strike`, `option_expiration`,
   `order_quantity` = contracts. `stop_price` / `target_price` are the option PREMIUM safety net: stop = 50% of the premium, target = 2x.
   The stock levels (level_stop / level_target) are the main exit.
-- `exit_by_date` — only for inverse ETFs (next trading day); leave NULL otherwise
+- `exit_by_date` — REQUIRED on every pick: 2 trading days after pick_date (Mon pick → Wed). Inverse ETFs: the next trading day.
+  StockJawn sells on that day whatever the price, so nothing sits and bleeds time value.
 - `notes` — one line in StockedUp style: "ORCL calls above $140 → target $144, out below $138 (NetApp integration 9/29)"
 - In the push notification and summary, show the setup line so Lou knows what he's approving.
 
