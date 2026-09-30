@@ -44,7 +44,7 @@ public class PickLifecycleMonitor
         var rows = await _db.SelectAsync(Table,
             filter: $"approval_status=eq.executed&order_id=not.is.null&pick_date=gte.{since}" +
                     $"&or=(exit_status.is.null,exit_status.in.({string.Join(",", OpenExitStates)}))",
-            select: "id,ticker,order_type,order_id,stop_price,target_price,fill_status,filled_quantity,filled_avg_price,stop_order_id,exit_status,exit_order_id,option_contract_id");
+            select: "id,ticker,order_type,order_id,stop_price,target_price,fill_status,filled_quantity,filled_avg_price,stop_order_id,exit_status,exit_order_id,option_contract_id,level_target,level_stop");
 
         foreach (var row in rows)
         {
@@ -266,6 +266,10 @@ public class PickLifecycleMonitor
         var stop = D(row["stop_price"]);
         var target = D(row["target_price"]);
         var optionId = row["option_contract_id"]?.ToString();
+        // Stock-price levels from the setup ("target today's high, out if it loses 140"); premium stop/target still apply.
+        var levelTarget = D(row["level_target"]);
+        var levelStop = D(row["level_stop"]);
+        var isPut = row["order_type"]?.ToString() == "put";
 
         if (string.IsNullOrWhiteSpace(optionId))
         {
@@ -279,7 +283,7 @@ public class PickLifecycleMonitor
             case null:
             {
                 // Start monitoring — set to "watching"
-                if (stop <= 0 && target <= 0)
+                if (stop <= 0 && target <= 0 && levelStop <= 0 && levelTarget <= 0)
                 {
                     await SetExitAsync(id, "manual_exit", "No stop or target price — can't automate exit");
                     return "filled — no stop/target, manual exit";
@@ -299,6 +303,17 @@ public class PickLifecycleMonitor
                 // We're long the contract for both calls and puts, so the rule is the same.
                 var hitStop = stop > 0 && last <= stop;
                 var hitTarget = target > 0 && last >= target;
+
+                if (levelStop > 0 || levelTarget > 0)
+                {
+                    var px = await _broker.GetEquityLastPriceAsync(ticker, ct);
+                    if (px is > 0)
+                    {
+                        // A put profits when the stock falls, so its levels are mirrored.
+                        hitStop |= levelStop > 0 && (isPut ? px >= levelStop : px <= levelStop);
+                        hitTarget |= levelTarget > 0 && (isPut ? px <= levelTarget : px >= levelTarget);
+                    }
+                }
 
                 if (!hitStop && !hitTarget) return null; // price is between stop and target, do nothing
 

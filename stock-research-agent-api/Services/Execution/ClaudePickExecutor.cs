@@ -107,13 +107,16 @@ public class ClaudePickExecutor
             Table,
             filter: $"approval_status=eq.approved&ticker=not.in.(CASH,EXEC_LOG)&pick_date=gte.{today}",
             order: "total_score.desc",
-            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration");
+            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration,trigger_price,trigger_direction,trigger_hit_at");
 
         var readyNote = readiness is null ? "robinhood=not configured"
             : readiness.Ready ? "robinhood=READY"
             : $"robinhood=NOT READY ({string.Join("; ", readiness.Problems)})";
 
         var mode = _dryRun ? "DRY RUN" : "LIVE";
+        var triggerCfg = await LoadTriggerConfigAsync();
+        if (!_dryRun) await ExpireMissedTriggersAsync(triggerCfg);
+
         if (picks.Count == 0)
             return new($"[{mode}] {readyNote} — no approved picks for {today}", []);
 
@@ -145,6 +148,13 @@ public class ClaudePickExecutor
             var ticker = pick["ticker"]?.ToString() ?? "?";
             try
             {
+                var wait = await CheckTriggerAsync(PickFields.From(pick), triggerCfg, canTalkToBroker, ct);
+                if (wait is not null)
+                {
+                    lines.Add(wait);
+                    continue;
+                }
+
                 if (IsOptionPick(pick))
                 {
                     var op = PickFields.From(pick);
@@ -462,6 +472,83 @@ public class ClaudePickExecutor
         }
     }
 
+    // ── Trigger entries (StockedUp style): "buy ORCL only if it breaks above 140".
+
+    private sealed record TriggerConfig(bool Enabled, double MaxChasePct, TimeSpan CutoffEt);
+
+    private async Task<TriggerConfig> LoadTriggerConfigAsync()
+    {
+        var enabled = await GetDbConfigNumberAsync("trigger_entries_enabled", 1) >= 1;
+        var chase = await GetDbConfigNumberAsync("trigger_max_chase_pct", 3);
+        var cutoffRaw = await GetDbConfigStringAsync("trigger_cutoff_et", "15:30");
+        var cutoff = TimeSpan.TryParseExact(cutoffRaw, @"hh\:mm", CultureInfo.InvariantCulture, out var c) ? c : new TimeSpan(15, 30, 0);
+        return new TriggerConfig(enabled, chase, cutoff);
+    }
+
+    private static DateTime NowEastern()
+        => TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, TimeZoneInfo.FindSystemTimeZoneById("America/New_York"));
+
+    // Returns a "waiting" line when the pick must not buy yet; null means go ahead.
+    private async Task<string?> CheckTriggerAsync(PickFields p, TriggerConfig cfg, bool canTalkToBroker, CancellationToken ct)
+    {
+        if (!cfg.Enabled || p.TriggerPrice is not > 0 || p.TriggerHitAt is not null) return null;
+
+        var trigger = p.TriggerPrice.Value;
+        var above = (p.TriggerDirection ?? (p.OrderType == "put" || p.Direction == "bearish" ? "below" : "above")) == "above";
+        var side = above ? "above" : "below";
+
+        if (NowEastern().TimeOfDay >= cfg.CutoffEt)
+            return $"{p.Ticker}: waiting — past {cfg.CutoffEt.ToString(@"hh\:mm")} ET cutoff, trigger {side} ${trigger:F2} not taken";
+
+        // Robinhood's quote first: the trigger should fire on the same price the order will see.
+        double price = 0;
+        if (canTalkToBroker) price = await _broker.GetEquityLastPriceAsync(p.Ticker, ct) ?? 0;
+        if (price <= 0) price = (await _marketData.GetQuoteAsync(p.Ticker))?.Price ?? 0;
+        if (price <= 0) return $"{p.Ticker}: waiting — no live price to check trigger {side} ${trigger:F2}";
+
+        var hit = above ? price >= trigger : price <= trigger;
+        if (!hit) return $"{p.Ticker}: waiting — ${price:F2}, needs {side} ${trigger:F2}";
+
+        var pastPct = Math.Abs(price - trigger) / trigger * 100;
+        if (cfg.MaxChasePct > 0 && pastPct > cfg.MaxChasePct)
+            return $"{p.Ticker}: waiting — ${price:F2} is {pastPct:F1}% past trigger ${trigger:F2}, too late to chase (max {cfg.MaxChasePct}%)";
+
+        if (!_dryRun)
+            await _db.UpdateAsync(Table, $"id=eq.{p.Id}&trigger_hit_at=is.null", new Dictionary<string, object?>
+            {
+                ["trigger_hit_at"] = DateTimeOffset.UtcNow,
+                ["trigger_hit_price"] = price,
+            });
+        _logger.LogInformation("[pick-executor] {Ticker} ({Id}) trigger hit: ${Price} {Side} ${Trigger}", p.Ticker, p.Id, price, side, trigger);
+        return _dryRun ? $"{p.Ticker}: dry-run — trigger hit (${price:F2} {side} ${trigger:F2}), would buy now" : null;
+    }
+
+    // Approved picks whose trigger never broke don't carry over to another day.
+    private async Task ExpireMissedTriggersAsync(TriggerConfig cfg)
+    {
+        try
+        {
+            var nowEt = NowEastern();
+            var cutoffPassed = nowEt.TimeOfDay >= cfg.CutoffEt;
+            var lastLiveDay = (cutoffPassed ? nowEt : nowEt.AddDays(-1)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            var rows = await _db.UpdateReturningAsync(
+                Table,
+                $"approval_status=eq.approved&trigger_price=not.is.null&trigger_hit_at=is.null&pick_date=lte.{lastLiveDay}",
+                new Dictionary<string, object?>
+                {
+                    ["approval_status"] = "expired",
+                    ["execution_error"] = "Trigger never hit — no trade",
+                    ["execution_notes"] = "Trigger level never broke before the cutoff, so nothing was bought.",
+                });
+            foreach (var r in rows)
+                _logger.LogInformation("[pick-executor] {Ticker} ({Id}) expired — trigger never hit", r["ticker"], r["id"]);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[pick-executor] Could not expire missed-trigger picks");
+        }
+    }
+
     // ── Options path (call/put picks). Mirrors the stock flow: claim → validate → quote → review → place → reconcile.
 
     private sealed record OptionsConfig(bool Enabled, double MaxContractPrice);
@@ -657,6 +744,9 @@ public class ClaudePickExecutor
         public string? OptionContractSymbol { get; init; }
         public double? OptionStrike { get; init; }
         public string? OptionExpiration { get; init; }
+        public double? TriggerPrice { get; init; }
+        public string? TriggerDirection { get; init; }
+        public string? TriggerHitAt { get; init; }
 
         public static PickFields From(JsonObject row) => new(
             row["id"]?.ToString() ?? "",
@@ -670,6 +760,9 @@ public class ClaudePickExecutor
             OptionContractSymbol = row["option_contract_symbol"]?.ToString(),
             OptionStrike = ReadDouble(row, "option_strike") is var k && k > 0 ? k : null,
             OptionExpiration = row["option_expiration"]?.ToString(),
+            TriggerPrice = ReadDouble(row, "trigger_price") is var t && t > 0 ? t : null,
+            TriggerDirection = row["trigger_direction"]?.ToString()?.ToLowerInvariant(),
+            TriggerHitAt = string.IsNullOrWhiteSpace(row["trigger_hit_at"]?.ToString()) ? null : row["trigger_hit_at"]!.ToString(),
         };
 
         private static double ReadDouble(JsonObject row, string key)

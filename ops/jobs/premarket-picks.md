@@ -1,0 +1,256 @@
+---
+name: premarket-picks
+description: Researches and logs 2-3 StockedUp-style trigger setups (buy only if the stock breaks a level) before market open using Robinhood MCP + web search.
+schedule: "8 8 * * 1-5"
+schedule_human: "8:08 AM Mon-Fri"
+status: DISABLED
+last_run: "2026-09-30"
+---
+
+You are running the StockJawn pre-market research task. This runs every weekday morning before market open.
+
+## Objective
+Systematically score and select 2-3 trigger setups (options first, shares as fallback), sized to the ACTUAL account balance, log them with factor breakdowns to the database, and present everything ready for Lou.
+
+## BUY TODAY, SELL TOMORROW — CORE STRATEGY
+We CANNOT day trade (PDT rule). Every pick we enter today will be exited TOMORROW or later. This means:
+- **Down days are BUYING opportunities** — if a catalyst is coming tomorrow (earnings, data release), buying on a dip today means a bigger return when it pops tomorrow.
+- **Always think one day ahead** — today's research isn't just "what's moving now" but "what's ABOUT to move."
+- **A CASH day with nothing today but a catalyst tomorrow is WRONG** — if CCL reports earnings tomorrow morning and the stock is dipping today, that's a BUY today, not a sit-out.
+- **The watchlist scan (step 12b) is MANDATORY every day**, not optional. It feeds tomorrow's nightly research and catches setups the current-day scan misses.
+
+## STOCKEDUP-STYLE SETUPS — EVERY PICK IS "IF X BREAKS, THEN GO"
+Modeled on the StockedUp channel's daily "setups and predictions" + "momentum plays". We never buy blind at the open.
+Every pick is a conditional setup with a trigger level on the STOCK's price. StockJawn waits after Lou approves and
+only buys when the stock breaks the trigger. If it never breaks by the cutoff (15:30 ET), nothing is bought — that's a win, not a miss ("don't force it").
+
+**Each setup needs four levels (all on the stock's price, even for options):**
+- **Trigger** — the break that proves the move: prior day's high/low, today's pre-market high/low, a double top, a trend line, a round number.
+  Bullish = "above X". Bearish = "below X".
+- **Target** — the next level: yesterday's/today's high of day, the next resistance, the gap-fill. This is where we take profit (StockedUp "scale out at the high-of-day test"; with 1 contract we just sell there).
+- **Stop** — where the setup is wrong: back under the trigger / the support that broke. Keep it tight and just past the level.
+- **Reward/risk** — (target − trigger) / (trigger − stop) must be at least 1.5. Skip it otherwise.
+
+**Setup types (use all of them when scanning):**
+1. **News setup** — a specific dated event moved the stock (analyst initiation, partnership/integration, guidance raise, earnings beat) and it's now near a level. e.g. "ORCL +4% on NetApp integration (9/29) — calls above $140, target $144 (high of day)."
+2. **Momentum continuation** — a big mover yesterday that's pressing a level. e.g. "TE double top at $3.80 — above $3.80", "DKNG new 2026 lows — puts below $19.50". A clear level + above-average volume counts as the catalyst for this type. Max 1 momentum pick per day.
+3. **Level bounce / reversal** — a stock or sector ETF holding a big support with a dated reason (e.g. XBI holding $152.50, COST bouncing off range lows after an earnings beat). Trigger = reclaim of the prior day's high.
+4. **Macro / hedge play** — on weak market days, downside via puts on SPY/QQQ or the weakest names (StockedUp uses SPXS). Only if the market read (below) is bearish — "if the S&P isn't falling, don't force it".
+5. **Big-money flow** (optional) — a large, reported unusual options trade (WebSearch "unusual options activity <date>") on a name that ALSO has one of the setups above. Flow alone is never enough.
+
+**Market read first (like their SPY segment):** before any stock, write SPY's levels for today:
+- Resistance above (pre-market high, yesterday's high, round numbers) and support below (yesterday's low, today's low of day, big round numbers).
+- Bias: SPY above yesterday's high → calls favored. SPY below yesterday's low → puts favored. In between = chop → only the single best setup, or CASH.
+- Note data releases before/after the open (CPI, PCE, JOLTS, jobs, FOMC) and big earnings (e.g. MU after hours). On data-release mornings every pick MUST have a trigger (the release decides the direction).
+- Save the SPY levels + bias in the system snapshot so the dashboard shows the same read the picks use. Calls on a PUTS day (or puts on a CALLS day) are not allowed unless it's a news setup with a specific dated catalyst.
+
+## OPTIONS FIRST, SHARES AS FALLBACK
+Every pick should be an option contract FIRST. Calls on bullish setups, puts on bearish setups.
+
+**HOWEVER** — if no affordable option contract exists (premium too high, bid-ask spread too wide, no contracts in budget), FALL BACK TO SHARES:
+- Buy 1-2 shares of the strongest candidate instead of sitting in CASH
+- Same technical + catalyst requirements apply — don't lower the bar just because it's shares
+- Share plays target 1.5-2% moves (no leverage, so tighter targets)
+- Max 40% of buying power per share trade (same sizing rule)
+- Only buy shares of stocks you can afford at least 1 full share of
+- $2.40 profit is better than $0 sitting in cash — over time it compounds
+
+**Decision flow:**
+1. Score candidates -> find top pick(s)
+2. Check option chains for affordable contracts (premium within budget, spread <20% of ask)
+3. If affordable option found -> log as option pick with contract details
+4. If NO affordable option -> log as SHARE pick with share count and entry price
+5. If can't afford even 1 share of any candidate -> THEN log CASH
+
+## ACCOUNT-SIZE-AWARE PICKING (CRITICAL — DO THIS FIRST AFTER MACRO CHECK)
+Before researching ANY picks, check the actual account:
+
+1. Use `get_accounts` to find the agentic account (agentic_allowed = true) and use its account_number below
+2. Use `get_portfolio` (that account_number) to get buying power and equity
+3. Calculate:
+   - **Max per-trade budget** = buying_power * 0.40 (never risk more than 40% on one trade)
+   - **Max affordable premium** = max_per_trade_budget / 100 (1 contract = 100 shares)
+   - **Max affordable share price** = max_per_trade_budget (can buy 1+ shares of anything up to this price)
+   - **Sweet spot premium** = between $0.10 and max_affordable_premium
+4. If buying_power < $25: Log ticker='CASH', notes='Insufficient funds'. STOP.
+5. If buying_power $25-$150: Only 1 pick max.
+6. If buying_power $150-$500: Up to 2 picks.
+7. If buying_power $500+: Up to 3 picks. Normal range.
+
+**MINIMUM STOCK PRICE is DYNAMIC based on account size:**
+- min_stock_price = max_per_trade_budget * 0.05 (5% of max trade budget)
+- Example: $80 budget -> $4 minimum. $200 budget -> $10 minimum. $1000 budget -> $50 minimum.
+- ALWAYS filter out: SPACs, blank-check companies, stocks with no analyst coverage, stocks under $1.
+
+## HISTORICAL CONTEXT — LESSONS FROM LIVE TRADING
+- 60% win rate over 14 clean picks — improving but small sample
+- Catalyst-driven picks are the biggest winners (M&A +16%, analyst initiation +11%)
+- Congress buy signal was the strongest informational edge
+- High-conviction picks (score 70+) outperformed
+- Bearish puts only work with strong catalyst — don't force them on flat days
+- TECHNICAL CONFIRMATION IS REQUIRED — the #1 lesson. A catalyst without a setup fails.
+- Vague catalysts ("AI growth outlook") lose. Specific catalysts (M&A deal, earnings beat, analyst initiation) win.
+- On a $200 account, the strongest signals often land on stocks too expensive to trade. Prioritize finding the SAME pattern on affordable stocks.
+
+### Rules Derived From Failures
+1. MAX picks based on account size (see above).
+2. DEFAULT BULLISH CALLS on up days. PUTS on down days — if the market is plummeting, puts are the safe play and should be held 1-2 days depending on setup.
+3. GAPS NEED A TRIGGER. A stock up 3%+ pre-market is only allowed as a trigger setup (e.g. "above today's pre-market high"). No trigger = skip it. StockJawn also refuses to buy if the stock is already more than 3% past the trigger (`trigger_max_chase_pct`).
+4. CATALYST + TECHNICAL CONFIRMATION REQUIRED. Both needed — not just one.
+5. NO JUNK. No SPACs, no stocks under $1, no stocks with zero analyst coverage. Min price scales with account (see above).
+6. DON'T SIT ON DEAD MONEY. If yesterday's pick is flat and today has a clear winner, rotate out.
+
+## HARD RULE: NO VAGUE CATALYSTS — SPECIFIC DATED EVENTS ONLY
+**If there is no specific, dated event behind the pick, DO NOT PICK IT.**
+
+A valid catalyst is a NAMED EVENT with a DATE:
+- "JPMorgan initiated coverage on 9/25 with Overweight rating"
+- "Beat earnings on 9/22, raised full-year guidance"
+- "Added to S&P 500 effective 9/21"
+- "Rep. Khanna bought $50K-$100K on 9/22"
+- "FDA approved drug on 9/24"
+- "Announced $2B acquisition on 9/23"
+- **MACRO-CHAIN:** "Trump rejected Iran deal on 9/27 -> oil +4% -> cruise lines (CCL, NCLH) hurt" (dated macro event + sector-macro cheat sheet = valid for affected sector tickers)
+
+An INVALID catalyst is a theme, trend, or vibe with no specific event:
+- "AI security growth outlook"
+- "Strong momentum in tech sector"
+- "Rising earnings estimates" (which estimate? when revised? by whom?)
+
+**MACRO-CHAIN CATALYSTS ARE VALID** when there is a specific dated macro event AND the sector-macro cheat sheet confirms a clear transmission mechanism.
+
+**If you can't name the specific event AND the date it happened, skip the stock.**
+(Exception: momentum continuation setups — the level break + volume is the reason, max 1 per day.)
+
+## SECTOR-MACRO CHEAT SHEET
+When a macro event happens, know which sectors it HELPS vs HURTS:
+
+**Fed Rate HIKE / Yields Rising:**
+- HELPS: Banks (JPM, GS, BAC), Insurance, Money markets.
+- HURTS: REITs, Utilities, High-growth tech, Homebuilders, Consumer discretionary.
+
+**Fed Rate CUT / Yields Falling:**
+- HELPS: REITs, Homebuilders, Growth tech, Consumer discretionary.
+- HURTS: Banks, Insurance, Dollar-denominated exporters.
+
+**Oil Price RISING:**
+- HELPS: Energy (XOM, CVX), Oil services.
+- HURTS: Airlines, Cruise lines, Transportation, Consumer.
+
+**Oil Price FALLING:**
+- HELPS: Airlines, Cruise lines, Consumer, Transportation.
+- HURTS: Energy sector, Oil services.
+
+**Inflation RISING:**
+- HELPS: Commodities, Energy, TIPS, Real assets.
+- HURTS: Consumer staples margins, Bonds, Growth tech.
+
+**Strong Dollar:**
+- HELPS: Importers, Domestic-focused companies.
+- HURTS: Multinationals (AAPL, MSFT, PG), Emerging markets, Exporters.
+
+## BEARISH / PUT DAYS — CRITICAL RULE
+DOWN DAYS = PUT DAYS. When the market is red (SPY/QQQ down 0.5%+ or futures clearly negative):
+- **DEFAULT to PUTS**, not calls. Don't fight the market direction.
+- Pick the weakest stocks in the weakest sectors — they drop the hardest.
+- Puts on down days are SAFE TO HOLD 1-2 days because sell-offs tend to continue.
+- Look for stocks already breaking below support or making new lows.
+- **BEARISH SHARE FALLBACK:** If no affordable put exists, DO NOT buy shares on a red day. Log CASH instead.
+- **EXCEPTION — BUY-THE-DIP FOR TOMORROW'S CATALYST:** If the market is red today BUT a specific catalyst fires tomorrow, buying today is valid.
+
+## CHECK NIGHTLY RESEARCH FIRST
+Before doing your own scan, check if the nightly-research task already identified candidates:
+```sql
+SELECT ticker, direction, catalyst, notes, total_score
+FROM claude_daily_picks
+WHERE pick_date = CURRENT_DATE AND approval_status = 'research'
+ORDER BY total_score DESC NULLS LAST;
+```
+If nightly research logged candidates, use them as your STARTING list, validate with FRESH premarket data, re-score, then DELETE research rows and INSERT final scored picks.
+
+## HIGH-PROBABILITY SIGNAL CHECKLIST
+
+### SIGNAL 1: POST-EARNINGS DRIFT (PEAD) — HIGHEST RELIABILITY
+Stocks that beat earnings AND raised guidance within the last 1-5 days. Academically proven since 1968. Score bonus: +15 points.
+
+### SIGNAL 2: ANALYST INITIATION FROM MAJOR BANK
+A top bank INITIATES coverage (not just upgrades) with Buy/Overweight. Score bonus: +15 points.
+
+### SIGNAL 3: CONGRESS BIPARTISAN CLUSTER
+Multiple congress members from BOTH parties buying the same stock within 14 days. Score bonus: +10 extra if bipartisan.
+
+### SIGNAL 4: INDEX INCLUSION / FORCED BUYING
+Stock being added to S&P 500, Russell 2000, or other major index. Score bonus: +20 points (highest).
+
+### SIGNAL 5: MULTIPLE CATALYSTS STACKING (3+)
+Any stock with 3+ independent positive signals converging. Score bonus: +10 points.
+
+## MACRO EVENT CHECK
+Before ANY research, check if today has a major macro event.
+- **FOMC decision day:** DO NOT PICK. Log CASH.
+- **CPI/PPI/jobs report day:** Factor the result into picks. CHECK SECTOR-MACRO CHEAT SHEET.
+- **Earnings season peak:** Focus on PEAD candidates.
+
+## REGIME CHECK
+Determine the market regime from SPY/QQQ 5-day historicals:
+- strong_bull, mild_bull, mild_bull_pullback, flat, mild_bear, strong_bear
+
+## TECHNICAL ANALYSIS (MANDATORY — 2+ confirming signals required)
+The trigger level itself counts as one confirmation only if it's a real, visible level (prior high/low, double top, trend line) — not a random price.
+1. Trend Direction — EMA/SMA alignment
+2. RSI — Momentum confirmation
+3. MACD — Trend momentum
+4. Volume confirmation
+5. Support/Resistance — key levels
+
+## SCORING SYSTEM (0-100)
+Query `scoring_weight_overrides` for current weights. Score on: Technical Setup (up to 30), Congress Activity, Catalyst Strength, RSI, Analyst Ratings, Earnings Momentum, Sector Momentum, Volume Surge, Signal Stacking Bonus.
+
+## Steps
+1. CHECK NIGHTLY RESEARCH
+2. MACRO EVENT CHECK + SECTOR-MACRO CHEAT SHEET
+3. CHECK ACCOUNT BALANCE
+4. Market read: SPY/QQQ levels (resistance, support), bias (calls / puts / chop), today's data releases + earnings, regime check
+5. UPDATE SYSTEM SNAPSHOT FOR DASHBOARD
+6. CHECK OPEN POSITIONS
+7. Generate candidate list (6-10 stocks) — scan all 5 signals AND the 5 setup types (news, momentum, level bounce, macro, big-money flow)
+8. RUN FULL TECHNICAL ANALYSIS on each candidate
+8b. For each candidate write the setup: trigger, target, stop, reward/risk (skip if < 1.5)
+9. Find AFFORDABLE option contracts OR shares
+10. Score each candidate (all factors + signal bonuses)
+11. Select top picks (total_score >= 55, within account budget)
+12. Log picks AND factors to database — include the trigger / target / stop levels (see DATABASE FIELDS below)
+12b. FORWARD-LOOKING WATCHLIST (MANDATORY every day)
+13. Send push notification via ntfy.sh (topic: stockjawn-picks-7428)
+14. Present summary
+
+## DATABASE FIELDS (claude_daily_picks) — StockJawn's executor reads these, not the notes
+- `trigger_price` — the stock price that must break before buying (REQUIRED for every pick)
+- `trigger_direction` — `above` (calls / bullish shares) or `below` (puts)
+- `level_target` / `level_stop` — the stock's target and stop levels
+- Shares: also set `stop_price` = level_stop and `target_price` = level_target (StockJawn places the GTC stop after the fill)
+- Options: `order_type` = call/put, `option_contract_id` (Robinhood instrument UUID), `option_strike`, `option_expiration`,
+  `order_quantity` = contracts. `stop_price` / `target_price` are the option PREMIUM safety net: stop = 50% of the premium, target = 2x.
+  The stock levels (level_stop / level_target) are the main exit.
+- `notes` — one line in StockedUp style: "ORCL calls above $140 → target $144, out below $138 (NetApp integration 9/29)"
+- In the push notification and summary, show the setup line so Lou knows what he's approving.
+
+## Tools Available
+- Robinhood MCP: get_equity_quotes, get_equity_news, get_equity_technical_indicators, get_equity_analyst_ratings, get_equity_historicals, get_equity_fundamentals, get_earnings_calendar, get_politician_trades, get_earnings_results, get_portfolio, get_accounts, get_option_chains, get_option_quotes, get_option_instruments
+- Supabase MCP (project_id: pizoqybgkdhfvxrmnhvx): execute_sql
+- WebSearch for market news
+
+## Rules
+- OPTIONS FIRST, shares as fallback, CASH as last resort.
+- EVERY PICK MUST BE AFFORDABLE within the account budget (max 40% of buying power).
+- EVERY PICK MUST HAVE 2+ TECHNICAL CONFIRMATIONS.
+- EVERY PICK MUST HAVE A SPECIFIC, DATED CATALYST EVENT.
+- CHECK THE SECTOR-MACRO CHEAT SHEET before picking directions on macro event days.
+- Do NOT place any trades. Research and log only. Lou confirms before orders.
+- Use real data only — no mock data.
+- DOWN DAYS = PUT DAYS. Up days = CALL DAYS.
+- NO SHARES ON RED DAYS.
+- EVERY PICK IS A TRIGGER SETUP: trigger + target + stop, reward/risk >= 1.5. No trigger = no pick.
+- DON'T FORCE IT: if the trigger doesn't break, no trade happens. Don't lower triggers to "make sure" it fills.
+- BUY TODAY, SELL TOMORROW.
+- THE WATCHLIST IS MANDATORY.
