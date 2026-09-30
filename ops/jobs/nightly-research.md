@@ -20,6 +20,22 @@ Scan all 5 high-probability signal sources for tomorrow's candidates. Stage the 
 ## ACCOUNT CHECK
 Get the balance of the agentic account (from `get_accounts`, the one with agentic_allowed = true) first — this determines which stocks are even worth researching. Calculate max_per_trade_budget = buying_power * 0.40.
 
+## STEP 0: STOCKJAWN'S MOVERS SCAN (already done at 4:30 PM — start here)
+StockJawn scans the day's biggest movers after the close (StockedUp's routine) and stages setups for tomorrow:
+```sql
+SELECT id, ticker, direction, entry_price, trigger_price, trigger_direction, level_target, level_stop, catalyst, notes
+FROM claude_daily_picks
+WHERE approval_status = 'research' AND pick_date = CURRENT_DATE + INTERVAL '1 day' AND notes LIKE 'SCANNER%';
+```
+Each row already has the move, volume, pattern (closed at the high/low, new 20-day high/low, double top/bottom) and levels.
+For each one:
+1. Find the WHY (WebSearch the ticker + today's date): upgrade, contract, guidance, earnings, sector news. Put it in `catalyst`.
+2. **Group themes:** several names from one industry moving together (e.g. 5 mortgage insurers all -7%) is ONE idea —
+   keep the best 1–2 and say it's a sector move.
+3. Drop junk (no analyst coverage, SPAC, halted, price action driven only by a share offering).
+4. Keep the levels unless the chart shows a clearly better one (e.g. an after-hours low), then UPDATE the row, don't insert a copy.
+5. Add `total_score` and `exit_by_date` like any candidate. Delete rows you reject.
+
 ## SIGNAL SCANS — Run ALL of these
 
 ### SCAN 1: POST-EARNINGS DRIFT (PEAD)
@@ -31,7 +47,8 @@ Get the balance of the agentic account (from `get_accounts`, the one with agenti
 
 ### SCAN 2: ANALYST INITIATIONS
 - WebSearch for major bank initiations (JPM, GS, MS, BofA, Citi, Wells Fargo, Barclays)
-- Look for INITIATIONS (not just upgrades) with Buy/Overweight
+- Initiations AND upgrades count (StockedUp uses both: BNP upgrade on NBIS, TD Cowen initiation on SpaceX), best when the price target jumps and the stock reacts
+- Contract wins count too (e.g. a Space Force contract lifting RKLB/FLY) — dated, named, with a dollar amount
 - Cross-reference with `get_equity_analyst_ratings`
 
 ### SCAN 3: CONGRESS TRADES

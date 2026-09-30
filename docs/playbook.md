@@ -31,6 +31,12 @@ won't chase more than `trigger_max_chase_pct` (3%) past it, and expires the pick
 if it never breaks. Option exits also fire when the stock hits `level_target` / `level_stop`.
 Switch off with `trigger_entries_enabled` = 0 (then picks buy right after approval like before).
 
+### Movers scanner (StockedUp's routine as code)
+`MoversScanner` runs weekdays at `movers_scan_time_et` (16:30 ET): Alpaca top gainers/losers/most-active → daily bars →
+keeps moves ≥3% (≤25%) on ≥1.5x volume that closed near the high/low, at a new 20-day high/low, or a double top/bottom →
+trigger at the day's extreme, stop 2% back, target 2x risk → FMP upgrade/news attached → `research` rows (notes "SCANNER ...")
+for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-secret; `?write=false` to preview).
+
 ### Buy-time checks (every 30s, before any order)
 - Break must hold `trigger_confirm_seconds` (60s) — pokes that fade back don't buy.
 - SPY gate: no calls/shares while SPY is down `spy_gate_pct` (1%) today; no puts/inverse ETFs (`inverse_etfs`) while SPY is up 1%.

@@ -54,12 +54,12 @@ Supabase MCP execute_sql (project_id: pizoqybgkdhfvxrmnhvx), WebSearch.
 1. **Nightly research first:**
    `SELECT ticker, direction, catalyst, notes, total_score, trigger_price, trigger_direction, level_target, level_stop, exit_by_date
     FROM claude_daily_picks WHERE pick_date = CURRENT_DATE AND approval_status = 'research' ORDER BY total_score DESC NULLS LAST;`
-   Rows tagged "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
+   Rows tagged "SCANNER" (StockJawn's movers scan) and "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
 2. Check open positions so you don't double up on a name we already hold.
 3. Scan for these setup types:
    - **Momentum continuation (the core play):** yesterday's big mover pressing a level — after-hours/pre-market high or low,
      high/low of day, double top, new year lows. The level + above-average volume is the reason; no news needed.
-   - **News setup:** a specific dated event (analyst initiation, deal, guidance raise, FDA, index add, earnings beat) and the stock is near a level.
+   - **News setup:** a specific dated event (analyst initiation or upgrade, contract win, deal, guidance raise, FDA, index add, earnings beat) and the stock is near a level.
    - **Level bounce:** a stock or sector ETF holding a big support, with a dated reason. Trigger = reclaiming yesterday's high.
    - **Down-market play:** puts on the weakest names, or an inverse ETF (below).
    - **Big-money options flow** (WebSearch "unusual options activity <date>") only when it lines up with one of the above.

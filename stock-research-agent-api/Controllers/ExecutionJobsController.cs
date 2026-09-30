@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Execution;
+using StockResearchAgent.Api.Services.Scanner;
 
 namespace StockResearchAgent.Api.Controllers;
 
@@ -76,6 +77,19 @@ public class ExecutionJobsController : ControllerBase
         var executor = scope.ServiceProvider.GetRequiredService<ClaudePickExecutor>();
         var r = await executor.CheckReadinessAsync(ct);
         return Ok(new { ready = r.Ready, problems = r.Problems, tools = r.Tools });
+    }
+
+    // StockedUp-style movers scan. ?write=false previews without saving rows.
+    [HttpPost("api/jobs/scan-movers")]
+    public async Task<IActionResult> ScanMovers([FromQuery] bool write = true, CancellationToken ct = default)
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+
+        using var scope = _scopeFactory.CreateScope();
+        var scanner = scope.ServiceProvider.GetRequiredService<MoversScanner>();
+        var r = await scanner.ScanAsync(write, ct);
+        return Ok(new { scanDate = r.ScanDate.ToString("yyyy-MM-dd"), pickDate = r.PickDate.ToString("yyyy-MM-dd"), r.Universe, r.Setups, r.Notes });
     }
 
     private bool ValidateJobSecret()

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -517,6 +518,67 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
         }
 
         return actives;
+    }
+
+    public record DailyBar(DateTime Date, double Open, double High, double Low, double Close, double Volume);
+
+    // Daily bars for many symbols in one call. SIP first (full volume); free accounts may be refused, then IEX.
+    public async Task<Dictionary<string, List<DailyBar>>> GetDailyBarsAsync(IReadOnlyCollection<string> symbols, int calendarDays = 45)
+    {
+        var result = new Dictionary<string, List<DailyBar>>(StringComparer.OrdinalIgnoreCase);
+        if (!IsConfigured || symbols.Count == 0) return result;
+
+        using var dataHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        dataHttp.DefaultRequestHeaders.Add("APCA-API-KEY-ID", _apiKey);
+        dataHttp.DefaultRequestHeaders.Add("APCA-API-SECRET-KEY", _apiSecret);
+        var start = DateTime.UtcNow.AddDays(-calendarDays).ToString("yyyy-MM-dd");
+
+        foreach (var feed in new[] { "sip", "iex" })
+        {
+            result.Clear();
+            string? pageToken = null;
+            var refused = false;
+            try
+            {
+                do
+                {
+                    var url = $"{DataApiBaseUrl}/v2/stocks/bars?symbols={Uri.EscapeDataString(string.Join(',', symbols))}" +
+                              $"&timeframe=1Day&start={start}&adjustment=raw&feed={feed}&limit=10000" +
+                              (pageToken is null ? "" : $"&page_token={Uri.EscapeDataString(pageToken)}");
+                    var response = await dataHttp.GetAsync(url);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[alpaca-bars] {Feed} bars returned {Status}", feed, response.StatusCode);
+                        refused = true;
+                        break;
+                    }
+                    var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+                    if (json?["bars"] is JsonObject bars)
+                    {
+                        foreach (var (sym, arr) in bars)
+                        {
+                            if (arr is not JsonArray list) continue;
+                            if (!result.TryGetValue(sym, out var into)) result[sym] = into = [];
+                            foreach (var b in list)
+                            {
+                                if (!DateTime.TryParse(b?["t"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var t)) continue;
+                                into.Add(new DailyBar(t.Date, ParseDouble(b, "o"), ParseDouble(b, "h"), ParseDouble(b, "l"), ParseDouble(b, "c"), ParseDouble(b, "v")));
+                            }
+                        }
+                    }
+                    pageToken = json?["next_page_token"]?.ToString();
+                } while (!string.IsNullOrEmpty(pageToken));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[alpaca-bars] {Feed} bars failed", feed);
+                refused = true;
+            }
+            if (!refused) break;
+        }
+
+        foreach (var list in result.Values) list.Sort((x, y) => x.Date.CompareTo(y.Date));
+        return result;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────
