@@ -10,7 +10,8 @@ last_run: "2026-09-30"
 You are running the StockJawn pre-market research task. This runs every weekday morning before market open.
 
 ## Objective
-Systematically score and select 2-3 trigger setups (options first, shares as fallback), sized to the ACTUAL account balance, log them with factor breakdowns to the database, and present everything ready for Lou.
+Systematically score and select up to 3 trigger setups (options first, shares as fallback). Like their daily "3 momentum plays", log up to 3 even on a small account —
+not all will trigger, and StockJawn's risk limits only fund the first ones that break (the rest fail "can't afford", which is fine), sized to the ACTUAL account balance, log them with factor breakdowns to the database, and present everything ready for Lou.
 
 ## BUY TODAY, SELL TOMORROW — CORE STRATEGY
 We CANNOT day trade (PDT rule). Every pick we enter today will be exited TOMORROW or later. This means:
@@ -33,10 +34,20 @@ only buys when the stock breaks the trigger. If it never breaks by the cutoff (1
 
 **Setup types (use all of them when scanning):**
 1. **News setup** — a specific dated event moved the stock (analyst initiation, partnership/integration, guidance raise, earnings beat) and it's now near a level. e.g. "ORCL +4% on NetApp integration (9/29) — calls above $140, target $144 (high of day)."
-2. **Momentum continuation** — a big mover yesterday that's pressing a level. e.g. "TE double top at $3.80 — above $3.80", "DKNG new 2026 lows — puts below $19.50". A clear level + above-average volume counts as the catalyst for this type. Max 1 momentum pick per day.
+2. **Momentum continuation — THE CORE PLAY.** A big mover yesterday that's pressing a level. e.g. "MGM below $33.30 (after-hours low)", "FLY above $23.60", "DKNG below $19.50 (new 2026 lows)". A clear level + above-average volume counts as the catalyst for this type.
+   Scored 9/24–9/30: 11 of 12 StockedUp momentum levels triggered and 7 won (FLY +8% intraday, MGM kept falling 4 days). This is where their edge is — prefer these over slow "idea" setups.
 3. **Level bounce / reversal** — a stock or sector ETF holding a big support with a dated reason (e.g. XBI holding $152.50, COST bouncing off range lows after an earnings beat). Trigger = reclaim of the prior day's high.
 4. **Macro / hedge play** — on weak market days, downside via puts on SPY/QQQ or the weakest names (StockedUp uses SPXS). Only if the market read (below) is bearish — "if the S&P isn't falling, don't force it".
 5. **Big-money flow** (optional) — a large, reported unusual options trade (WebSearch "unusual options activity <date>") on a name that ALSO has one of the setups above. Flow alone is never enough.
+
+**What scoring their calls taught us (9/24–9/30):**
+- **Trigger or it isn't a pick.** Their no-trigger "ideas" (META to $796, NBIS to $255, EXPE/LMND down, UNG) mostly failed within days — those are multi-week views. Don't log them.
+- **Triggers saved money.** NFLX (below $68.90), DELL (below $530), ORCL (above $140) never broke — and none of them moved our way. No trade was the right result.
+- **Losers poke through then fade** (PLTR, CHWY, APPS rose just past the trigger and closed back under it). So the stop goes just back through the trigger (about 1.5–2% past it), never at a far support.
+- **Follow the market's side.** Downside breaks (MGM, TSLA, DKNG) worked best while SPY was below its support; upside breaks worked on the day SPY broke resistance (9/25: FLY, MRNA). On a weak SPY day, favor puts on breakdowns.
+- **Fresh, big news moves continue.** A -10% after-hours drop (MGM) or +30% guidance raise (IOVA) kept going for days. The first break of the after-hours/pre-market extreme is the trigger.
+- **Repeated themes had conviction.** Names they mentioned in several videos in a row (XBI support, DELL downside) played out more often. If yesterday's nightly research and today's scan both flag a name, score it higher.
+- **Their SPY levels were accurate** (9/25 broke 769 → 772; 9/29 hit 762 exactly). Trust the SPY level map as the day's bias.
 
 **Market read first (like their SPY segment):** before any stock, write SPY's levels for today:
 - Resistance above (pre-market high, yesterday's high, round numbers) and support below (yesterday's low, today's low of day, big round numbers).
@@ -120,7 +131,7 @@ An INVALID catalyst is a theme, trend, or vibe with no specific event:
 **MACRO-CHAIN CATALYSTS ARE VALID** when there is a specific dated macro event AND the sector-macro cheat sheet confirms a clear transmission mechanism.
 
 **If you can't name the specific event AND the date it happened, skip the stock.**
-(Exception: momentum continuation setups — the level break + volume is the reason, max 1 per day.)
+(Exception: momentum continuation setups — the level break + volume is the reason.)
 
 ## SECTOR-MACRO CHEAT SHEET
 When a macro event happens, know which sectors it HELPS vs HURTS:

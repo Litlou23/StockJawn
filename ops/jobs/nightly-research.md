@@ -47,7 +47,9 @@ Get the balance of the agentic account (from `get_accounts`, the one with agenti
 ### SCAN 6: MOMENTUM + LEVELS (StockedUp "momentum plays")
 - Today's biggest movers (up or down 3%+ on above-average volume) that closed near a level: high of day, a double top, new 52-week/year high or low
 - Log the level as the trigger: "TE above $3.80 (double top)", "DKNG below $19.50 (new 2026 lows)"
-- Max 2 momentum candidates per night; no catalyst needed, but the level must be visible on the daily/intraday chart
+- Up to 3 momentum candidates per night (this was StockedUp's most reliable play); no catalyst needed, but the level must be visible on the daily/intraday chart
+- Best triggers: after-hours/pre-market low or high after a big news move, today's high/low of day, a double top, new year lows
+- Note if a name was also flagged on previous nights — repeated themes had more follow-through
 
 ## TOMORROW'S SETUP LIST (every candidate)
 Write each candidate the way StockedUp does on their nightly video — a conditional setup, not a buy:
