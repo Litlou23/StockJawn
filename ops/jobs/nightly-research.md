@@ -24,6 +24,8 @@ Get the balance of the agentic account (from `get_accounts`, the one with agenti
 
 ### SCAN 1: POST-EARNINGS DRIFT (PEAD)
 - Check `get_earnings_calendar` for stocks reporting TOMORROW and in last 1-5 trading days
+- Reporting tomorrow → either a reaction play for the day after, or (only with a strong setup) an earnings hold:
+  set `earnings_play = true` and start notes with "EARNINGS PLAY:" (see premarket-picks "Earnings"). Without the flag, StockJawn blocks it.
 - Use `get_earnings_results` to find beats + guidance raises
 - Filter for affordable price range, skip stocks that already gapped 5%+
 

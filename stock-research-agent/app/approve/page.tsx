@@ -39,6 +39,7 @@ interface Pick {
   level_target?: number | null;
   level_stop?: number | null;
   exit_by_date?: string | null;
+  earnings_play?: boolean | null;
 }
 
 function today() {
@@ -313,6 +314,9 @@ export default function ApprovePage() {
               {pick.exit_by_date && <> · Sell by {pick.exit_by_date}</>}
               {isContract && <> · stock price levels</>}
             </div>
+            {pick.earnings_play && (
+              <div style={{ color: '#fbbf24', fontWeight: 700 }}>EARNINGS PLAY — holds through the report</div>
+            )}
             {pick.trigger_hit_at && (
               <div style={{ color: '#4ade80' }}>
                 Triggered{pick.trigger_hit_price != null ? ` at $${Number(pick.trigger_hit_price).toFixed(2)}` : ''}

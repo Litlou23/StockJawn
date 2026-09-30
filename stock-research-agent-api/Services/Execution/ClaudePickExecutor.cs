@@ -114,7 +114,7 @@ public class ClaudePickExecutor
             Table,
             filter: $"approval_status=eq.approved&ticker=not.in.(CASH,EXEC_LOG)&pick_date=gte.{today}",
             order: "total_score.desc",
-            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration,trigger_price,trigger_direction,trigger_hit_at,exit_by_date");
+            select: "id,ticker,direction,entry_price,order_quantity,pick_date,approved_at,order_type,option_contract_id,option_contract_symbol,option_strike,option_expiration,trigger_price,trigger_direction,trigger_hit_at,exit_by_date,earnings_play");
 
         var readyNote = readiness is null ? "robinhood=not configured"
             : readiness.Ready ? "robinhood=READY"
@@ -603,7 +603,17 @@ public class ClaudePickExecutor
     // A report this morning (bmo) is fine — that's trading the reaction.
     private async Task<string?> EarningsBlockAsync(PickFields p)
     {
-        if (await GetDbConfigNumberAsync("block_earnings_during_hold", 1) < 1 || !_finnhub.IsConfigured) return null;
+        if (await GetDbConfigNumberAsync("block_earnings_during_hold", 1) < 1) return null;
+        if (p.EarningsPlay)
+        {
+            // Holding through a report is a deliberate bet — allowed, but only one at a time.
+            var open = await _db.SelectAsync(Table,
+                filter: $"earnings_play=eq.true&approval_status=in.(executing,executed)&id=neq.{p.Id}" +
+                        "&or=(exit_status.is.null,exit_status.in.(protected,watching,cancelling_stop,target_sell_placed,stop_sell_placed,option_sell_placed))",
+                select: "ticker");
+            return open.Count > 0 ? $"another earnings play is still open ({open[0]["ticker"]})" : null;
+        }
+        if (!_finnhub.IsConfigured) return null;
         var today = NowEastern().Date;
         var holdEnd = NextTradingDay(today);
         if (DateTime.TryParse(p.ExitByDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var exitBy) && exitBy.Date > holdEnd)
@@ -868,6 +878,7 @@ public class ClaudePickExecutor
         public string? TriggerDirection { get; init; }
         public string? TriggerHitAt { get; init; }
         public string? ExitByDate { get; init; }
+        public bool EarningsPlay { get; init; }
 
         public static PickFields From(JsonObject row) => new(
             row["id"]?.ToString() ?? "",
@@ -884,6 +895,7 @@ public class ClaudePickExecutor
             TriggerPrice = ReadDouble(row, "trigger_price") is var t && t > 0 ? t : null,
             TriggerDirection = row["trigger_direction"]?.ToString()?.ToLowerInvariant(),
             ExitByDate = row["exit_by_date"]?.ToString(),
+            EarningsPlay = row["earnings_play"]?.ToString()?.ToLowerInvariant() == "true",
             TriggerHitAt = string.IsNullOrWhiteSpace(row["trigger_hit_at"]?.ToString()) ? null : row["trigger_hit_at"]!.ToString(),
         };
 
