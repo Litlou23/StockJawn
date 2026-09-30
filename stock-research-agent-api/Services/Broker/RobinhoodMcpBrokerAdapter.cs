@@ -72,6 +72,9 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         """{"account_number":"{{account_number}}","legs":[{"option_id":"{{option_id}}","side":"buy","position_effect":"open"}],"type":"limit","quantity":"{{quantity}}","price":"{{limit_price}}","time_in_force":"gfd","market_hours":"regular_hours","ref_id":"{{ref_id}}"}""";
     private const string DefaultReviewOptionArgs =
         """{"account_number":"{{account_number}}","legs":[{"option_id":"{{option_id}}","side":"buy","position_effect":"open"}],"type":"limit","quantity":"{{quantity}}","price":"{{limit_price}}","time_in_force":"gfd","market_hours":"regular_hours","chain_symbol":"{{ticker}}","underlying_type":"equity"}""";
+    // Single-leg sell-to-close — same shape as buy-to-open but side/position_effect flipped.
+    private const string DefaultSellToCloseOptionArgs =
+        """{"account_number":"{{account_number}}","legs":[{"option_id":"{{option_id}}","side":"sell","position_effect":"close"}],"type":"limit","quantity":"{{quantity}}","price":"{{limit_price}}","time_in_force":"gfd","market_hours":"regular_hours","ref_id":"{{ref_id}}"}""";
     private const string DefaultGetOptionOrdersArgs =
         """{"account_number":"{{account_number}}","placed_agent":"agentic","created_at_gte":"{{since}}"}""";
 
@@ -627,6 +630,56 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
             ToolArguments = args,
             RawResponse = payload,
         };
+    }
+
+    /// <summary>Sell-to-close an option position. Same MCP tool, different side/position_effect.</summary>
+    public async Task<RobinhoodOrderOutcome> PlaceOptionSellToCloseAsync(OptionOrderSpec spec, CancellationToken ct = default)
+    {
+        if (!IsConfigured)
+            return Failed(new JsonObject(), "Robinhood MCP adapter is not configured");
+
+        JsonObject args;
+        try { args = BuildOptionArgs(DefaultSellToCloseOptionArgs, spec); }
+        catch (Exception ex) when (ex is RobinhoodMcpException or JsonException) { return Failed(new JsonObject(), ex.Message); }
+
+        _logger.LogInformation("[robinhood-mcp] Placing OPTION sell-to-close {Qty}x {Option} ({Ticker}) limit={Limit} ref={Ref}",
+            spec.Contracts, spec.OptionId, spec.Ticker, spec.LimitPrice, spec.RefId);
+
+        JsonNode? payload;
+        try { payload = await CallToolAsync("place_option_order", args, ct); }
+        catch (RobinhoodMcpException ex) { return Failed(args, ex.Message, ex.NotPlaced); }
+
+        var orderId = ExtractOrderId(payload);
+        var state = MapState(FindString(payload, OrderStateKeys));
+        if (string.IsNullOrWhiteSpace(orderId))
+            return new RobinhoodOrderOutcome
+            {
+                Result = new BrokerOrderResult { Success = false, ClientOrderId = spec.RefId, ErrorMessage = "Tool call returned no order id", Status = BrokerOrderState.unknown },
+                ToolArguments = args,
+                RawResponse = payload,
+            };
+
+        var rejected = state is BrokerOrderState.rejected or BrokerOrderState.canceled or BrokerOrderState.expired;
+        return new RobinhoodOrderOutcome
+        {
+            Result = new BrokerOrderResult
+            {
+                Success = !rejected,
+                BrokerOrderId = orderId,
+                ClientOrderId = spec.RefId,
+                ErrorMessage = rejected ? $"Sell-to-close {orderId} came back {state}" : null,
+                Status = state,
+            },
+            ToolArguments = args,
+            RawResponse = payload,
+        };
+    }
+
+    /// <summary>Get the mid-price of an option contract for exit pricing.</summary>
+    public async Task<(double? Mid, string? Error)> GetOptionBidAsync(string optionId, CancellationToken ct)
+    {
+        var (mid, _, err) = await GetOptionMidPriceAsync(optionId, ct);
+        return (mid, err);
     }
 
     // Unknown outcome: find by ref_id, else by the contract id placed after `since`.

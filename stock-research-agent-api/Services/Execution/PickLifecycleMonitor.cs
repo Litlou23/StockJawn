@@ -11,13 +11,15 @@ namespace StockResearchAgent.Api.Services.Execution;
 //  1. flags picks stuck in 'executing'
 //  2. tracks fills (executed = Robinhood accepted the order, fill_status = what actually filled)
 //  3. stock exits: GTC stop-loss at stop_price once filled; at target_price, cancel the stop and sell
-// exit_status: null → protected | watching → cancelling_stop → target_sell_placed → closed_target
-//                                protected → closed_stop;   no_position / manual_exit / stop_rejected / exit_failed are terminal
+// STOCK exit_status: null → protected | watching → cancelling_stop → target_sell_placed → closed_target
+//                                   protected → closed_stop;   no_position / manual_exit / stop_rejected / exit_failed are terminal
+// OPTION exit_status: null → watching → option_sell_placed → closed_stop | closed_target
+//                                                          → exit_failed (terminal); manual_exit if no option_contract_id
 public class PickLifecycleMonitor
 {
     private const string Table = "claude_daily_picks";
     private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(10);
-    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "target_sell_placed"];
+    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "target_sell_placed", "option_sell_placed"];
 
     private readonly SupabaseClient _db;
     private readonly RobinhoodMcpBrokerAdapter _broker;
@@ -42,7 +44,7 @@ public class PickLifecycleMonitor
         var rows = await _db.SelectAsync(Table,
             filter: $"approval_status=eq.executed&order_id=not.is.null&pick_date=gte.{since}" +
                     $"&or=(exit_status.is.null,exit_status.in.({string.Join(",", OpenExitStates)}))",
-            select: "id,ticker,order_type,order_id,stop_price,target_price,fill_status,filled_quantity,filled_avg_price,stop_order_id,exit_status,exit_order_id");
+            select: "id,ticker,order_type,order_id,stop_price,target_price,fill_status,filled_quantity,filled_avg_price,stop_order_id,exit_status,exit_order_id,option_contract_id");
 
         foreach (var row in rows)
         {
@@ -128,10 +130,7 @@ public class PickLifecycleMonitor
         // ── Exits ──
         if (isOption)
         {
-            // PORT-LATER: option exits (sell_to_close) aren't automated yet.
-            if (exitStatus is null)
-                await SetExitAsync(id, "manual_exit", "Option exits aren't automated yet — close it in Robinhood");
-            return exitStatus is null ? "filled — option exit is manual" : null;
+            return await ProcessOptionExitAsync(row, id, ticker, exitStatus, filledQty, ct);
         }
         if (!exitsEnabled) return null;
 
@@ -253,6 +252,130 @@ public class PickLifecycleMonitor
         if (outcome.Result.Status == BrokerOrderState.unknown) return $"take-profit sell outcome unknown, will retry ({outcome.Result.ErrorMessage})";
         await SetExitAsync(id, "exit_failed", $"Take-profit sell rejected ({outcome.Result.ErrorMessage}) — position open with NO stop");
         return $"TAKE-PROFIT SELL REJECTED ({outcome.Result.ErrorMessage}) — position unprotected";
+    }
+
+    // ── Option exit logic ─────────────────────────────────────────
+    // Options can't have GTC stop orders on Robinhood (most accounts), so we poll the underlying
+    // stock price against stop_price/target_price and sell-to-close when either is hit.
+    // exit_status flow: null → watching → option_sell_placed → closed_stop | closed_target
+    //                                                       → exit_failed (terminal)
+
+    private async Task<string?> ProcessOptionExitAsync(JsonObject row, string id, string ticker,
+        string? exitStatus, double filledQty, CancellationToken ct)
+    {
+        var stop = D(row["stop_price"]);
+        var target = D(row["target_price"]);
+        var optionId = row["option_contract_id"]?.ToString();
+
+        if (string.IsNullOrWhiteSpace(optionId))
+        {
+            if (exitStatus is null)
+                await SetExitAsync(id, "manual_exit", "No option_contract_id — can't automate sell-to-close");
+            return exitStatus is null ? "filled — no option_contract_id, manual exit" : null;
+        }
+
+        switch (exitStatus)
+        {
+            case null:
+            {
+                // Start monitoring — set to "watching"
+                if (stop <= 0 && target <= 0)
+                {
+                    await SetExitAsync(id, "manual_exit", "No stop or target price — can't automate exit");
+                    return "filled — no stop/target, manual exit";
+                }
+                await SetExitAsync(id, "watching", $"Monitoring {ticker}: stop ${stop:F2} / target ${target:F2}");
+                return $"option filled — monitoring underlying (stop ${stop:F2}, target ${target:F2})";
+            }
+
+            case "watching":
+            {
+                // Poll the underlying stock price
+                var last = await _broker.GetEquityLastPriceAsync(ticker, ct);
+                if (last is null) return null; // quote not available this cycle
+
+                var orderType = row["order_type"]?.ToString() ?? "call";
+                var isCall = orderType == "call";
+
+                // For calls: stop when underlying drops to stop_price, target when it rises to target_price
+                // For puts: stop when underlying rises to stop_price, target when it drops to target_price
+                bool hitStop, hitTarget;
+                if (isCall)
+                {
+                    hitStop = stop > 0 && last <= stop;
+                    hitTarget = target > 0 && last >= target;
+                }
+                else
+                {
+                    hitStop = stop > 0 && last >= stop;
+                    hitTarget = target > 0 && last <= target;
+                }
+
+                if (!hitStop && !hitTarget) return null; // price is between stop and target, do nothing
+
+                var reason = hitTarget ? "target" : "stop";
+                return await PlaceOptionSellAsync(id, ticker, optionId, (int)filledQty, reason, last.Value, ct);
+            }
+
+            case "option_sell_placed":
+            {
+                // Check if the sell-to-close order filled
+                var exitOrderId = row["exit_order_id"]?.ToString();
+                if (string.IsNullOrWhiteSpace(exitOrderId)) return null;
+
+                var (xo, _) = await _broker.GetOrderStateAsync(exitOrderId, true, ct);
+                if (xo is { State: "filled" })
+                {
+                    var exitReason = row["exit_reason"]?.ToString()?.Contains("target") == true ? "closed_target" : "closed_stop";
+                    await CloseAsync(id, exitReason, xo.AveragePrice, $"Option {exitReason.Replace("closed_", "")} — sold @ ${xo.AveragePrice:F2}");
+                    return $"option {exitReason.Replace("closed_", "")} exit filled @ ${xo.AveragePrice:F2}";
+                }
+                if (xo is { State: "cancelled" or "canceled" or "rejected" or "failed" or "expired" })
+                {
+                    await SetExitAsync(id, "exit_failed", $"Option sell-to-close {xo.State} — close manually in Robinhood");
+                    return $"OPTION SELL {xo.State.ToUpperInvariant()} — close manually";
+                }
+                return null; // still pending
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<string> PlaceOptionSellAsync(string id, string ticker, string optionId,
+        int contracts, string reason, double underlyingPrice, CancellationToken ct)
+    {
+        // Get a live option quote for the limit price
+        var (mid, err) = await _broker.GetOptionBidAsync(optionId, ct);
+        if (mid is not > 0)
+        {
+            _logger.LogWarning("[pick-monitor] {Ticker} {Reason} hit but no option quote ({Err}) — will retry", ticker, reason, err);
+            return $"{reason} hit (underlying ${underlyingPrice:F2}) but no option quote — retrying next cycle";
+        }
+
+        // Sell at mid × 0.98 (slight discount to fill quickly)
+        var limit = Math.Round(mid.Value * 0.98, 2, MidpointRounding.AwayFromZero);
+        if (limit < 0.01) limit = 0.01;
+
+        var spec = new OptionOrderSpec(ticker, optionId, contracts, limit, RefFor(id, $"exit_{reason}"));
+        var outcome = await _broker.PlaceOptionSellToCloseAsync(spec, ct);
+
+        if (outcome.Result.Success)
+        {
+            await _db.UpdateAsync(Table, $"id=eq.{id}", new Dictionary<string, object?>
+            {
+                ["exit_order_id"] = outcome.Result.BrokerOrderId,
+                ["exit_status"] = "option_sell_placed",
+                ["exit_reason"] = $"Option {reason} exit: {contracts}x @ ${limit:F2} (underlying ${underlyingPrice:F2})",
+            });
+            return $"option {reason} exit placed — {contracts}x @ ${limit:F2} (underlying ${underlyingPrice:F2})";
+        }
+
+        if (outcome.Result.Status == BrokerOrderState.unknown)
+            return $"option {reason} exit outcome unknown, will retry ({outcome.Result.ErrorMessage})";
+
+        await SetExitAsync(id, "exit_failed", $"Option sell-to-close rejected: {outcome.Result.ErrorMessage}");
+        return $"OPTION SELL REJECTED ({outcome.Result.ErrorMessage}) — close manually";
     }
 
     private Task<bool> SetExitAsync(string id, string status, string reason)
