@@ -31,6 +31,13 @@ won't chase more than `trigger_max_chase_pct` (3%) past it, and expires the pick
 if it never breaks. Option exits also fire when the stock hits `level_target` / `level_stop`.
 Switch off with `trigger_entries_enabled` = 0 (then picks buy right after approval like before).
 
+### Buy-time checks (every 30s, before any order)
+- Break must hold `trigger_confirm_seconds` (60s) — pokes that fade back don't buy.
+- SPY gate: no calls/shares while SPY is down `spy_gate_pct` (1%) today; no puts/inverse ETFs (`inverse_etfs`) while SPY is up 1%.
+- Option spread must be under `options_max_spread_pct` (20%) of the ask.
+- Earnings during the hold (`block_earnings_during_hold`) and contracts under `options_min_days_to_expiry` (7) are refused.
+All of these wait (except earnings/expiry, which fail the pick). Set any number to 0 to switch it off.
+
 ### Day-trade (PDT) guard
 Anything bought today is held overnight — no stop order goes in until the next morning. It's only sold the same day if it's
 down `same_day_stop_stock_pct` (5%) for shares or `same_day_stop_option_pct` (40%) for options, and only while fewer than

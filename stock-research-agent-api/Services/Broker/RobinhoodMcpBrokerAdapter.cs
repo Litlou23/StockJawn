@@ -474,6 +474,44 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
         }
     }
 
+    // Last price + previous close, for the intraday SPY gate. Prev close is 0 if Robinhood doesn't send it.
+    public async Task<(double Last, double PrevClose)?> GetEquityQuoteAsync(string ticker, CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = await CallToolAsync("get_equity_quotes",
+                new JsonObject { ["symbols"] = new JsonArray(JsonValue.Create(ticker)) }, ct);
+            var q = FindArray(payload, "results")?.OfType<JsonObject>().FirstOrDefault()?["quote"];
+            var last = ParseD(q?["last_trade_price"]);
+            if (last is not > 0) return null;
+            var prev = FindDouble(q, ["adjusted_previous_close", "previous_close"]);
+            return (last.Value, prev);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<(double Bid, double Ask)?> GetOptionBidAskAsync(string optionId, CancellationToken ct = default)
+    {
+        try
+        {
+            var payload = await CallToolAsync("get_option_quotes",
+                new JsonObject { ["instrument_ids"] = new JsonArray(JsonValue.Create(optionId)) }, ct);
+            JsonNode? quote = payload is JsonArray arr ? arr.OfType<JsonObject>().FirstOrDefault()
+                : (FindArray(payload, "results") ?? FindArray(payload, "quotes") ?? FindArray(payload, "data"))?.OfType<JsonObject>().FirstOrDefault()
+                  ?? payload;
+            var bid = FindDouble(quote, ["bid_price", "bid"]);
+            var ask = FindDouble(quote, ["ask_price", "ask"]);
+            return ask > 0 ? (bid, ask) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     // Sell orders for exits: stop_market (GTC) for the stop, marketable limit for take-profit.
     public async Task<RobinhoodOrderOutcome> PlaceEquitySellAsync(
         string ticker, double quantity, string type, double price, string refId, CancellationToken ct = default)

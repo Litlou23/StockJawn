@@ -28,6 +28,8 @@ public class ClaudePickExecutor
     private bool _dryRun = true;
     private RobinhoodReadiness? _lastReadiness;
     private RiskContext? _risk;
+    private bool _spyLoaded;
+    private double? _spyChangePct;
 
     public ClaudePickExecutor(
         SupabaseClient db,
@@ -68,6 +70,7 @@ public class ClaudePickExecutor
             _dryRun = await GetDbConfigNumberAsync("executor_dry_run", _dryRunFallback ? 1 : 0) >= 1;
             _lastReadiness = null;
             _risk = null;
+            _spyLoaded = false;
             var result = await RunAsync(ct);
 
             // Fills, exits and stuck-pick checks run every live cycle, even when nothing new was approved.
@@ -485,7 +488,10 @@ public class ClaudePickExecutor
 
     // ── Trigger entries (StockedUp style): "buy ORCL only if it breaks above 140".
 
-    private sealed record TriggerConfig(bool Enabled, double MaxChasePct, TimeSpan CutoffEt);
+    private sealed record TriggerConfig(bool Enabled, double MaxChasePct, TimeSpan CutoffEt,
+        double ConfirmSeconds, double SpyGatePct, double MaxSpreadPct, HashSet<string> InverseEtfs);
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> FirstSeenBreak = new();
 
     private async Task<TriggerConfig> LoadTriggerConfigAsync()
     {
@@ -493,7 +499,13 @@ public class ClaudePickExecutor
         var chase = await GetDbConfigNumberAsync("trigger_max_chase_pct", 3);
         var cutoffRaw = await GetDbConfigStringAsync("trigger_cutoff_et", "15:30");
         var cutoff = TimeSpan.TryParseExact(cutoffRaw, @"hh\:mm", CultureInfo.InvariantCulture, out var c) ? c : new TimeSpan(15, 30, 0);
-        return new TriggerConfig(enabled, chase, cutoff);
+        var confirm = await GetDbConfigNumberAsync("trigger_confirm_seconds", 60);
+        var spyGate = await GetDbConfigNumberAsync("spy_gate_pct", 1);
+        var spread = await GetDbConfigNumberAsync("options_max_spread_pct", 20);
+        var inverse = (await GetDbConfigStringAsync("inverse_etfs", "SPXS,SQQQ,UVXY,SPXU,SDS,SH,PSQ,VXX"))
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => t.ToUpperInvariant()).ToHashSet();
+        return new TriggerConfig(enabled, chase, cutoff, confirm, spyGate, spread, inverse);
     }
 
     private static DateTime NowEastern()
@@ -502,28 +514,50 @@ public class ClaudePickExecutor
     // Returns a "waiting" line when the pick must not buy yet; null means go ahead.
     private async Task<string?> CheckTriggerAsync(PickFields p, TriggerConfig cfg, bool canTalkToBroker, CancellationToken ct)
     {
-        if (!cfg.Enabled || p.TriggerPrice is not > 0 || p.TriggerHitAt is not null) return null;
+        if (p.TriggerHitAt is not null) return null;
+        var waitsOnTrigger = cfg.Enabled && p.TriggerPrice is > 0;
+        double price = 0, trigger = 0;
+        var side = "";
 
-        var trigger = p.TriggerPrice.Value;
-        var above = (p.TriggerDirection ?? (p.OrderType == "put" || p.Direction == "bearish" ? "below" : "above")) == "above";
-        var side = above ? "above" : "below";
+        if (waitsOnTrigger)
+        {
+            trigger = p.TriggerPrice!.Value;
+            var above = (p.TriggerDirection ?? (p.OrderType == "put" || p.Direction == "bearish" ? "below" : "above")) == "above";
+            side = above ? "above" : "below";
 
-        if (NowEastern().TimeOfDay >= cfg.CutoffEt)
-            return $"{p.Ticker}: waiting — past {cfg.CutoffEt.ToString(@"hh\:mm")} ET cutoff, trigger {side} ${trigger:F2} not taken";
+            if (NowEastern().TimeOfDay >= cfg.CutoffEt)
+                return $"{p.Ticker}: waiting — past {cfg.CutoffEt.ToString(@"hh\:mm")} ET cutoff, trigger {side} ${trigger:F2} not taken";
 
-        // Robinhood's quote first: the trigger should fire on the same price the order will see.
-        double price = 0;
-        if (canTalkToBroker) price = await _broker.GetEquityLastPriceAsync(p.Ticker, ct) ?? 0;
-        if (price <= 0) price = (await _marketData.GetQuoteAsync(p.Ticker))?.Price ?? 0;
-        if (price <= 0) return $"{p.Ticker}: waiting — no live price to check trigger {side} ${trigger:F2}";
+            // Robinhood's quote first: the trigger should fire on the same price the order will see.
+            if (canTalkToBroker) price = await _broker.GetEquityLastPriceAsync(p.Ticker, ct) ?? 0;
+            if (price <= 0) price = (await _marketData.GetQuoteAsync(p.Ticker))?.Price ?? 0;
+            if (price <= 0) return $"{p.Ticker}: waiting — no live price to check trigger {side} ${trigger:F2}";
 
-        var hit = above ? price >= trigger : price <= trigger;
-        if (!hit) return $"{p.Ticker}: waiting — ${price:F2}, needs {side} ${trigger:F2}";
+            var hit = above ? price >= trigger : price <= trigger;
+            if (!hit)
+            {
+                FirstSeenBreak.TryRemove(p.Id, out _);
+                return $"{p.Ticker}: waiting — ${price:F2}, needs {side} ${trigger:F2}";
+            }
 
-        var pastPct = Math.Abs(price - trigger) / trigger * 100;
-        if (cfg.MaxChasePct > 0 && pastPct > cfg.MaxChasePct)
-            return $"{p.Ticker}: waiting — ${price:F2} is {pastPct:F1}% past trigger ${trigger:F2}, too late to chase (max {cfg.MaxChasePct}%)";
+            var pastPct = Math.Abs(price - trigger) / trigger * 100;
+            if (cfg.MaxChasePct > 0 && pastPct > cfg.MaxChasePct)
+                return $"{p.Ticker}: waiting — ${price:F2} is {pastPct:F1}% past trigger ${trigger:F2}, too late to chase (max {cfg.MaxChasePct}%)";
 
+            // Pokes through the level that fade right back were the losers (PLTR, CHWY, APPS), so the break has to hold.
+            if (cfg.ConfirmSeconds > 0)
+            {
+                var held = Math.Max(0, (DateTimeOffset.UtcNow - FirstSeenBreak.GetOrAdd(p.Id, DateTimeOffset.UtcNow)).TotalSeconds);
+                if (held < cfg.ConfirmSeconds)
+                    return $"{p.Ticker}: waiting — broke {side} ${trigger:F2} (${price:F2}), confirming it holds ({held:F0}/{cfg.ConfirmSeconds:0}s)";
+            }
+        }
+
+        if (await SpyGateAsync(p, cfg, canTalkToBroker, ct) is { } spyWait) return spyWait;
+        if (canTalkToBroker && await SpreadGateAsync(p, cfg, ct) is { } spreadWait) return spreadWait;
+
+        if (!waitsOnTrigger) return null;
+        FirstSeenBreak.TryRemove(p.Id, out _);
         if (!_dryRun)
             await _db.UpdateAsync(Table, $"id=eq.{p.Id}&trigger_hit_at=is.null", new Dictionary<string, object?>
             {
@@ -532,6 +566,37 @@ public class ClaudePickExecutor
             });
         _logger.LogInformation("[pick-executor] {Ticker} ({Id}) trigger hit: ${Price} {Side} ${Trigger}", p.Ticker, p.Id, price, side, trigger);
         return _dryRun ? $"{p.Ticker}: dry-run — trigger hit (${price:F2} {side} ${trigger:F2}), would buy now" : null;
+    }
+
+    // Don't buy calls into a falling market (or puts into a rising one), even if the stock itself broke its level.
+    private async Task<string?> SpyGateAsync(PickFields p, TriggerConfig cfg, bool canTalkToBroker, CancellationToken ct)
+    {
+        if (cfg.SpyGatePct <= 0 || !canTalkToBroker) return null;
+        if (!_spyLoaded)
+        {
+            _spyLoaded = true;
+            var q = await _broker.GetEquityQuoteAsync("SPY", ct);
+            _spyChangePct = q is { PrevClose: > 0 } ? (q.Value.Last - q.Value.PrevClose) / q.Value.PrevClose * 100 : null;
+            if (_spyChangePct is null) _logger.LogWarning("[pick-executor] SPY gate skipped — no SPY previous close in the quote");
+        }
+        if (_spyChangePct is not { } spy) return null;
+
+        var bearishSide = p.OrderType == "put" || cfg.InverseEtfs.Contains(p.Ticker);
+        if (!bearishSide && spy <= -cfg.SpyGatePct)
+            return $"{p.Ticker}: waiting — SPY {spy:+0.00;-0.00}% today; no bullish buys while SPY is down {cfg.SpyGatePct}%+";
+        if (bearishSide && spy >= cfg.SpyGatePct)
+            return $"{p.Ticker}: waiting — SPY {spy:+0.00;-0.00}% today; no bearish buys while SPY is up {cfg.SpyGatePct}%+";
+        return null;
+    }
+
+    private async Task<string?> SpreadGateAsync(PickFields p, TriggerConfig cfg, CancellationToken ct)
+    {
+        if (cfg.MaxSpreadPct <= 0 || p.OrderType is not ("call" or "put") || string.IsNullOrWhiteSpace(p.OptionContractId)) return null;
+        if (await _broker.GetOptionBidAskAsync(p.OptionContractId, ct) is not { } q) return null;
+        var pct = (q.Ask - q.Bid) / q.Ask * 100;
+        return pct > cfg.MaxSpreadPct
+            ? $"{p.Ticker}: waiting — option spread {pct:F0}% (bid ${q.Bid:F2} / ask ${q.Ask:F2}), max {cfg.MaxSpreadPct}%"
+            : null;
     }
 
     // We hold overnight (PDT), so an earnings report inside the hold is a coin flip we don't want.
