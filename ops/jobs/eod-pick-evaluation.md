@@ -53,6 +53,7 @@ Run health check over last 7 days:
 - Average loss > 2x average win -> WARNING
 - Win rate < 30% -> CRITICAL
 - All recent losses on bearish calls -> Flag
+- Source check: win rate of picks tagged "StockedUp" vs our own — if theirs keeps winning more, weight them higher in premarket
 - Trigger hit rate: % of approved trigger picks that actually triggered, and win rate of those that did. If < 30% trigger, the levels are too far away -> Flag
 
 ### 6. Check open positions from prior days

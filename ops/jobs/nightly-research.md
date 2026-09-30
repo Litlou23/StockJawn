@@ -51,11 +51,25 @@ Get the balance of the agentic account (from `get_accounts`, the one with agenti
 - Best triggers: after-hours/pre-market low or high after a big news move, today's high/low of day, a double top, new year lows
 - Note if a name was also flagged on previous nights — repeated themes had more follow-through
 
+### SCAN 7: STOCKEDUP'S PLAYS (best source — their momentum plays won 7 of 11 in our 9/24–9/30 check)
+StockedUp (youtube.com/@StockedUp) posts a video every trading day after the close with "setups and predictions" and
+three "momentum plays" ("if TSLA breaks under $356, watch it down"). Take their plays as candidates:
+1. Find today's video: WebFetch `https://www.youtube.com/@StockedUp/videos` (or WebSearch "StockedUp" + today's date). Use only a video posted today.
+2. Get the plays: try the transcript (the "Momentum plays" part near the end + the "Setups & predictions" chapter). If the transcript
+   can't be read (YouTube often blocks automated fetches), use the title/description/chapters only for context — don't guess levels.
+   If a browser tool is available, it works better: open the video, "Show transcript", read it.
+3. Each momentum play becomes a candidate with THEIR level as the trigger (above = calls/shares, below = puts).
+   Their "setups" count only if they gave a clear break level; skip their "big money trade" and long multi-week ideas.
+4. Still run every candidate through our checks (affordable, reward/risk ≥ 1.5, setup check). Tag notes with "StockedUp 9/29".
+5. If you couldn't get today's plays, write `StockedUp: not available` in the summary and continue — never block on it.
+
 ## TOMORROW'S SETUP LIST (every candidate)
 Write each candidate the way StockedUp does on their nightly video — a conditional setup, not a buy:
 - Trigger (stock price + above/below), target (next level, e.g. today's high of day), stop (back through the level)
 - Levels come from today's action: high/low of day, key intraday levels, prior-day high/low, trend lines
 - Also write SPY's levels for tomorrow (resistance above, support below) and the data releases before/after the open
+- SPY options walls (see premarket MARKET HEALTH + SPY WALLS): note the biggest call and put open-interest strikes near price
+- Market health: % of S&P 500 above the 50-day, new highs vs new lows — if weak, stage inverse-ETF and put candidates
 Store the draft levels in `trigger_price`, `trigger_direction`, `level_target`, `level_stop` on the research row, and the setup line in `notes`.
 The morning task re-checks them with pre-market prices.
 

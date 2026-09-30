@@ -15,6 +15,7 @@ namespace StockResearchAgent.Api.Services.Execution;
 //                                   protected → closed_stop;   no_position / manual_exit / stop_rejected / exit_failed are terminal
 // OPTION exit_status: null → watching → option_sell_placed → closed_stop | closed_target
 //                                                          → exit_failed (terminal); manual_exit if no option_contract_id
+// exit_by_date: on/after that day (ET) the position is sold whatever the price (inverse ETFs decay when held).
 // PDT guard: anything bought today is held overnight (no stop order yet). It's only sold the same day if the loss passes
 // same_day_stop_*_pct AND fewer than max_day_trades same-day sells happened in the last 5 trading days (stop_sell_placed).
 public class PickLifecycleMonitor
@@ -46,7 +47,7 @@ public class PickLifecycleMonitor
         var rows = await _db.SelectAsync(Table,
             filter: $"approval_status=eq.executed&order_id=not.is.null&pick_date=gte.{since}" +
                     $"&or=(exit_status.is.null,exit_status.in.({string.Join(",", OpenExitStates)}))",
-            select: "id,ticker,order_type,order_id,stop_price,target_price,fill_status,filled_quantity,filled_avg_price,stop_order_id,exit_status,exit_order_id,option_contract_id,level_target,level_stop,executed_at");
+            select: "id,ticker,order_type,order_id,stop_price,target_price,fill_status,filled_quantity,filled_avg_price,stop_order_id,exit_status,exit_order_id,option_contract_id,level_target,level_stop,executed_at,exit_reason,exit_by_date");
 
         foreach (var row in rows)
         {
@@ -183,10 +184,18 @@ public class PickLifecycleMonitor
                     await SetExitAsync(id, "watching", $"Stop order {so.State} outside StockJawn — position has no stop now");
                     return $"stop order {so.State} — watching target only";
                 }
+                if (ExitDue(row))
+                {
+                    var (accepted, cancelErr) = await _broker.CancelEquityOrderByIdAsync(stopOrderId!, ct);
+                    if (!accepted) return $"exit day reached but stop cancel failed ({cancelErr})";
+                    await SetExitAsync(id, "cancelling_stop", $"Time exit: {row["exit_by_date"]} reached — cancelling stop to sell");
+                    return "exit day reached, cancelling stop";
+                }
                 return await CheckTargetAsync(id, ticker, target, stopOrderId, filledQty, ct);
             }
 
             case "watching":
+                if (ExitDue(row)) return await PlaceTargetSellAsync(id, ticker, filledQty, ct, "Time exit");
                 return await CheckTargetAsync(id, ticker, target, null, filledQty, ct);
 
             case "cancelling_stop":
@@ -198,7 +207,8 @@ public class PickLifecycleMonitor
                     await CloseAsync(id, "closed_stop", so.AveragePrice, "Stop filled before the cancel went through");
                     return $"stopped out @ ${so.AveragePrice:F2}";
                 }
-                if (so.State is "cancelled" or "canceled") return await PlaceTargetSellAsync(id, ticker, filledQty, ct);
+                if (so.State is "cancelled" or "canceled")
+                    return await PlaceTargetSellAsync(id, ticker, filledQty, ct, IsTimeExit(row) ? "Time exit" : "Take-profit");
                 return "waiting for stop cancel";
             }
 
@@ -209,9 +219,9 @@ public class PickLifecycleMonitor
                 var (xo, _) = await _broker.GetOrderStateAsync(exitId, false, ct);
                 if (xo is { State: "filled" })
                 {
-                    var closed = exitStatus == "stop_sell_placed" ? "closed_stop" : "closed_target";
-                    await CloseAsync(id, closed, xo.AveragePrice, closed == "closed_stop" ? "Sold same day — big loss" : "Sold at target");
-                    return $"{(closed == "closed_stop" ? "same-day stop sold" : "sold at target")} @ ${xo.AveragePrice:F2}";
+                    var closed = exitStatus == "stop_sell_placed" ? "closed_stop" : IsTimeExit(row) ? "closed_time" : "closed_target";
+                    await CloseAsync(id, closed, xo.AveragePrice, closed switch { "closed_stop" => "Sold same day — big loss", "closed_time" => "Sold on exit day", _ => "Sold at target" });
+                    return $"{closed switch { "closed_stop" => "same-day stop sold", "closed_time" => "sold on exit day", _ => "sold at target" }} @ ${xo.AveragePrice:F2}";
                 }
                 if (xo is { State: "cancelled" or "canceled" or "rejected" or "failed" or "expired" })
                 {
@@ -239,7 +249,7 @@ public class PickLifecycleMonitor
         return $"target hit @ ${last:F2}, cancelling stop";
     }
 
-    private async Task<string> PlaceTargetSellAsync(string id, string ticker, double qty, CancellationToken ct)
+    private async Task<string> PlaceTargetSellAsync(string id, string ticker, double qty, CancellationToken ct, string label = "Take-profit")
     {
         var last = await _broker.GetEquityLastPriceAsync(ticker, ct);
         if (last is null) return "target sell waiting for a quote";
@@ -252,9 +262,9 @@ public class PickLifecycleMonitor
             {
                 ["exit_order_id"] = outcome.Result.BrokerOrderId,
                 ["exit_status"] = "target_sell_placed",
-                ["exit_reason"] = $"Take-profit sell {qty} @ ${limit:F2}",
+                ["exit_reason"] = $"{label} sell {qty} @ ${limit:F2}",
             });
-            return $"take-profit sell placed @ ${limit:F2}";
+            return $"{label.ToLowerInvariant()} sell placed @ ${limit:F2}";
         }
         if (outcome.Result.Status == BrokerOrderState.unknown) return $"take-profit sell outcome unknown, will retry ({outcome.Result.ErrorMessage})";
         await SetExitAsync(id, "exit_failed", $"Take-profit sell rejected ({outcome.Result.ErrorMessage}) — position open with NO stop");
@@ -333,7 +343,8 @@ public class PickLifecycleMonitor
                     }
                 }
 
-                if (!hitStop && !hitTarget) return null; // price is between stop and target, do nothing
+                if (!hitStop && !hitTarget)
+                    return ExitDue(row) ? await PlaceOptionSellAsync(id, ticker, optionId, (int)filledQty, "time", last.Value, ct) : null;
 
                 var reason = hitTarget ? "target" : "stop";
                 return await PlaceOptionSellAsync(id, ticker, optionId, (int)filledQty, reason, last.Value, ct);
@@ -348,7 +359,8 @@ public class PickLifecycleMonitor
                 var (xo, _) = await _broker.GetOrderStateAsync(exitOrderId, true, ct);
                 if (xo is { State: "filled" })
                 {
-                    var exitReason = row["exit_reason"]?.ToString()?.Contains("target") == true ? "closed_target" : "closed_stop";
+                    var why = row["exit_reason"]?.ToString() ?? "";
+                    var exitReason = why.Contains("target") ? "closed_target" : why.Contains("time exit") ? "closed_time" : "closed_stop";
                     await CloseAsync(id, exitReason, xo.AveragePrice, $"Option {exitReason.Replace("closed_", "")} — sold @ ${xo.AveragePrice:F2}");
                     return $"option {exitReason.Replace("closed_", "")} exit filled @ ${xo.AveragePrice:F2}";
                 }
@@ -444,6 +456,11 @@ public class PickLifecycleMonitor
             ["same_day_exit"] = true,
             ["exit_placed_at"] = DateTimeOffset.UtcNow,
         });
+
+    private static bool ExitDue(JsonObject row)
+        => DateTime.TryParse(row["exit_by_date"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) && TodayEt() >= d.Date;
+
+    private static bool IsTimeExit(JsonObject row) => row["exit_reason"]?.ToString()?.StartsWith("Time exit") == true;
 
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
     private static DateTime TodayEt() => TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Eastern).Date;

@@ -49,6 +49,35 @@ only buys when the stock breaks the trigger. If it never breaks by the cutoff (1
 - **Repeated themes had conviction.** Names they mentioned in several videos in a row (XBI support, DELL downside) played out more often. If yesterday's nightly research and today's scan both flag a name, score it higher.
 - **Their SPY levels were accurate** (9/25 broke 769 → 772; 9/29 hit 762 exactly). Trust the SPY level map as the day's bias.
 
+**Market health (their breadth checks) — decides how aggressive we are:**
+- % of S&P 500 stocks above their 50-day average (WebSearch "S&P 500 percent above 50-day moving average" / $S5FI), and
+  NYSE/S&P new 52-week highs vs new lows (WebSearch "new highs new lows today").
+- **Healthy**: > 50% above the 50-day and more new highs than lows → normal picks.
+- **Weak**: < 35% above the 50-day, OR more new lows than highs for 3+ days in a row → at most 1 bullish pick and only a news setup;
+  favor puts and inverse ETFs.
+- **Very weak**: < 25% (like late Sept 2026) AND SPY under yesterday's low → bearish setups only (puts / inverse ETFs) or CASH.
+- If the numbers can't be found, say so and treat the day as "Weak" (safer default). Log the reading in the system snapshot.
+
+**SPY walls (their "gamma" levels) — where big option positions pin price:**
+- Use `get_option_chains` / `get_option_instruments` for SPY's nearest weekly expiration, strikes within ±3% of the price,
+  then `get_option_quotes` (batch the instrument_ids) and read `open_interest`.
+- **Call wall** = the call strike above price with the most open interest → resistance. **Put wall** = the put strike below
+  price with the most open interest → support.
+- A price level (yesterday's high/low, pre-market high/low) that lines up with a wall is a STRONG level — prefer it for SPY bias and
+  targets. Price stuck between the walls = chop → fewer picks.
+- If `open_interest` isn't in the quote data, skip this and use price levels only (note it in the summary).
+
+**Inverse ETFs on down days (their SPXS / UVXY plays):**
+- When the SPY read is bearish or market health is Weak/Very weak, and no affordable put fits the budget, buy SHARES of an
+  inverse ETF instead of sitting in CASH: SPXS (3x short S&P), SQQQ (3x short Nasdaq), or UVXY (volatility — only when SPY is
+  breaking a support level, it fades fast otherwise).
+- Log it as a normal share pick on the ETF itself: `order_type` = stock, `direction` = bullish (we own the ETF),
+  `trigger_direction` = above, trigger = the ETF's pre-market or yesterday's high (it rises when SPY breaks down).
+  Stop/target levels are on the ETF's price too.
+- **Always set `exit_by_date` = the next trading day after the buy** (2-day max hold). These lose value every day they're held;
+  StockJawn sells on that day whatever the price.
+- Sizing is the same as any share pick (40% budget, whole shares).
+
 **Market read first (like their SPY segment):** before any stock, write SPY's levels for today:
 - Resistance above (pre-market high, yesterday's high, round numbers) and support below (yesterday's low, today's low of day, big round numbers).
 - Bias: SPY above yesterday's high → calls favored. SPY below yesterday's low → puts favored. In between = chop → only the single best setup, or CASH.
@@ -166,10 +195,12 @@ DOWN DAYS = PUT DAYS. When the market is red (SPY/QQQ down 0.5%+ or futures clea
 - Pick the weakest stocks in the weakest sectors — they drop the hardest.
 - Puts on down days are SAFE TO HOLD 1-2 days because sell-offs tend to continue.
 - Look for stocks already breaking below support or making new lows.
-- **BEARISH SHARE FALLBACK:** If no affordable put exists, DO NOT buy shares on a red day. Log CASH instead.
+- **BEARISH SHARE FALLBACK:** If no affordable put exists, buy an inverse ETF (SPXS / SQQQ / UVXY) with a trigger and `exit_by_date` — see "Inverse ETFs on down days". Never buy regular stocks on a red day.
 - **EXCEPTION — BUY-THE-DIP FOR TOMORROW'S CATALYST:** If the market is red today BUT a specific catalyst fires tomorrow, buying today is valid.
 
 ## CHECK NIGHTLY RESEARCH FIRST
+Nightly research includes StockedUp's plays from the night before (tagged "StockedUp <date>" in notes) — give them priority, but
+re-check each trigger against pre-market prices (their level may already be broken or out of reach).
 Before doing your own scan, check if the nightly-research task already identified candidates:
 ```sql
 SELECT ticker, direction, catalyst, notes, total_score
@@ -221,7 +252,7 @@ Query `scoring_weight_overrides` for current weights. Score on: Technical Setup 
 1. CHECK NIGHTLY RESEARCH
 2. MACRO EVENT CHECK + SECTOR-MACRO CHEAT SHEET
 3. CHECK ACCOUNT BALANCE
-4. Market read: SPY/QQQ levels (resistance, support), bias (calls / puts / chop), today's data releases + earnings, regime check
+4. Market read: market health (breadth), SPY walls (open interest), SPY/QQQ levels, bias (calls / puts / chop), data releases + earnings, regime check
 5. UPDATE SYSTEM SNAPSHOT FOR DASHBOARD
 6. CHECK OPEN POSITIONS
 7. Generate candidate list (6-10 stocks) — scan all 5 signals AND the 5 setup types (news, momentum, level bounce, macro, big-money flow)
@@ -270,6 +301,7 @@ Any NULL trigger_price / trigger_direction / level_stop / level_target (or optio
 - Options: `order_type` = call/put, `option_contract_id` (Robinhood instrument UUID), `option_strike`, `option_expiration`,
   `order_quantity` = contracts. `stop_price` / `target_price` are the option PREMIUM safety net: stop = 50% of the premium, target = 2x.
   The stock levels (level_stop / level_target) are the main exit.
+- `exit_by_date` — only for inverse ETFs (next trading day); leave NULL otherwise
 - `notes` — one line in StockedUp style: "ORCL calls above $140 → target $144, out below $138 (NetApp integration 9/29)"
 - In the push notification and summary, show the setup line so Lou knows what he's approving.
 
@@ -287,7 +319,7 @@ Any NULL trigger_price / trigger_direction / level_stop / level_target (or optio
 - Do NOT place any trades. Research and log only. Lou confirms before orders.
 - Use real data only — no mock data.
 - DOWN DAYS = PUT DAYS. Up days = CALL DAYS.
-- NO SHARES ON RED DAYS.
+- NO REGULAR SHARES ON RED DAYS (inverse ETFs are the exception, with exit_by_date set).
 - EVERY PICK IS A TRIGGER SETUP: trigger + target + stop, reward/risk >= 1.5. No trigger = no pick.
 - DON'T FORCE IT: if the trigger doesn't break, no trade happens. Don't lower triggers to "make sure" it fills.
 - BUY TODAY, SELL TOMORROW.
