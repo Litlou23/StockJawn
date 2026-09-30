@@ -4,8 +4,8 @@ using StockResearchAgent.Api.Services.Broker;
 
 namespace StockResearchAgent.Api.Controllers;
 
-// One-time Robinhood login for the executor. Opened in a browser, so the secret rides in ?token=
-// (same pattern as BacktestController's dev endpoints). The callback is protected by the PKCE state.
+// One-time Robinhood login for the executor. The job secret only ever travels in the x-job-secret header;
+// the login URL this returns holds nothing secret (PKCE state + challenge), and the callback is protected by that state.
 [ApiController]
 public class RobinhoodOAuthController : ControllerBase
 {
@@ -20,21 +20,21 @@ public class RobinhoodOAuthController : ControllerBase
         _logger = logger;
     }
 
-    [HttpGet("api/robinhood/oauth/start")]
-    public async Task<IActionResult> Start([FromQuery] string? token, CancellationToken ct)
+    [HttpPost("api/robinhood/oauth/login-url")]
+    public async Task<IActionResult> LoginUrl(CancellationToken ct)
     {
-        if (!SecretMatches(token ?? Request.Headers["x-job-secret"].FirstOrDefault()))
-            return Unauthorized(new { error = "Invalid or missing ?token=" });
+        if (!SecretMatches(Request.Headers["x-job-secret"].FirstOrDefault()))
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         try
         {
             var fallbackRedirect = $"https://{Request.Host}/api/robinhood/oauth/callback";
-            return Redirect(await _oauth.BuildLoginUrlAsync(fallbackRedirect, ct));
+            return Ok(new { url = await _oauth.BuildLoginUrlAsync(fallbackRedirect, ct), expiresInMinutes = 10 });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "[robinhood-oauth] Could not start login");
-            return Page("Robinhood login could not start", ex.Message, ok: false);
+            return StatusCode(500, new { error = ex.Message });
         }
     }
 
@@ -61,10 +61,10 @@ public class RobinhoodOAuthController : ControllerBase
     }
 
     [HttpGet("api/robinhood/oauth/status")]
-    public async Task<IActionResult> Status([FromQuery] string? token)
+    public async Task<IActionResult> Status()
     {
-        if (!SecretMatches(token ?? Request.Headers["x-job-secret"].FirstOrDefault()))
-            return Unauthorized(new { error = "Invalid or missing x-job-secret / ?token=" });
+        if (!SecretMatches(Request.Headers["x-job-secret"].FirstOrDefault()))
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         return Ok(await _oauth.GetStatusAsync());
     }

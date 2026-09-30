@@ -37,6 +37,12 @@ keeps moves ≥3% (≤25%) on ≥1.5x volume that closed near the high/low, at a
 trigger at the day's extreme, stop 2% back, target 2x risk → FMP upgrade/news attached → `research` rows (notes "SCANNER ...")
 for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-secret; `?write=false` to preview).
 
+### Robinhood login + JOB_RUN_SECRET
+- The job secret only goes in the `x-job-secret` header — never in a URL.
+- New Robinhood login: `POST /api/robinhood/oauth/login-url` with the header → returns a Robinhood URL (nothing secret in it) →
+  open it, sign in. `GET /api/robinhood/oauth/status` (header) shows whether the stored login is readable.
+- The stored login is encrypted with a key derived from SUPABASE_SERVICE_KEY, so rotating JOB_RUN_SECRET doesn't need a re-login.
+
 ### Buy-time checks (every 30s, before any order)
 - Break must hold `trigger_confirm_seconds` (60s) — pokes that fade back don't buy.
 - SPY gate: no calls/shares while SPY is down `spy_gate_pct` (1%) today; no puts/inverse ETFs (`inverse_etfs`) while SPY is up 1%.

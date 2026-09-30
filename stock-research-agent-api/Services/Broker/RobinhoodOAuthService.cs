@@ -17,6 +17,7 @@ public record RobinhoodOAuthStatus
     public string? UpdatedAt { get; init; }
     public string? LastRefreshAt { get; init; }
     public string? LastError { get; init; }
+    public string? StoredWith { get; init; }
     public List<string> Problems { get; init; } = [];
 }
 
@@ -41,6 +42,7 @@ public class RobinhoodOAuthService
     private readonly string _metadataUrl;
     private readonly string _configuredRedirectUri;
     private readonly byte[]? _encryptionKey;
+    private readonly byte[]? _legacyKey;
     private readonly string? _keyProblem;
 
     private RobinhoodOAuthMetadata? _metadata;
@@ -57,12 +59,18 @@ public class RobinhoodOAuthService
         _metadataUrl = configuration["ROBINHOOD_OAUTH_METADATA_URL"] is { Length: > 0 } m ? m : DefaultMetadataUrl;
         _configuredRedirectUri = configuration["ROBINHOOD_OAUTH_REDIRECT_URI"] ?? "";
 
-        // Key comes from JOB_RUN_SECRET so there's no extra setting; changing that secret means redoing the Robinhood login.
-        var secret = configuration["JOB_RUN_SECRET"] ?? "";
-        if (secret.Length < 16)
-            _keyProblem = "JOB_RUN_SECRET must be set (16+ characters) to protect the stored Robinhood login";
+        // Derived from the Supabase service key: never sent in a URL, and JOB_RUN_SECRET can rotate without a re-login.
+        var serviceKey = configuration["SUPABASE_SERVICE_KEY"] ?? "";
+        if (serviceKey.Length < 16)
+            _keyProblem = "SUPABASE_SERVICE_KEY must be set to protect the stored Robinhood login";
         else
-            _encryptionKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(secret), 32,
+            _encryptionKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(serviceKey), 32,
+                info: Encoding.UTF8.GetBytes("stockjawn-robinhood-token-v2"));
+
+        // Read-only: logins saved before v2 were encrypted with JOB_RUN_SECRET; they're re-saved under the new key on first use.
+        var oldSecret = configuration["JOB_RUN_SECRET"] ?? "";
+        if (oldSecret.Length >= 16)
+            _legacyKey = HKDF.DeriveKey(HashAlgorithmName.SHA256, Encoding.UTF8.GetBytes(oldSecret), 32,
                 info: Encoding.UTF8.GetBytes("stockjawn-robinhood-token-v1"));
     }
 
@@ -154,6 +162,14 @@ public class RobinhoodOAuthService
                 return null;
             }
 
+            var stored = TryDecrypt(enc);
+            if (stored is null)
+            {
+                await SaveAsync(new Dictionary<string, object?> { ["last_error"] = "Stored login can't be decrypted — log in again", ["updated_at"] = DateTimeOffset.UtcNow });
+                _logger.LogError("[robinhood-oauth] Stored refresh token can't be decrypted with the current or old key — a new login is needed");
+                return null;
+            }
+
             var meta = await GetMetadataAsync(ct);
             JsonObject json;
             try
@@ -161,7 +177,7 @@ public class RobinhoodOAuthService
                 json = await PostTokenAsync(meta, new Dictionary<string, string>
                 {
                     ["grant_type"] = "refresh_token",
-                    ["refresh_token"] = Decrypt(enc),
+                    ["refresh_token"] = stored.Value.Plain,
                     ["client_id"] = clientId,
                     ["resource"] = _resource,
                 }, ct);
@@ -183,6 +199,8 @@ public class RobinhoodOAuthService
             };
             if (json["refresh_token"]?.ToString() is { Length: > 0 } rotated)
                 update["refresh_token_enc"] = Encrypt(rotated);
+            else if (stored.Value.Legacy)
+                update["refresh_token_enc"] = Encrypt(stored.Value.Plain);
 
             if (!await SaveAsync(update))
                 _logger.LogCritical("[robinhood-oauth] Could not persist refreshed token — next restart may need a new login");
@@ -203,6 +221,18 @@ public class RobinhoodOAuthService
         if (!_db.IsConfigured) problems.Add("Supabase is not configured");
 
         var row = _db.IsConfigured ? await LoadAsync() : null;
+        var enc = row?["refresh_token_enc"]?.ToString();
+        string? storedWith = null;
+        if (!string.IsNullOrWhiteSpace(enc) && _encryptionKey is not null)
+        {
+            var d = TryDecrypt(enc);
+            if (d is { Legacy: true })
+            {
+                await SaveAsync(new Dictionary<string, object?> { ["refresh_token_enc"] = Encrypt(d.Value.Plain), ["updated_at"] = DateTimeOffset.UtcNow });
+                _logger.LogInformation("[robinhood-oauth] Stored login moved to the service-key encryption");
+            }
+            storedWith = d is null ? "unreadable — log in again" : "service key (safe to rotate JOB_RUN_SECRET)";
+        }
         return new RobinhoodOAuthStatus
         {
             Connected = !string.IsNullOrWhiteSpace(row?["refresh_token_enc"]?.ToString()),
@@ -211,6 +241,7 @@ public class RobinhoodOAuthService
             UpdatedAt = row?["updated_at"]?.ToString(),
             LastRefreshAt = row?["last_refresh_at"]?.ToString(),
             LastError = row?["last_error"]?.ToString(),
+            StoredWith = storedWith,
             Problems = problems,
         };
     }
@@ -318,13 +349,28 @@ public class RobinhoodOAuthService
         return Convert.ToBase64String([.. nonce, .. tag, .. cipher]);
     }
 
-    private string Decrypt(string packed)
+    private (string Plain, bool Legacy)? TryDecrypt(string packed)
     {
-        var all = Convert.FromBase64String(packed);
-        var plain = new byte[all.Length - 28];
-        using var aes = new AesGcm(_encryptionKey!, 16);
-        aes.Decrypt(all.AsSpan(0, 12), all.AsSpan(28), all.AsSpan(12, 16), plain);
-        return Encoding.UTF8.GetString(plain);
+        if (Decrypt(packed, _encryptionKey) is { } current) return (current, false);
+        if (Decrypt(packed, _legacyKey) is { } old) return (old, true);
+        return null;
+    }
+
+    private static string? Decrypt(string packed, byte[]? key)
+    {
+        if (key is null) return null;
+        try
+        {
+            var all = Convert.FromBase64String(packed);
+            var plain = new byte[all.Length - 28];
+            using var aes = new AesGcm(key, 16);
+            aes.Decrypt(all.AsSpan(0, 12), all.AsSpan(28), all.AsSpan(12, 16), plain);
+            return Encoding.UTF8.GetString(plain);
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or ArgumentException)
+        {
+            return null;
+        }
     }
 
     private void PrunePending()
