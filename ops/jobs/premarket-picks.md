@@ -230,10 +230,37 @@ Query `scoring_weight_overrides` for current weights. Score on: Technical Setup 
 9. Find AFFORDABLE option contracts OR shares
 10. Score each candidate (all factors + signal bonuses)
 11. Select top picks (total_score >= 55, within account budget)
+11b. Run the SETUP CHECK on every pick — drop any that fail
 12. Log picks AND factors to database — include the trigger / target / stop levels (see DATABASE FIELDS below)
+12a. Re-read the logged rows with the SETUP CHECK query and fix any NULL levels
 12b. FORWARD-LOOKING WATCHLIST (MANDATORY every day)
 13. Send push notification via ntfy.sh (topic: stockjawn-picks-7428)
 14. Present summary
+
+## SETUP CHECK — RUN ON EVERY PICK BEFORE LOGGING (reject it if any line fails)
+We hold overnight (PDT: under $25k). StockJawn only sells the same day on a big loss (shares -5%, options -40%, max 2 per week).
+So every setup must work as a 1–2 day hold, not an intraday scalp.
+1. `trigger_price` is set and `trigger_direction` matches the side: calls/shares = `above`, puts = `below`.
+2. The trigger is NOT already broken: for `above`, the current price is below the trigger; for `below`, above it.
+   (If it's already past, StockJawn buys instantly with no confirmation — move the trigger to today's pre-market extreme instead.)
+3. The trigger is reachable: within 4% of the current price. Farther than that it will almost never break today.
+4. `level_stop` is just back through the trigger (1.5–3% for shares; for options use the stock level the setup fails at).
+5. `level_target` is a real next level, and (target − trigger) ÷ (trigger − stop) ≥ 1.5.
+6. Shares: `stop_price` = level_stop and `target_price` = level_target (the GTC stop goes in the morning after the buy).
+7. Options: `option_contract_id` is the Robinhood instrument UUID, expiration is at least 7 days out (overnight holds eat time value),
+   bid/ask spread < 20% of the ask, `order_quantity` = whole contracts, `stop_price` = 50% of premium, `target_price` = 2x premium.
+8. Not an FOMC day, and no earnings for that stock before tomorrow's close (an overnight hold would gamble the report) — unless the setup IS the earnings reaction.
+9. The side agrees with the SPY read (puts on a weak SPY day, calls when SPY broke resistance), unless it's a news setup with a dated catalyst.
+10. `notes` has the one-line setup: "MGM puts below $33.30 → target $31.50, out above $34.00 (after-hours -10% on 9/23)".
+
+After inserting, re-read the rows and confirm every field landed:
+```sql
+SELECT ticker, order_type, direction, trigger_price, trigger_direction, level_target, level_stop,
+       stop_price, target_price, option_contract_id, option_expiration, order_quantity, notes
+FROM claude_daily_picks
+WHERE pick_date = CURRENT_DATE AND approval_status = 'pending' AND ticker <> 'CASH';
+```
+Any NULL trigger_price / trigger_direction / level_stop / level_target (or option_contract_id on an option) → fix it or delete the row.
 
 ## DATABASE FIELDS (claude_daily_picks) — StockJawn's executor reads these, not the notes
 - `trigger_price` — the stock price that must break before buying (REQUIRED for every pick)

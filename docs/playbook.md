@@ -31,6 +31,11 @@ won't chase more than `trigger_max_chase_pct` (3%) past it, and expires the pick
 if it never breaks. Option exits also fire when the stock hits `level_target` / `level_stop`.
 Switch off with `trigger_entries_enabled` = 0 (then picks buy right after approval like before).
 
+### Day-trade (PDT) guard
+Anything bought today is held overnight — no stop order goes in until the next morning. It's only sold the same day if it's
+down `same_day_stop_stock_pct` (5%) for shares or `same_day_stop_option_pct` (40%) for options, and only while fewer than
+`max_day_trades` (2) same-day sells happened in the last 5 trading days. Manual same-day trades in Robinhood also count toward the 3 PDT allows.
+
 ## Architecture
 
 ### Data Flow

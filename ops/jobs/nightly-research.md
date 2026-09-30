@@ -59,6 +59,13 @@ Write each candidate the way StockedUp does on their nightly video — a conditi
 Store the draft levels in `trigger_price`, `trigger_direction`, `level_target`, `level_stop` on the research row, and the setup line in `notes`.
 The morning task re-checks them with pre-market prices.
 
+**Nightly setup check** (same rules the morning uses — see premarket-picks SETUP CHECK):
+- Trigger set + direction matches the side (above = calls/shares, below = puts), and not already broken at today's close
+- Trigger within 4% of the close, stop just back through it, target a real level, reward/risk ≥ 1.5
+- Good for a 1–2 day hold: we can't sell the same day unless it's a big loss (PDT), so skip names reporting earnings before tomorrow's close
+  and prefer options at least 7 days out
+- Skip candidates that fail — a short clean list beats a long messy one
+
 ## HARD FILTER: NO VAGUE CATALYSTS
 Every candidate MUST have a specific, named event with a date (momentum candidates from SCAN 6 excepted — their level is the reason). If you can't name the event AND date, do NOT log the candidate.
 
