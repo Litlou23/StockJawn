@@ -15,6 +15,7 @@ namespace StockResearchAgent.Api.Services.Execution;
 //                                   protected → closed_stop;   no_position / manual_exit / stop_rejected / exit_failed are terminal
 // OPTION exit_status: null → watching → option_sell_placed → closed_stop | closed_target
 //                                                          → exit_failed (terminal); manual_exit if no option_contract_id
+// adopt: an existing position handed to StockJawn's exits; treated like a fresh fill (older builds ignore it, so it's safe to set early).
 // exit_by_date: on/after that day (ET) the position is sold whatever the price (inverse ETFs decay when held).
 // PDT guard: anything bought today is held overnight (no stop order yet). It's only sold the same day if the loss passes
 // same_day_stop_*_pct AND fewer than max_day_trades same-day sells happened in the last 5 trading days (stop_sell_placed).
@@ -22,7 +23,7 @@ public class PickLifecycleMonitor
 {
     private const string Table = "claude_daily_picks";
     private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(10);
-    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "target_sell_placed", "stop_sell_placed", "option_sell_placed"];
+    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "target_sell_placed", "stop_sell_placed", "option_sell_placed", "adopt"];
 
     private readonly SupabaseClient _db;
     private readonly RobinhoodMcpBrokerAdapter _broker;
@@ -91,6 +92,7 @@ public class PickLifecycleMonitor
         var fillStatus = row["fill_status"]?.ToString();
         var filledQty = D(row["filled_quantity"]);
         var exitStatus = row["exit_status"]?.ToString();
+        if (exitStatus == "adopt") exitStatus = null;
         var boughtToday = IsTodayEt(row["executed_at"]?.ToString());
 
         // ── Fills ──
