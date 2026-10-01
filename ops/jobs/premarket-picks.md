@@ -29,7 +29,8 @@ Supabase MCP execute_sql (project_id: pizoqybgkdhfvxrmnhvx), WebSearch.
 ## Step 1 — Account
 1. `get_accounts` → the account with agentic_allowed = true. `get_portfolio` on it → buying power.
 2. Budget per trade = buying power × 0.40. Max option premium = budget ÷ 100. Min stock price = budget × 5% (and never under $1).
-3. Buying power under $25 → log one row `ticker='CASH'`, notes 'Insufficient funds', and stop.
+3. Buying power under $25 → log one row `ticker='CASH'`, notes 'Insufficient funds'. Still log the best 1–2 research candidates
+   as pending picks with triggers (the executor checks buying power at trigger-break time, and budget may change intraday — e.g. an exit frees cash).
 
 ## Step 2 — Calendar
 - **FOMC decision day → log CASH and stop.**
@@ -110,7 +111,11 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
 8. Max 3 picks. Not a name we already hold.
 
 ## Step 7 — Log and verify
-1. Delete today's `research` rows, insert the final picks with `approval_status = 'pending'`, plus their factor rows in `claude_pick_factors`.
+1. Insert the final picks with `approval_status = 'pending'`, plus their factor rows in `claude_pick_factors`.
+   **Do NOT delete research rows.** Keep them — if you go CASH or can only afford 1 pick, the remaining research candidates
+   stay visible for manual review or a mid-day re-check. Only delete a research row if you're replacing it with a pending pick for the same ticker.
+   **Going CASH?** Still log the top 1–2 research candidates as pending picks with triggers. The executor checks buying power
+   at trigger-break time, not now — budget changes intraday (exits free cash, deposits settle). Add a note like "budget tight at 8am, executor rechecks".
 2. Re-read and confirm every field landed:
    `SELECT ticker, order_type, direction, trigger_price, trigger_direction, level_target, level_stop, stop_price, target_price,
            option_contract_id, option_expiration, order_quantity, exit_by_date, earnings_play, notes
