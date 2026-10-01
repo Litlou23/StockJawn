@@ -25,7 +25,7 @@ StockJawn scans the day's biggest movers after the close (StockedUp's routine) a
 ```sql
 SELECT id, ticker, direction, entry_price, trigger_price, trigger_direction, level_target, level_stop, catalyst, notes
 FROM claude_daily_picks
-WHERE approval_status = 'research' AND pick_date = CURRENT_DATE + INTERVAL '1 day' AND notes LIKE 'SCANNER%';
+WHERE approval_status = 'research' AND pick_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + INTERVAL '1 day' AND notes LIKE 'SCANNER%';
 ```
 Each row already has the move, volume, pattern (closed at the high/low, new 20-day high/low, double top/bottom) and levels.
 For each one:
@@ -73,14 +73,22 @@ For each one:
 ### SCAN 7: STOCKEDUP'S PLAYS (best source — their momentum plays won 7 of 11 in our 9/24–9/30 check)
 StockedUp (youtube.com/@StockedUp) posts a video every trading day after the close with "setups and predictions" and
 three "momentum plays" ("if TSLA breaks under $356, watch it down"). Take their plays as candidates:
-1. Find today's video: WebFetch `https://www.youtube.com/@StockedUp/videos` (or WebSearch "StockedUp" + today's date). Use only a video posted today.
-2. Get the plays: try the transcript (the "Momentum plays" part near the end + the "Setups & predictions" chapter). If the transcript
-   can't be read (YouTube often blocks automated fetches), use the title/description/chapters only for context — don't guess levels.
-   If a browser tool is available, it works better: open the video, "Show transcript", read it.
+1. **Find today's video — DO NOT WebFetch YouTube directly (it's client-rendered and returns empty).**
+   Instead, use these in order until one works:
+   a. WebSearch `"StockedUp" stock market tomorrow` (extended mode) — their videos rank well; look for a youtube.com result from today.
+   b. WebSearch `site:youtube.com StockedUp setups predictions` — narrows to their channel.
+   c. WebFetch the RSS feed: `https://www.youtube.com/feeds/videos.xml?channel_id=UCnHEFBpeb0M9BaSsRTnqiZg` — this is plain XML, not client-rendered, and lists recent uploads with titles and dates.
+   d. If a browser tool is available, open `https://www.youtube.com/@StockedUp/videos` in the browser, which renders JavaScript.
+   Use only a video posted today (check the date in the title, description, or upload timestamp).
+2. **Get the plays:** once you have the video URL (e.g. `https://www.youtube.com/watch?v=VIDEO_ID`):
+   a. WebFetch the video page — the `<meta>` tags and JSON-LD often contain the description with ticker mentions and chapters.
+   b. Try a transcript service: WebFetch `https://www.youtubetranscript.com/?v=VIDEO_ID` or similar.
+   c. If a browser tool is available, open the video, click "Show transcript", and read it.
+   d. The "Momentum plays" section is near the end; "Setups & predictions" is a chapter earlier. If you can only get the description/title, extract ticker names and search each one for today's levels — but don't guess break levels you didn't see.
 3. Each momentum play becomes a candidate with THEIR level as the trigger (above = calls/shares, below = puts).
    Their "setups" count only if they gave a clear break level; skip their "big money trade" and long multi-week ideas.
-4. Still run every candidate through our checks (affordable, reward/risk ≥ 1.5, setup check). Tag notes with "StockedUp 9/29".
-5. If you couldn't get today's plays, write `StockedUp: not available` in the summary and continue — never block on it.
+4. Still run every candidate through our checks (affordable, reward/risk ≥ 1.5, setup check). Tag notes with "StockedUp <today's date>".
+5. If you couldn't get today's plays after all attempts, write `StockedUp: not available (YouTube fetch failed)` in the summary and continue — never block on it.
 
 ## TOMORROW'S SETUP LIST (every candidate)
 Write each candidate the way StockedUp does on their nightly video — a conditional setup, not a buy:
@@ -107,11 +115,13 @@ Every candidate MUST have a specific, named event with a date (momentum candidat
 Check tomorrow's economic calendar. Cross-reference candidates against sector-macro relationships.
 
 ## DATABASE LOGGING
-For candidates scoring >= 40, insert with `approval_status = 'research'` and `pick_date = CURRENT_DATE + INTERVAL '1 day'`.
+For candidates scoring >= 40, insert with `approval_status = 'research'` and `pick_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + INTERVAL '1 day'`.
+
+**IMPORTANT:** This task runs at 9 PM ET, which is past midnight UTC. Use `(CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date` instead of `CURRENT_DATE` everywhere — otherwise dates are off by one.
 
 Clean up old research rows first:
 ```sql
-DELETE FROM claude_daily_picks WHERE approval_status = 'research' AND pick_date <= CURRENT_DATE;
+DELETE FROM claude_daily_picks WHERE approval_status = 'research' AND pick_date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date;
 ```
 
 ## Tools Available
