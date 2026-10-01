@@ -29,6 +29,12 @@ public class MoversScanScheduler : BackgroundService
                 if (now.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) && _lastRunDate != now.Date)
                 {
                     using var scope = _scopeFactory.CreateScope();
+                    if (!await scope.ServiceProvider.GetRequiredService<StockResearchAgent.Api.Services.Calendar.TradingCalendar>().IsTradingDayAsync(now.Date))
+                    {
+                        _lastRunDate = now.Date;
+                        await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+                        continue;
+                    }
                     var db = scope.ServiceProvider.GetRequiredService<SupabaseClient>();
                     var enabled = await ReadAsync(db, "movers_scan_enabled", "effective_weight", "1") != "0";
                     var at = TimeSpan.TryParseExact(await ReadAsync(db, "movers_scan_time_et", "reason", "16:30"), @"hh\:mm",

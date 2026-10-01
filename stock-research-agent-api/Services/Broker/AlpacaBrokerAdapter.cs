@@ -520,6 +520,33 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
         return actives;
     }
 
+    public record MarketDay(DateTime Date, string Open, string Close);
+
+    // Official trading days (holidays are simply missing; early closes have close < 16:00). Works on paper keys too.
+    public async Task<List<MarketDay>?> GetMarketCalendarAsync(DateTime start, DateTime end)
+    {
+        if (!IsConfigured) return null;
+        try
+        {
+            var resp = await _http.GetAsync($"/v2/calendar?start={start:yyyy-MM-dd}&end={end:yyyy-MM-dd}");
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[alpaca-calendar] returned {Status}", resp.StatusCode);
+                return null;
+            }
+            var arr = JsonNode.Parse(await resp.Content.ReadAsStringAsync()) as JsonArray;
+            return arr?.Select(d => DateTime.TryParse(d?["date"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
+                    ? new MarketDay(dt.Date, d?["open"]?.ToString() ?? "09:30", d?["close"]?.ToString() ?? "16:00")
+                    : null)
+                .OfType<MarketDay>().ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[alpaca-calendar] failed");
+            return null;
+        }
+    }
+
     public record DailyBar(DateTime Date, double Open, double High, double Low, double Close, double Volume);
 
     // Daily bars for many symbols in one call. SIP first (full volume); free accounts may be refused, then IEX.

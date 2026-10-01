@@ -1,5 +1,6 @@
 using System.Globalization;
 using StockResearchAgent.Api.Services.Broker;
+using StockResearchAgent.Api.Services.Calendar;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
 using static StockResearchAgent.Api.Services.Broker.AlpacaBrokerAdapter;
@@ -24,13 +25,15 @@ public class MoversScanner
     private readonly AlpacaBrokerAdapter _alpaca;
     private readonly FmpClient _fmp;
     private readonly SupabaseClient _db;
+    private readonly TradingCalendar _calendar;
     private readonly ILogger<MoversScanner> _logger;
 
-    public MoversScanner(AlpacaBrokerAdapter alpaca, FmpClient fmp, SupabaseClient db, ILogger<MoversScanner> logger)
+    public MoversScanner(AlpacaBrokerAdapter alpaca, FmpClient fmp, SupabaseClient db, TradingCalendar calendar, ILogger<MoversScanner> logger)
     {
         _alpaca = alpaca;
         _fmp = fmp;
         _db = db;
+        _calendar = calendar;
         _logger = logger;
     }
 
@@ -47,7 +50,7 @@ public class MoversScanner
     {
         var notes = new List<string>();
         var today = TodayEt();
-        var pickDate = NextTradingDay(today);
+        var pickDate = await _calendar.NextTradingDayAsync(today);
 
         if (!_alpaca.IsConfigured)
             return new(today, pickDate, 0, [], ["Alpaca not configured (ALPACA_API_KEY / ALPACA_API_SECRET) — no movers data"]);

@@ -3,6 +3,7 @@ using StockResearchAgent.Api.Models;
 using StockResearchAgent.Api.Services;
 using StockResearchAgent.Api.Services.Execution;
 using StockResearchAgent.Api.Services.Scanner;
+using StockResearchAgent.Api.Services.Calendar;
 
 namespace StockResearchAgent.Api.Controllers;
 
@@ -90,6 +91,18 @@ public class ExecutionJobsController : ControllerBase
         var scanner = scope.ServiceProvider.GetRequiredService<MoversScanner>();
         var r = await scanner.ScanAsync(write, ct);
         return Ok(new { scanDate = r.ScanDate.ToString("yyyy-MM-dd"), pickDate = r.PickDate.ToString("yyyy-MM-dd"), r.Universe, r.Setups, r.Notes });
+    }
+
+    // Refresh market_events now. ?alert=true also sends the next session's events to the ntfy topic.
+    [HttpPost("api/jobs/refresh-calendar")]
+    public async Task<IActionResult> RefreshCalendar([FromQuery] bool alert = false, CancellationToken ct = default)
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+
+        using var scope = _scopeFactory.CreateScope();
+        var r = await scope.ServiceProvider.GetRequiredService<EventsCalendarService>().RefreshAsync(alert, ct);
+        return Ok(r);
     }
 
     private bool ValidateJobSecret()

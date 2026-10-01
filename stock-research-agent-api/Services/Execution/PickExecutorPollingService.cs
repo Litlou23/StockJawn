@@ -1,4 +1,5 @@
 using System.Globalization;
+using StockResearchAgent.Api.Services.Calendar;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.Execution;
@@ -29,6 +30,7 @@ public class PickExecutorPollingService : BackgroundService
 
     private TimeSpan _pollOpen = DefaultOpen;
     private TimeSpan _pollClose = DefaultClose;
+    private TimeSpan? _preMarketStart;
     private DateTime _lastConfigRead = DateTime.MinValue;
 
     public PickExecutorPollingService(
@@ -53,7 +55,7 @@ public class PickExecutorPollingService : BackgroundService
             {
                 await RefreshConfigIfNeededAsync();
 
-                if (IsMarketHours())
+                if (IsMarketHours() && await IsTradingDayAsync())
                 {
                     await RunOnceAsync(stoppingToken);
                 }
@@ -107,6 +109,10 @@ public class PickExecutorPollingService : BackgroundService
             var db = scope.ServiceProvider.GetRequiredService<SupabaseClient>();
             if (!db.IsConfigured) return;
 
+            // Pre-market share buying starts earlier than the normal window.
+            var pre = (await db.SelectSingleAsync("scoring_weight_overrides", "signal_name=eq.premarket_shares_start_et&status=eq.active"))?["reason"]?.ToString();
+            _preMarketStart = TimeSpan.TryParseExact(pre?.Trim(), @"hh\:mm", CultureInfo.InvariantCulture, out var ps) ? ps : null;
+
             var row = await db.SelectSingleAsync(
                 "scoring_weight_overrides",
                 "signal_name=eq.broker_poll_window&status=eq.active");
@@ -137,6 +143,19 @@ public class PickExecutorPollingService : BackgroundService
         }
     }
 
+    private async Task<bool> IsTradingDayAsync()
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            return await scope.ServiceProvider.GetRequiredService<TradingCalendar>().IsTradingDayAsync(TradingCalendar.TodayEt());
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
     private bool IsMarketHours()
     {
         var eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
@@ -147,6 +166,7 @@ public class PickExecutorPollingService : BackgroundService
             return false;
 
         var time = now.TimeOfDay;
-        return time >= _pollOpen && time <= _pollClose;
+        var open = _preMarketStart is { } ps && ps < _pollOpen ? ps : _pollOpen;
+        return time >= open && time <= _pollClose;
     }
 }

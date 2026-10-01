@@ -28,6 +28,7 @@ public class PickLifecycleMonitor
     private readonly SupabaseClient _db;
     private readonly RobinhoodMcpBrokerAdapter _broker;
     private readonly ILogger _logger;
+    private double _staleBuyMinutes;
 
     public PickLifecycleMonitor(SupabaseClient db, RobinhoodMcpBrokerAdapter broker, ILogger logger)
     {
@@ -44,6 +45,7 @@ public class PickLifecycleMonitor
         await FlagStuckAsync(errors);
 
         var exitsEnabled = await NumberAsync("exits_enabled", 0) >= 1;
+        _staleBuyMinutes = await NumberAsync("stale_buy_minutes", 30);
         var since = DateTime.UtcNow.AddDays(-30).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var rows = await _db.SelectAsync(Table,
             filter: $"approval_status=eq.executed&order_id=not.is.null&pick_date=gte.{since}" +
@@ -110,6 +112,26 @@ public class PickLifecycleMonitor
                 "rejected" or "failed" => "rejected",
                 _ => "open",
             };
+
+            // A marketable buy that hasn't filled in N minutes means price ran away; don't let it fill by surprise later.
+            if (!isOption && newStatus == "open" && order.FilledQuantity <= 0 && _staleBuyMinutes > 0
+                && DateTimeOffset.TryParse(row["executed_at"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var placedAt)
+                && DateTimeOffset.UtcNow - placedAt > TimeSpan.FromMinutes(_staleBuyMinutes))
+            {
+                var (accepted, cancelErr) = await _broker.CancelEquityOrderByIdAsync(row["order_id"]!.ToString(), ct);
+                if (accepted)
+                {
+                    await _db.UpdateAsync(Table, $"id=eq.{id}", new Dictionary<string, object?>
+                    {
+                        ["fill_status"] = "cancelled",
+                        ["exit_status"] = "no_position",
+                        ["exit_reason"] = $"Buy didn't fill within {_staleBuyMinutes:0} min — cancelled",
+                        ["fill_checked_at"] = DateTimeOffset.UtcNow,
+                    });
+                    return $"buy unfilled after {_staleBuyMinutes:0} min — cancelled";
+                }
+                _logger.LogWarning("[pick-monitor] {Ticker} stale buy cancel failed: {Err}", ticker, cancelErr);
+            }
 
             var update = new Dictionary<string, object?>
             {

@@ -33,6 +33,11 @@ Supabase MCP execute_sql (project_id: pizoqybgkdhfvxrmnhvx), WebSearch.
    as pending picks with triggers (the executor checks buying power at trigger-break time, and budget may change intraday — e.g. an exit frees cash).
 
 ## Step 2 — Calendar
+Start from StockJawn's events calendar (refreshed nightly from Finnhub / Alpaca, plus rows the nightly job adds):
+`SELECT event_date, event_time, kind, ticker, title, importance FROM market_events
+ WHERE event_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 10 ORDER BY event_date, importance;`
+- Market closed / early close today → no picks (closed) or nothing that needs the afternoon (early close).
+- Economic data today: if a high-importance release isn't in the table, WebSearch today's US economic calendar and add it.
 - **FOMC decision day → log CASH and stop.**
 - CPI / PCE / jobs / GDP before the open → every pick must have a trigger (the release decides the direction). Use the sector cheat sheet.
 - Check big earnings today/tomorrow (get_earnings_calendar). See "Earnings" below for how to use them.
@@ -90,9 +95,26 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
    levels on the ETF's price, `exit_by_date` = next trading day.
 4. Nothing fits → CASH.
 
+**Run-up play — get in BEFORE the report (Lou, 10/1: "if Nike was looking positive we should have got it beforehand"):**
+- Candidates: earnings 3–7 trading days out (`market_events`, kind = 'earnings').
+- "Looking positive" = at least 3 of these, and none of the disqualifiers:
+  1. Above its 20-day and 50-day averages, and the 20-day is rising.
+  2. Within ~5% of its 20-day high (not broken down).
+  3. An upgrade or price-target raise in the last 14 days, or estimates revised up.
+  4. Peers / suppliers that already reported did well (e.g. a competitor beat and raised).
+  5. Bullish options activity (unusual call buying) or a StockedUp / SCANNER mention.
+  6. It rose into its last 2+ reports (compare the close 5 days before vs the day before each report).
+  Disqualifiers: market health Very weak; already up 10%+ in the last 5 days (the run-up already happened); FOMC before the exit.
+- It's still a trigger setup: trigger above yesterday's high, stop ~3% back, target 2x the risk or the prior high.
+- `exit_by_date` = the report date if it reports after the close, otherwise the trading day before. StockJawn sells that
+  morning, so we never hold through the report (no `earnings_play` flag needed). Notes start with "RUN-UP:".
+- Options are fine here (7+ days out) — rising option prices before earnings help us; we're out before they collapse.
+
 **Earnings — two ways, both allowed:**
 - **Reaction play (default):** the report is already out (yesterday after close or this morning). Trade the move with a trigger at the
   pre-market high (beat) or low (miss). Post-earnings drift works for 1–5 days after a beat + raise.
+  Use SHARES for reaction plays when you want in early: StockJawn buys share picks from 8:00 AM (pre-market, extended-hours
+  order); options can't trade until 9:30. Keep the trigger at the pre-market extreme so it still needs a real break.
 - **Earnings hold:** buy before the report and hold through it — a deliberate bet on the report. Only with a real setup + trigger,
   set `earnings_play = true`, notes start with "EARNINGS PLAY:", 1 contract (or the smallest share size),
   `exit_by_date` = the trading day after the report. StockJawn allows 1 open earnings play at a time; without the flag it refuses

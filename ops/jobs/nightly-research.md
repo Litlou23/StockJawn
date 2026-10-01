@@ -36,6 +36,22 @@ For each one:
 4. Keep the levels unless the chart shows a clearly better one (e.g. an after-hours low), then UPDATE the row, don't insert a copy.
 5. Add `total_score` and `exit_by_date` like any candidate. Delete rows you reject.
 
+## STEP 0b: THE EVENTS CALENDAR (StockJawn refreshes it at 6 PM)
+```sql
+SELECT event_date, event_time, kind, ticker, title, importance FROM market_events
+WHERE event_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 10 ORDER BY event_date;
+```
+- **Run-up candidates:** earnings 3–7 trading days out → check the "looking positive" rules in premarket-picks
+  ("Run-up play") and stage the ones that pass, notes starting "RUN-UP:".
+- **Reaction candidates:** reports tonight after the close or tomorrow before the open → stage both sides (beat / miss)
+  with placeholder levels; the morning task resets them to the pre-market high/low.
+- **Add what the feeds miss** — company events (monthly deliveries like NIO on the 1st, product launches, investor days,
+  FDA dates) and any high-importance economic release that's missing (FOMC, CPI, PCE, jobs):
+  `INSERT INTO market_events (event_date, event_time, kind, ticker, title, importance, source)
+   VALUES ('2026-11-02', 'before open', 'company', 'NIO', 'NIO October deliveries', 'high', 'nightly')
+   ON CONFLICT DO NOTHING;`  (kind: 'company' or 'economic'; ticker NULL for economic)
+- Positions we hold with `event_warning` set report or have an event before their sell-by date — say so in the summary.
+
 ## SIGNAL SCANS — Run ALL of these
 
 ### SCAN 1: POST-EARNINGS DRIFT (PEAD)

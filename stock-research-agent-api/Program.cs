@@ -269,6 +269,9 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<RobinhoodMcpBrokerAdapter>();
     builder.Services.AddSingleton<ClaudePickExecutor>();
     builder.Services.AddHostedService<PickExecutorPollingService>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.Calendar.TradingCalendar>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.Calendar.EventsCalendarService>();
+    builder.Services.AddHostedService<StockResearchAgent.Api.Services.Calendar.CalendarScheduler>();
     builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.MoversScanner>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.MoversScanScheduler>();
 

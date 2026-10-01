@@ -40,6 +40,15 @@ interface Pick {
   level_stop?: number | null;
   exit_by_date?: string | null;
   earnings_play?: boolean | null;
+  event_warning?: string | null;
+}
+
+interface MarketEvent {
+  ticker: string;
+  event_date: string;
+  event_time: string | null;
+  kind: string;
+  title: string;
 }
 
 function today() {
@@ -55,6 +64,7 @@ export default function ApprovePage() {
   const [messages, setMessages] = useState<Record<string, { text: string; ok: boolean }>>({});
   const [showHistory, setShowHistory] = useState(false);
   const [expandedNotes, setExpandedNotes] = useState<Set<string>>(new Set());
+  const [events, setEvents] = useState<Record<string, MarketEvent>>({});
 
   const fetchPicks = useCallback(async () => {
     try {
@@ -75,6 +85,23 @@ export default function ApprovePage() {
         return;
       }
       setPicks(data || []);
+
+      // Next earnings/company event per ticker (next 10 days) from the nightly calendar.
+      const tickers = Array.from(new Set((data || []).map((p: Pick) => p.ticker).filter(t => t && t !== 'CASH')));
+      if (tickers.length > 0) {
+        const until = new Date(Date.now() + 10 * 86400000).toISOString().split('T')[0];
+        const { data: ev } = await supabase
+          .from('market_events')
+          .select('ticker,event_date,event_time,kind,title')
+          .in('ticker', tickers)
+          .in('kind', ['earnings', 'company'])
+          .gte('event_date', today())
+          .lte('event_date', until)
+          .order('event_date', { ascending: true });
+        const next: Record<string, MarketEvent> = {};
+        for (const e of (ev || []) as MarketEvent[]) if (!next[e.ticker]) next[e.ticker] = e;
+        setEvents(next);
+      }
     } catch (e) {
       console.error('Failed to fetch picks', e);
     } finally {
@@ -322,6 +349,20 @@ export default function ApprovePage() {
                 Triggered{pick.trigger_hit_price != null ? ` at $${Number(pick.trigger_hit_price).toFixed(2)}` : ''}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Upcoming event for this ticker, and a warning if we hold it into one */}
+        {events[pick.ticker] && (
+          <div style={{ margin: '6px 16px 0', fontSize: '12px', color: '#fbbf24', fontWeight: 600 }}>
+            {events[pick.ticker].kind === 'earnings' ? 'Earnings' : events[pick.ticker].title}{' '}
+            {new Date(events[pick.ticker].event_date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' })}
+            {events[pick.ticker].event_time ? ` · ${events[pick.ticker].event_time}` : ''}
+          </div>
+        )}
+        {pick.event_warning && (
+          <div style={{ margin: '4px 16px 0', fontSize: '12px', color: '#f87171', fontWeight: 600 }}>
+            Heads up: {pick.event_warning}
           </div>
         )}
 

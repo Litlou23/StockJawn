@@ -31,6 +31,18 @@ won't chase more than `trigger_max_chase_pct` (3%) past it, and expires the pick
 if it never breaks. Option exits also fire when the stock hits `level_target` / `level_stop`.
 Switch off with `trigger_entries_enabled` = 0 (then picks buy right after approval like before).
 
+### Events calendar + timing
+- `market_events` (refreshed daily at `calendar_refresh_time_et`, 18:00 ET): earnings (Finnhub, FMP fallback), US economic
+  data (Finnhub), holidays/early closes (Alpaca's official calendar, built-in NYSE list fallback), monthly/quarterly option
+  expiration (computed). The nightly job adds company events. Manual run: `POST /api/jobs/refresh-calendar?alert=true`.
+- `TradingCalendar` is the one place trading days are counted (sell-by dates, earnings hold windows, the scanner, the poller).
+- Holdings with an event before their sell-by date get `event_warning` (shown on the approval card, sent in the alert).
+- After each refresh the next session's events go to the ntfy topic (`ntfy_topic`, `calendar_alert_enabled`).
+- Run-up play: buy 3–7 days before a report when the stock looks positive; `exit_by_date` = report day (after-close
+  reports) or the day before → StockJawn sells that morning, so the earnings check allows it.
+- Pre-market shares: from `premarket_shares_start_et` (08:00) share picks buy with extended-hours orders priced off
+  Robinhood's pre-market trade; options wait for 9:30. Buys still unfilled after `stale_buy_minutes` (30) are cancelled.
+
 ### Movers scanner (StockedUp's routine as code)
 `MoversScanner` runs weekdays at `movers_scan_time_et` (16:30 ET): Alpaca top gainers/losers/most-active → daily bars →
 keeps moves ≥3% (≤25%) on ≥1.5x volume that closed near the high/low, at a new 20-day high/low, or a double top/bottom →

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Services.Broker;
+using StockResearchAgent.Api.Services.Calendar;
 using StockResearchAgent.Api.Services.MarketData;
 using StockResearchAgent.Api.Services.Supabase;
 using StockResearchAgent.Api.Services.UniverseDiscovery;
@@ -22,6 +23,7 @@ public class ClaudePickExecutor
     private readonly RobinhoodMcpBrokerAdapter _broker;
     private readonly MarketDataService _marketData;
     private readonly FinnhubProvider _finnhub;
+    private readonly TradingCalendar _tradingCalendar;
     private readonly ILogger<ClaudePickExecutor> _logger;
     private readonly bool _enabledFallback;
     private readonly bool _dryRunFallback;
@@ -29,6 +31,7 @@ public class ClaudePickExecutor
     private RobinhoodReadiness? _lastReadiness;
     private RiskContext? _risk;
     private bool _spyLoaded;
+    private bool _preMarket;
     private double? _spyChangePct;
 
     public ClaudePickExecutor(
@@ -36,6 +39,7 @@ public class ClaudePickExecutor
         RobinhoodMcpBrokerAdapter broker,
         MarketDataService marketData,
         FinnhubProvider finnhub,
+        TradingCalendar tradingCalendar,
         IConfiguration configuration,
         ILogger<ClaudePickExecutor> logger)
     {
@@ -43,6 +47,7 @@ public class ClaudePickExecutor
         _broker = broker;
         _marketData = marketData;
         _finnhub = finnhub;
+        _tradingCalendar = tradingCalendar;
         _logger = logger;
         // Only used when the DB rows (executor_enabled / executor_dry_run) don't exist.
         _enabledFallback = configuration["ROBINHOOD_EXECUTOR_ENABLED"]?.ToLowerInvariant() == "true";
@@ -71,6 +76,7 @@ public class ClaudePickExecutor
             _lastReadiness = null;
             _risk = null;
             _spyLoaded = false;
+            _preMarket = false;
             var result = await RunAsync(ct);
 
             // Fills, exits and stuck-pick checks run every live cycle, even when nothing new was approved.
@@ -107,6 +113,17 @@ public class ClaudePickExecutor
         // Stored in scoring_weight_overrides.reason for signal_name='broker_market_hours'.
         var marketHours = await GetDbConfigStringAsync("broker_market_hours", "regular_hours");
         _logger.LogDebug("[pick-executor] broker_market_hours={MarketHours}", marketHours);
+
+        // Pre-market share buys (reaction plays): from premarket_shares_start_et until 9:30, shares go out as
+        // extended-hours orders; options can't trade before the open, so they wait.
+        var nowEt = NowEastern();
+        if (nowEt.TimeOfDay < new TimeSpan(9, 30, 0)
+            && TimeSpan.TryParseExact(await GetDbConfigStringAsync("premarket_shares_start_et", "off"), @"hh\:mm", CultureInfo.InvariantCulture, out var preStart)
+            && nowEt.TimeOfDay >= preStart)
+        {
+            _preMarket = true;
+            marketHours = "extended_hours";
+        }
 
         // Same "today" window as GET /api/approve so we only act on picks the approval page shows.
         var today = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -155,6 +172,20 @@ public class ClaudePickExecutor
             var ticker = pick["ticker"]?.ToString() ?? "?";
             try
             {
+                if (DateTime.TryParse(pick["exit_by_date"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var sellBy)
+                    && sellBy.Date <= nowEt.Date)
+                {
+                    lines.Add(_dryRun ? $"{ticker}: dry-run — would fail, sell-by date {sellBy:MM/dd} already reached"
+                        : await FailBlockedAsync(PickFields.From(pick), $"sell-by date {sellBy:MM/dd} is today or past — buying now would be a day trade or hold through the event"));
+                    continue;
+                }
+
+                if (_preMarket && IsOptionPick(pick))
+                {
+                    lines.Add($"{ticker}: waiting — options trade from 9:30 ET");
+                    continue;
+                }
+
                 var wait = await CheckTriggerAsync(PickFields.From(pick), triggerCfg, canTalkToBroker, ct);
                 if (wait is not null)
                 {
@@ -444,6 +475,9 @@ public class ClaudePickExecutor
     // Mirrors PortfolioBalanceEngine: CurrentMarketPrice ?? EntryPrice.
     private async Task<(double Price, string Source)> GetOrderPriceAsync(string ticker, double entryPrice)
     {
+        // Before the open other quote feeds still show yesterday's close; price off Robinhood's pre-market trade.
+        if (_preMarket && await _broker.GetEquityLastPriceAsync(ticker, default, extended: true) is > 0 and var pre)
+            return (pre, "robinhood_premarket");
         var quote = await _marketData.GetQuoteAsync(ticker);
         if (quote is { Price: > 0 }) return (quote.Price, "live_quote");
         if (entryPrice > 0) return (entryPrice, "pick_entry_price");
@@ -529,7 +563,7 @@ public class ClaudePickExecutor
                 return $"{p.Ticker}: waiting — past {cfg.CutoffEt.ToString(@"hh\:mm")} ET cutoff, trigger {side} ${trigger:F2} not taken";
 
             // Robinhood's quote first: the trigger should fire on the same price the order will see.
-            if (canTalkToBroker) price = await _broker.GetEquityLastPriceAsync(p.Ticker, ct) ?? 0;
+            if (canTalkToBroker) price = await _broker.GetEquityLastPriceAsync(p.Ticker, ct, extended: _preMarket) ?? 0;
             if (price <= 0) price = (await _marketData.GetQuoteAsync(p.Ticker))?.Price ?? 0;
             if (price <= 0) return $"{p.Ticker}: waiting — no live price to check trigger {side} ${trigger:F2}";
 
@@ -575,7 +609,7 @@ public class ClaudePickExecutor
         if (!_spyLoaded)
         {
             _spyLoaded = true;
-            var q = await _broker.GetEquityQuoteAsync("SPY", ct);
+            var q = await _broker.GetEquityQuoteAsync("SPY", ct, extended: _preMarket);
             _spyChangePct = q is { PrevClose: > 0 } ? (q.Value.Last - q.Value.PrevClose) / q.Value.PrevClose * 100 : null;
             if (_spyChangePct is null) _logger.LogWarning("[pick-executor] SPY gate skipped — no SPY previous close in the quote");
         }
@@ -613,28 +647,41 @@ public class ClaudePickExecutor
                 select: "ticker");
             return open.Count > 0 ? $"another earnings play is still open ({open[0]["ticker"]})" : null;
         }
-        if (!_finnhub.IsConfigured) return null;
         var today = NowEastern().Date;
-        var holdEnd = NextTradingDay(today);
-        if (DateTime.TryParse(p.ExitByDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var exitBy) && exitBy.Date > holdEnd)
-            holdEnd = exitBy.Date;
+        var holdEnd = await _tradingCalendar.NextTradingDayAsync(today);
+        var exitByDay = DateTime.TryParse(p.ExitByDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var exitBy) ? exitBy.Date : (DateTime?)null;
+        if (exitByDay > holdEnd) holdEnd = exitByDay.Value;
+        // Sold on the morning of exit_by_date, so a report after that day's close is outside the hold (run-up plays).
+        bool SoldBefore(DateTime d, string? when) => exitByDay == d.Date && when is "after close" or "amc";
 
+        // The nightly market_events calendar first; the live Finnhub call only when the calendar is empty.
+        if (await _db.CountAsync("market_events", $"kind=eq.earnings&event_date=gte.{today:yyyy-MM-dd}") > 0)
+        {
+            var rows = await _db.SelectAsync("market_events",
+                filter: $"kind=eq.earnings&ticker=eq.{p.Ticker}&event_date=gte.{today:yyyy-MM-dd}&event_date=lte.{holdEnd:yyyy-MM-dd}",
+                order: "event_date", select: "event_date,event_time");
+            foreach (var r in rows)
+            {
+                var d = DateTime.Parse(r["event_date"]!.ToString(), CultureInfo.InvariantCulture);
+                var when = r["event_time"]?.ToString();
+                if (d.Date == today && when == "before open") continue;
+                if (SoldBefore(d, when)) continue;
+                return $"earnings on {d:MM/dd}{(string.IsNullOrEmpty(when) ? "" : $" ({when})")} during the hold (sell-by {holdEnd:MM/dd})";
+            }
+            return null;
+        }
+
+        if (!_finnhub.IsConfigured) return null;
         var calendar = await _finnhub.GetUpcomingEarningsAsync((holdEnd - today).Days + 1);
         foreach (var e in calendar.Where(e => e.Ticker.Equals(p.Ticker, StringComparison.OrdinalIgnoreCase)))
         {
             if (!DateTime.TryParse(e.Date, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d)) continue;
             if (d.Date == today && e.Hour == "bmo") continue;
+            if (SoldBefore(d, e.Hour)) continue;
             if (d.Date >= today && d.Date <= holdEnd)
                 return $"earnings on {d:MM/dd}{(string.IsNullOrEmpty(e.Hour) ? "" : $" ({e.Hour})")} during the hold";
         }
         return null;
-    }
-
-    private static DateTime NextTradingDay(DateTime d)
-    {
-        var n = d.AddDays(1);
-        while (n.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) n = n.AddDays(1);
-        return n;
     }
 
     private async Task<string> FailBlockedAsync(PickFields p, string why)

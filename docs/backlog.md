@@ -3,6 +3,7 @@
 Items Lou asked to note for later. Don't build without his go-ahead.
 
 ## 1. Time the market better around earnings and events (noted 2026-10-01)
+**BUILT 2026-10-01** — see docs/playbook.md "Events calendar + timing". Still open: tune the "looking positive" rules on real results.
 Lou: "We should be trying to time the market better — if Nike was looking positive, we should have got it beforehand."
 What happened: NKE reported 10/1 at 4:15 PM ET. The only pick for 10/2 was a post-report reaction play with levels from
 before the report (closed $35.10; triggers $36.67 / $35.16 were already out of range). We never considered getting in

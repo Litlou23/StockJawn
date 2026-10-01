@@ -459,13 +459,15 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
     }
 
     // get_equity_quotes → data.results[].quote.last_trade_price (regular hours).
-    public async Task<double?> GetEquityLastPriceAsync(string ticker, CancellationToken ct = default)
+    // extended: before the open last_trade_price is still yesterday's close, so use the pre-market trade price.
+    public async Task<double?> GetEquityLastPriceAsync(string ticker, CancellationToken ct = default, bool extended = false)
     {
         try
         {
             var payload = await CallToolAsync("get_equity_quotes",
                 new JsonObject { ["symbols"] = new JsonArray(JsonValue.Create(ticker)) }, ct);
             var q = FindArray(payload, "results")?.OfType<JsonObject>().FirstOrDefault()?["quote"];
+            if (extended && ParseD(q?["last_extended_hours_trade_price"]) is > 0 and var ext) return ext;
             return ParseD(q?["last_trade_price"]) is > 0 and var p ? p : null;
         }
         catch
@@ -475,14 +477,14 @@ public class RobinhoodMcpBrokerAdapter : IBrokerAdapter
     }
 
     // Last price + previous close, for the intraday SPY gate. Prev close is 0 if Robinhood doesn't send it.
-    public async Task<(double Last, double PrevClose)?> GetEquityQuoteAsync(string ticker, CancellationToken ct = default)
+    public async Task<(double Last, double PrevClose)?> GetEquityQuoteAsync(string ticker, CancellationToken ct = default, bool extended = false)
     {
         try
         {
             var payload = await CallToolAsync("get_equity_quotes",
                 new JsonObject { ["symbols"] = new JsonArray(JsonValue.Create(ticker)) }, ct);
             var q = FindArray(payload, "results")?.OfType<JsonObject>().FirstOrDefault()?["quote"];
-            var last = ParseD(q?["last_trade_price"]);
+            var last = extended && ParseD(q?["last_extended_hours_trade_price"]) is > 0 and var ext ? ext : ParseD(q?["last_trade_price"]);
             if (last is not > 0) return null;
             var prev = FindDouble(q, ["adjusted_previous_close", "previous_close"]);
             return (last.Value, prev);
