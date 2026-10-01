@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(dotnet build \"C:\\\\Users\\\\luciu\\\\projects\\\\StockJawn\\\\stock-research-agent-api\\\\StockResearchAgent.Api.csproj\" --no-restore -p:OutputPath=\"C:\\\\Users\\\\luciu\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\dotnet-build-check3\" 2>&1)",
+      "PowerShell(dotnet build \"C:\\\\Users\\\\luciu\\\\projects\\\\StockJawn\\\\stock-research-agent-api\\\\StockResearchAgent.Api.csproj\" --no-restore -p:OutputPath=\"C:\\\\Users\\\\luciu\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\dotnet-build-check4\" 2>&1)",
+      "PowerShell(dotnet build \"C:\\\\Users\\\\luciu\\\\projects\\\\StockJawn\\\\stock-research-agent-api\\\\StockResearchAgent.Api.csproj\" --no-restore -p:OutputPath=\"C:\\\\Users\\\\luciu\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\dotnet-build-check5\" 2>&1)",
+      "PowerShell(dotnet build \"C:\\\\Users\\\\luciu\\\\projects\\\\StockJawn\\\\stock-research-agent-api\\\\StockResearchAgent.Api.csproj\" --no-restore -p:OutputPath=\"C:\\\\Users\\\\luciu\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\dotnet-build-check6\" 2>&1)",
+      "Bash(grep -E \"\\\\.\\(sql|cs\\)$\")"
+    ]
+  }
+}
