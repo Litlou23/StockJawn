@@ -226,7 +226,8 @@ public class IntradayScanner
                     ["topic"] = $"Market-hours scan {now:h:mm}: contract needed?",
                     ["body"] = "The market-hours scan staged these as research rows because shares are over the per-trade cap: " +
                                string.Join("; ", forLenny.Select(x => $"{x.Ticker} {(x.Direction == "bullish" ? "above" : "below")} ${x.Trigger:F2} (stop ${x.Stop:F2}, target ${x.Target:F2})")) +
-                               ". If one is worth it, pick the option contract and set it to pending for Lou to approve.",
+                               ". If one is worth it, pick the option contract (ask $0.20 or more) and INSERT a new pending row with it; " +
+                               "don't update the research row, because the 2-hour approval window counts from when a row was created.",
                 }, returnRows: false);
             }
             catch (Exception ex)

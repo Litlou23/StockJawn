@@ -203,6 +203,13 @@ public class ClaudePickExecutor
                     continue;
                 }
 
+                var cheap = canTalkToBroker ? await CheapOptionBlockAsync(PickFields.From(pick), ct) : null;
+                if (cheap is not null)
+                {
+                    lines.Add(_dryRun ? $"{ticker}: dry-run — would fail, {cheap}" : await FailBlockedAsync(PickFields.From(pick), cheap));
+                    continue;
+                }
+
                 if (IsOptionPick(pick))
                 {
                     var op = PickFields.From(pick);
@@ -634,6 +641,15 @@ public class ClaudePickExecutor
         return pct > cfg.MaxSpreadPct
             ? $"{p.Ticker}: waiting — option spread {pct:F0}% (bid ${q.Bid:F2} / ask ${q.Ask:F2}), max {cfg.MaxSpreadPct}%"
             : null;
+    }
+
+    // Contracts this cheap (NIO at $0.08) lose to the spread and time decay almost whatever the stock does.
+    private async Task<string?> CheapOptionBlockAsync(PickFields p, CancellationToken ct)
+    {
+        if (p.OrderType is not ("call" or "put") || string.IsNullOrWhiteSpace(p.OptionContractId)) return null;
+        var min = await GetDbConfigNumberAsync("options_min_contract_price", 0.20);
+        if (min <= 0 || await _broker.GetOptionBidAskAsync(p.OptionContractId, ct) is not { } q || q.Ask <= 0) return null;
+        return q.Ask < min ? $"option ask ${q.Ask:F2} is under the ${min:F2} minimum (options_min_contract_price)" : null;
     }
 
     // We hold overnight (PDT), so an earnings report inside the hold is a coin flip we don't want.

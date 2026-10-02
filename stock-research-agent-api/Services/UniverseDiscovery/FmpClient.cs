@@ -278,6 +278,60 @@ public class FmpClient
         }
     }
 
+    public record FmpProfile(string Symbol, string Sector, string Industry, double Price);
+    public record FmpScreenRow(string Symbol, string Sector, string Industry, double Price, double Volume);
+
+    public async Task<FmpProfile?> GetProfileAsync(string symbol)
+    {
+        if (!_configured) return null;
+        var url = $"{_options.BaseUrl}/stable/profile?symbol={Uri.EscapeDataString(symbol)}&apikey={_options.ApiKey}";
+        try
+        {
+            await ThrottleAsync();
+            using var resp = await _http.GetAsync(url);
+            if (!resp.IsSuccessStatusCode) return null;
+            if (JsonNode.Parse(await resp.Content.ReadAsStringAsync()) is not JsonArray { Count: > 0 } arr) return null;
+            var p = arr[0]!;
+            return new FmpProfile(symbol.ToUpperInvariant(), p["sector"]?.ToString() ?? "", p["industry"]?.ToString() ?? "",
+                double.TryParse(p["price"]?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var px) ? px : 0);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[fmp] profile {Symbol} failed", symbol);
+            return null;
+        }
+    }
+
+    // US-listed, actively traded common stocks in a sector within a price band (null if the plan refuses).
+    public async Task<List<FmpScreenRow>?> ScreenAsync(string sector, double minPrice, double maxPrice, double minVolume, int limit = 200)
+    {
+        if (!_configured) return null;
+        var url = $"{_options.BaseUrl}/stable/company-screener?sector={Uri.EscapeDataString(sector)}&priceMoreThan={minPrice}&priceLowerThan={maxPrice}" +
+                  $"&volumeMoreThan={minVolume}&isEtf=false&isFund=false&isActivelyTrading=true&country=US&limit={limit}&apikey={_options.ApiKey}";
+        try
+        {
+            await ThrottleAsync();
+            using var resp = await _http.GetAsync(url);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[fmp] screener returned {Status}", (int)resp.StatusCode);
+                return null;
+            }
+            if (JsonNode.Parse(await resp.Content.ReadAsStringAsync()) is not JsonArray arr) return null;
+            static double D(JsonNode? n) => double.TryParse(n?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+            return arr.Where(i => i is not null).Select(i => new FmpScreenRow(
+                    (i!["symbol"]?.ToString() ?? "").ToUpperInvariant(), i["sector"]?.ToString() ?? "", i["industry"]?.ToString() ?? "",
+                    D(i["price"]), D(i["volume"])))
+                .Where(r => r.Symbol.Length is >= 1 and <= 5 && r.Symbol.All(char.IsLetter))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[fmp] screener failed");
+            return null;
+        }
+    }
+
     public record FmpEconomicEvent(string Event, string Country, string Date, string? Impact, double? Actual, double? Estimate, double? Previous);
 
     // Economic calendar (jobs, CPI, FOMC...). Dates are UTC. Fallback for when Finnhub's plan refuses it.

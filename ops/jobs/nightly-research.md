@@ -47,6 +47,11 @@ Each row already has the move, volume, pattern (closed at the high/low, new 20-d
 - **"SCANNER THEME" rows** are sector/commodity ETFs (oil, biotech, gold, chips, banks...) that moved today or ran 3 of
   the last 4 days. Find the driver (oil supply news, rate move, FDA wave) and the 1–2 best stocks in that theme under
   `scan_max_price` with a setup of their own. Keep the ETF row only if it's the cleaner trade (options on it fit the budget).
+- **Which groups lead** (StockJawn ranks them at 4:30 PM):
+  `SELECT name, etf, ret_1m, rs_1m, grp, leaders FROM sector_strength WHERE trade_date = (SELECT max(trade_date) FROM sector_strength) ORDER BY rank;`
+  Prefer bullish candidates in "leading" groups and bearish ones in "lagging" groups; drop or flag the rest
+  ("against the trend"). The `leaders` list (affordable stocks in the top 2 groups) are candidates even without a big move.
+- The nightly job only inserts `research` rows — never `pending` (the morning job makes fresh pending rows).
 - **Today's misses** (StockJawn logs them at 4:15 PM): big movers we never had. Any that closed near its high/low
   and is setting up for a continuation tomorrow is a candidate, same checks as the SCANNER rows:
   `SELECT ticker, change_pct, price, reasons FROM missed_movers WHERE trade_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AND our_status IS NULL;`

@@ -69,6 +69,14 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
   beat/lagged SPY by 1.5+ points, with our status and why we missed each → `missed_movers` table, read by the EOD and
   nightly jobs. Manual: `POST /api/jobs/missed-movers`.
 
+### Group leadership + affordable leaders
+The 4:30 PM scan ranks `sector_etfs` (SPDR sectors + SMH, XBI, KRE, ITB, JETS, GLD, SLV, URA, TAN, XME) by 1-month return vs
+SPY → `sector_strength` (top 3 beating SPY = leading, bottom 3 lagging SPY = lagging). Each setup's group comes from the
+FMP profile (industry first: semis → SMH, biotech → XBI, regional banks → KRE...); bullish setups in leading groups rank
+1.25x, in lagging groups 0.75x and get "against the trend" (mirror for bearish). For the top 2 leading groups, the FMP
+screener finds stocks under `affordable_max_price` ($60) beating SPY and above their 20-day average → `leaders`, also
+checked for setups. The executor refuses option buys whose ask is under `options_min_contract_price` ($0.20).
+
 ### Trigger strategy backtest
 `TriggerStrategyBacktest` replays the live rules on Alpaca daily bars (default: the ~1,000 tickers in historical_candles
 plus theme ETFs, last 365 days): each day the setups MoversScanner would stage (same filters, relative strength, themes,

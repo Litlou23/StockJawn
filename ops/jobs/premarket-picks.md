@@ -52,6 +52,17 @@ and write the actual numbers in the catalyst ("jobs +29K vs 84K est, 10-yr yield
 On 10/2 we bet "strong jobs → fintech" on a weak report; chips (+2.8%) and TSLA (+5%) led and we had neither.
 StockJawn also runs a market-hours scan at 10:00 and 11:30 (rows tagged "INTRADAY"), so a slow open isn't the last chance.
 
+## Step 2c — Go with the leaders
+StockJawn ranks the groups every evening by 1-month return vs SPY:
+`SELECT etf, name, ret_1w, ret_1m, rs_1m, above_sma20, grp, leaders FROM sector_strength
+ WHERE trade_date = (SELECT max(trade_date) FROM sector_strength) ORDER BY rank;`
+- **Calls / shares only in "leading" groups** (or "middle" groups above their 20-day average). Puts only in "lagging" groups.
+  A pick against the group's trend needs a big dated catalyst and says so in notes. SCANNER rows already carry
+  "in a leading group" / "against the trend" tags.
+- `leaders` = affordable stocks (under `affordable_max_price`) in the top 2 groups that beat SPY this month. When the
+  group's leaders are too expensive for an option over $0.20, buy shares of one of these instead.
+- Late Sep/early Oct: chips +14.6% for the month, while our calls were in consumer, EV, fintech and crypto (all falling).
+
 ## Step 3 — Market read (their SPY segment)
 1. **Market health:** % of S&P 500 above the 50-day ($S5FI via WebSearch) and new highs vs new lows.
    - Healthy: over 50% and more highs than lows → normal.
@@ -101,7 +112,8 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
 **Confirmation:** 2+ of trend (EMA/SMA), RSI, MACD, volume, support/resistance. A real trigger level counts as one.
 
 **What to buy:**
-1. Option first — calls for bullish, puts for bearish. Premium within budget, spread under 20% of the ask,
+1. Option first — calls for bullish, puts for bearish. Premium within budget and at least $0.20 (StockJawn refuses cheaper
+   contracts — they lose to the spread and time decay), spread under 20% of the ask,
    expiration at least 7 days out (and 7+ days past any earnings date for an earnings play). 1+ whole contracts.
 2. No affordable option → shares (whole shares within budget, stock at or above the min price). Never regular shares on a red day.
 3. Bearish day and no affordable put → an inverse ETF: SPXS (3x short S&P), SQQQ (3x short Nasdaq), or UVXY (only when SPY is
@@ -147,7 +159,9 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
 8. Max 3 picks. Not a name we already hold.
 
 ## Step 7 — Log and verify
-1. Insert the final picks with `approval_status = 'pending'`, plus their factor rows in `claude_pick_factors`.
+1. INSERT the final picks as new rows with `approval_status = 'pending'`, plus their factor rows in `claude_pick_factors`.
+   Never UPDATE an older research row to pending: the approval window is 2 hours from when the row was created, so a
+   row created last night is already expired (that's how the NKE put died on 10/2).
    **Do NOT delete research rows.** Keep them — if you go CASH or can only afford 1 pick, the remaining research candidates
    stay visible for manual review or a mid-day re-check. Only delete a research row if you're replacing it with a pending pick for the same ticker.
    **Going CASH?** Still log the top 1–2 research candidates as pending picks with triggers. The executor checks buying power

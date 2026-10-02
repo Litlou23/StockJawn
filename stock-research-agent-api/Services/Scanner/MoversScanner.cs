@@ -87,10 +87,20 @@ public class MoversScanner
         var etfMinMove = await NumberAsync("scan_etf_min_move_pct", 1.5);
         var maxThemes = (int)await NumberAsync("scan_max_themes", 4);
 
+        var sectorEtfs = (await StringAsync("sector_etfs", SectorStrength.DefaultEtfs))
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList();
+
         // ~6 months of bars: enough history for key levels, not just the 20-day stats.
-        var bars = await _alpaca.GetDailyBarsAsync(universe.Concat(themes).Append("SPY").Distinct().ToList(), 200);
+        var bars = await _alpaca.GetDailyBarsAsync(universe.Concat(themes).Concat(sectorEtfs).Append("SPY").Distinct().ToList(), 200);
         var spy = bars.TryGetValue("SPY", out var spyBars) && spyBars.Count > 1 && spyBars[^1].Date == today ? spyBars : null;
         if (spy is null) notes.Add("no SPY bar for today — relative strength skipped");
+
+        var sectors = SectorStrength.Rank(sectorEtfs, bars, today);
+        var leaders = await FindAffordableLeadersAsync(sectors, bars, minPrice, notes);
+        foreach (var l in leaders.Where(l => !universe.Contains(l.Ticker))) universe.Add(l.Ticker);
+        if (sectors.Count > 0)
+            notes.Add("leading: " + string.Join(", ", sectors.Where(s => s.Group == "leading").Select(s => $"{s.Name} {s.Ret1m:+0.0;-0.0}%")) +
+                      " · lagging: " + string.Join(", ", sectors.Where(s => s.Group == "lagging").Select(s => $"{s.Name} {s.Ret1m:+0.0;-0.0}%")) + " (1 month)");
 
         var setups = new List<MoverSetup>();
         foreach (var ticker in universe)
@@ -99,6 +109,7 @@ public class MoversScanner
             var setup = Evaluate(ticker, b, today, minMove, minRelVol, minPrice, maxPrice, stopPct, maxTriggerDist, maxMove);
             if (setup is not null) setups.Add(spy is null ? setup : ApplyRelativeStrength(setup, b[^1], spy));
         }
+        setups = await ApplySectorAsync(setups.OrderByDescending(s => s.Rank).Take(maxSetups * 2).ToList(), sectors, leaders);
         setups = setups.OrderByDescending(s => s.Rank).Take(maxSetups).ToList();
         if (setups.Count > 0) setups = await AttachNewsAsync(setups, today);
 
@@ -114,7 +125,92 @@ public class MoversScanner
         if (setups.Count > 0) setups = await AttachLevelsAsync(setups, bars, notes);
         notes.Add($"{universe.Count} movers + {themes.Count} theme ETFs checked, {setups.Count(x => !x.IsTheme)} setups, {setups.Count(x => x.IsTheme)} themes");
         if (write && setups.Count > 0) await WriteAsync(setups, today, pickDate, notes);
+        if (write && sectors.Count > 0) await WriteSectorsAsync(today, sectors, leaders, notes);
         return new(today, pickDate, universe.Count, setups, notes);
+    }
+
+    // For the top 2 leading groups: liquid stocks under affordable_max_price beating SPY over the month and above their
+    // 20-day average, so the trend can be owned with shares instead of a $0.10 option.
+    private async Task<List<SectorLeader>> FindAffordableLeadersAsync(List<SectorRank> sectors, Dictionary<string, List<DailyBar>> bars, double minPrice, List<string> notes)
+    {
+        var result = new List<SectorLeader>();
+        if (!_fmp.IsConfigured || !bars.TryGetValue("SPY", out var spy) || spy.Count < 22) return result;
+        var maxPx = await NumberAsync("affordable_max_price", 60);
+        var spy1m = SectorStrength.Ret(spy, 21);
+        foreach (var s in sectors.Where(x => x.Group == "leading").Take(2))
+        {
+            if (!SectorStrength.Map.TryGetValue(s.Etf, out var m)) continue;
+            var rows = await _fmp.ScreenAsync(m.Sector, minPrice, maxPx, 1_000_000);
+            if (rows is null)
+            {
+                notes.Add("FMP screener unavailable on this plan — no affordable-leader list");
+                break;
+            }
+            var picks = rows.Where(r => m.Industry is null || r.Industry.Contains(m.Industry, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(r => r.Volume).Take(40).Select(r => r.Symbol).ToList();
+            var missing = picks.Where(t => !bars.ContainsKey(t)).ToList();
+            if (missing.Count > 0)
+                foreach (var (k, v) in await _alpaca.GetDailyBarsAsync(missing, 200)) bars[k] = v;
+            result.AddRange(picks.Where(bars.ContainsKey).Select(t => (t, b: bars[t]))
+                .Where(x => x.b.Count >= 22 && x.b[^1].Close > x.b.TakeLast(20).Average(b => b.Close))
+                .Select(x => new SectorLeader(x.t, s.Etf, x.b[^1].Close, Math.Round(SectorStrength.Ret(x.b, 21), 2), Math.Round(SectorStrength.Ret(x.b, 21) - spy1m, 2)))
+                .Where(l => l.Rs1m > 0 && result.All(r => r.Ticker != l.Ticker))
+                .OrderByDescending(l => l.Rs1m).Take(5).ToList());
+        }
+        return result;
+    }
+
+    // Bullish setups in leading groups rank higher, in lagging groups lower (mirror for bearish).
+    private async Task<List<MoverSetup>> ApplySectorAsync(List<MoverSetup> setups, List<SectorRank> sectors, List<SectorLeader> leaders)
+    {
+        if (sectors.Count == 0) return setups;
+        var result = new List<MoverSetup>();
+        foreach (var s in setups)
+        {
+            var etf = leaders.FirstOrDefault(l => l.Ticker == s.Ticker)?.Etf;
+            if (etf is null && await _fmp.GetProfileAsync(s.Ticker) is { } p) etf = SectorStrength.EtfFor(p.Sector, p.Industry);
+            var sec = etf is null ? null : sectors.FirstOrDefault(x => x.Etf == etf);
+            if (sec is null || sec.Group == "middle")
+            {
+                result.Add(sec is null ? s : s with { Pattern = $"{s.Pattern}, group {sec.Name} {sec.Ret1m:+0.0;-0.0}% 1m" });
+                continue;
+            }
+            var withTrend = (s.Direction == "bullish") == (sec.Group == "leading");
+            result.Add(s with
+            {
+                Rank = Math.Round(s.Rank * (withTrend ? 1.25 : 0.75), 2),
+                Pattern = $"{s.Pattern}, in a {sec.Group} group ({sec.Name} {sec.Ret1m:+0.0;-0.0}% 1m){(withTrend ? "" : " — against the trend")}",
+            });
+        }
+        return result;
+    }
+
+    private async Task WriteSectorsAsync(DateTime today, List<SectorRank> sectors, List<SectorLeader> leaders, List<string> notes)
+    {
+        try
+        {
+            var d = today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            await _db.DeleteAsync("sector_strength", $"trade_date=eq.{d}");
+            await _db.InsertAsync("sector_strength", sectors.Select(s => (object)new Dictionary<string, object?>
+            {
+                ["trade_date"] = d,
+                ["etf"] = s.Etf,
+                ["name"] = s.Name,
+                ["ret_1w"] = s.Ret1w,
+                ["ret_1m"] = s.Ret1m,
+                ["rs_1m"] = s.Rs1m,
+                ["above_sma20"] = s.AboveSma20,
+                ["rank"] = s.Rank,
+                ["grp"] = s.Group,
+                ["leaders"] = new JsonArray(leaders.Where(l => l.Etf == s.Etf).Select(l => (JsonNode)new JsonObject
+                    { ["ticker"] = l.Ticker, ["price"] = l.Price, ["ret_1m"] = l.Ret1m, ["rs_1m"] = l.Rs1m }).ToArray()),
+            }).ToList(), returnRows: false);
+            notes.Add($"sector ranking saved ({sectors.Count} groups, {leaders.Count} affordable leaders)");
+        }
+        catch (Exception ex)
+        {
+            notes.Add($"sector ranking save failed: {ex.Message}");
+        }
     }
 
     public static MoverSetup? Evaluate(string ticker, List<DailyBar> b, DateTime today,
