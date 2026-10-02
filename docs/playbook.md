@@ -57,6 +57,18 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
   when it's ≥1.5x the risk away, otherwise 2x risk and the setup ranks lower ("resistance close by").
 - 7:30 AM (`levels_fill_time_et`) fills `key_levels` for the day's research/pending rows the nightly job added. Manual: `POST /api/jobs/fill-levels`.
 
+### Market-hours scan + "what did we miss"
+- `IntradayScanner` at `intraday_scan_times_et` (10:00, 11:30): Alpaca movers/most-active → live snapshots → keeps stocks
+  up ≥2% (≤15%), ≥1.5 points stronger than SPY, ≥1.5x normal volume for the time of day, above VWAP and the first-30-minute
+  high (mirror for down days). Trigger = day's high + 1¢, stop 1.5–3% back (VWAP / opening range), target = next key level
+  if ≥1.5x risk, else 2x. Shares within `risk_max_trade_dollars` → `pending` for the approval page; $80–$100 names →
+  `research` + a claude_messages note for Lenny to pick an option; over `scan_max_price` → listed in the alert only.
+  Max `intraday_max_picks` (2) per scan, skips tickers already picked today. Phone alert to the ntfy topic with a link
+  to the approval page. Manual: `POST /api/jobs/scan-intraday?write=false` (preview) / `?write=true`.
+- `MissedMoversReport` at `missed_movers_time_et` (16:15): the day's movers ≥4% with ≥$50M traded, plus theme ETFs that
+  beat/lagged SPY by 1.5+ points, with our status and why we missed each → `missed_movers` table, read by the EOD and
+  nightly jobs. Manual: `POST /api/jobs/missed-movers`.
+
 ### Robinhood login + JOB_RUN_SECRET
 - The job secret only goes in the `x-job-secret` header — never in a URL.
 - New Robinhood login: `POST /api/robinhood/oauth/login-url` with the header → returns a Robinhood URL (nothing secret in it) →

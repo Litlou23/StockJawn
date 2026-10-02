@@ -25,8 +25,32 @@ Score today's picks against actual results, track which factors predicted winner
 ### 1. Evaluate today's picks
 Query today's unevaluated picks from `claude_daily_picks`. Get current/closing prices via Robinhood MCP `get_equity_quotes`.
 
-**Trigger picks:** if `approval_status = 'expired'` with "Trigger never hit", no trade happened. Set outcome 'scratch' and note whether the trigger was a good call (did the stock move the wrong way? then waiting saved money — log it).
-For triggered picks, grade against `level_target` / `level_stop` (the stock's levels) instead of entry_price.
+**CRITICAL: Separate real trades from paper picks.**
+Three categories — score each differently:
+
+#### A. REAL TRADES (fill_status = 'filled')
+These are the only ones that matter for P&L. Score by actual money:
+- Use `filled_avg_price` as entry (NOT `entry_price` — that was the pre-market estimate)
+- If exited (`exit_status = 'exited'`): use `exit_price` for the result
+- If still open: use current stock price (for stocks) or current option mark (for options via `get_option_quotes` using `option_contract_id`)
+- For OPTIONS: `price_change_pct` = (exit_price - filled_avg_price) / filled_avg_price × 100 (this is premium %, NOT stock %)
+- For STOCKS: `price_change_pct` = (current_price - filled_avg_price) / filled_avg_price × 100
+- Dollar P&L for options: (exit - entry) × 100 × quantity. For stocks: (exit - entry) × quantity.
+- **Never mix option premium % with stock % in averages.** Report them separately.
+
+#### B. PAPER PICKS (approval_status = 'approved' or 'pending', fill_status IS NULL or != 'filled')
+These were approved but never traded (trigger never hit, or system blocked them).
+- Score on the STOCK price only (even if order_type is call/put) — we're evaluating the directional thesis
+- Use `entry_price` (the pre-market estimate) vs closing stock price
+- Mark outcome but tag notes with "PAPER" so we know it's not real money
+
+#### C. SKIPPED / EXPIRED / RESEARCH
+- `approval_status` in ('expired', 'rejected', 'research', 'failed') → do NOT score these
+- Set outcome = 'scratch', note the reason, and move on
+- These do NOT count in win rate, direction accuracy, or any averages
+
+**Trigger picks:** if `approval_status = 'expired'` with "Trigger never hit", category C (scratch). Note whether the trigger was a good call (did the stock move the wrong way? then waiting saved money — log it).
+For triggered real trades, grade against `level_target` / `level_stop` (the stock's levels).
 
 **Outcome rules (ONLY valid values: 'pending', 'win', 'loss', 'scratch'):**
 - Price hit or exceeded target -> 'win'
@@ -56,17 +80,41 @@ Run health check over last 7 days:
 - Source check: win rate of picks tagged "StockedUp" vs our own — if theirs keeps winning more, weight them higher in premarket
 - Trigger hit rate: % of approved trigger picks that actually triggered, and win rate of those that did. If < 30% trigger, the levels are too far away -> Flag
 
+### 5b. What did we miss (StockJawn writes this at 4:15 PM)
+```sql
+SELECT ticker, kind, change_pct, price, dollar_volume_m, gap_pct, our_status, reasons
+FROM missed_movers WHERE trade_date = CURRENT_DATE ORDER BY kind, abs(change_pct) DESC;
+```
+- `our_status` NULL = we never had it. Each row says why: not on our radar, over the price cap, moved before the open
+  (gap), moved after the open (market-hours scan territory), and whether the calendar had an event.
+- In the scorecard: the top 5 misses with their reason, and the count by reason.
+- Over the last 5 trading days, any reason that shows up 3+ times is a fix to make — say it plainly in the summary
+  (e.g. "4 of our misses were chip names over the $100 cap" or "3 moves came from scheduled events not in the calendar").
+- Rows tagged "INTRADAY" in claude_daily_picks came from the market-hours scan (10:00 / 11:30); score them like any pick.
+
 ### 6. Check open positions from prior days
 Update prior-day pending picks with current prices. Mark picks open 5+ trading days as 'scratch'.
 
 ### 7. Present scorecard
-- Today's picks: W-L-S record
-- Running direction accuracy (all time)
-- Running win rate (all time)
+**Separate real trades from paper picks in ALL stats:**
+
+**REAL TRADES (filled):**
+- Today: W-L-S record, dollar P&L
+- Options P&L (premium-based, separate from stocks)
+- Stock P&L (price-based)
+- Running win rate (filled trades only, all time)
+- Running direction accuracy (filled trades only)
+
+**PAPER PICKS (approved but unfilled):**
+- Today: W-L-S record (directional accuracy only)
+- Running paper win rate (all time) — useful for evaluating the thesis vs execution gap
+
+**Summary:**
 - Top/bottom 3 performing factors
 - Weight adjustments made
 - Systemic warnings
 - Open positions status
+- Trigger hit rate (what % of trigger picks actually triggered)
 
 ## Tools Available
 - Robinhood MCP: get_equity_quotes (symbols as ARRAY)

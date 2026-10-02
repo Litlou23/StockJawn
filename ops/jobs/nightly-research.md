@@ -25,7 +25,17 @@ StockJawn scans the day's biggest movers after the close (StockedUp's routine) a
 ```sql
 SELECT id, ticker, direction, entry_price, trigger_price, trigger_direction, level_target, level_stop, catalyst, notes, key_levels
 FROM claude_daily_picks
-WHERE approval_status = 'research' AND pick_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + INTERVAL '1 day' AND notes LIKE 'SCANNER%';
+WHERE approval_status = 'research' AND pick_date = (
+  SELECT d FROM (
+    SELECT generate_series(
+      (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 1,
+      (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 5,
+      '1 day'::interval
+    )::date AS d
+  ) days
+  WHERE EXTRACT(DOW FROM d) NOT IN (0, 6)
+    AND d NOT IN (SELECT event_date FROM market_events WHERE kind = 'holiday')
+  ORDER BY d LIMIT 1) AND notes LIKE 'SCANNER%';
 ```
 Each row already has the move, volume, pattern (closed at the high/low, new 20-day high/low, double top/bottom) and levels.
 - **"held up while SPY faded" / "weak while SPY held up"** = relative strength (StockedUp: names "not too affected by the
@@ -37,6 +47,9 @@ Each row already has the move, volume, pattern (closed at the high/low, new 20-d
 - **"SCANNER THEME" rows** are sector/commodity ETFs (oil, biotech, gold, chips, banks...) that moved today or ran 3 of
   the last 4 days. Find the driver (oil supply news, rate move, FDA wave) and the 1–2 best stocks in that theme under
   `scan_max_price` with a setup of their own. Keep the ETF row only if it's the cleaner trade (options on it fit the budget).
+- **Today's misses** (StockJawn logs them at 4:15 PM): big movers we never had. Any that closed near its high/low
+  and is setting up for a continuation tomorrow is a candidate, same checks as the SCANNER rows:
+  `SELECT ticker, change_pct, price, reasons FROM missed_movers WHERE trade_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AND our_status IS NULL;`
 For each one:
 1. Find the WHY (WebSearch the ticker + today's date): upgrade, contract, guidance, earnings, sector news. Put it in `catalyst`.
 2. **Group themes:** several names from one industry moving together (e.g. 5 mortgage insurers all -7%) is ONE idea —
@@ -108,17 +121,20 @@ WHERE event_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 10 ORDER BY event_date;
 StockedUp (youtube.com/@StockedUp) posts a video every trading day after the close with "setups and predictions" and
 three "momentum plays" ("if TSLA breaks under $356, watch it down"). Take their plays as candidates:
 1. **Find today's video — DO NOT WebFetch YouTube directly (it's client-rendered and returns empty).**
-   Instead, use these in order until one works:
+   Try these in order. **If a-c all fail or return empty, you MUST try d — the browser tools work and are available in this session.**
    a. WebSearch `"StockedUp" stock market tomorrow` (extended mode) — their videos rank well; look for a youtube.com result from today.
    b. WebSearch `site:youtube.com StockedUp setups predictions` — narrows to their channel.
    c. WebFetch the RSS feed: `https://www.youtube.com/feeds/videos.xml?channel_id=UCnHEFBpeb0M9BaSsRTnqiZg` — this is plain XML, not client-rendered, and lists recent uploads with titles and dates.
-   d. If a browser tool is available, open `https://www.youtube.com/@StockedUp/videos` in the browser, which renders JavaScript.
+   d. **Browser fallback (USE THIS — it works):** open `https://www.youtube.com/@StockedUp/videos` in the browser (navigate tool),
+      then `get_page_text` to read the video list. Click into today's video. This renders JavaScript and always works.
+      Do NOT skip this step — WebFetch/WebSearch fail on YouTube most of the time; the browser is the reliable path.
    Use only a video posted today (check the date in the title, description, or upload timestamp).
 2. **Get the plays:** once you have the video URL (e.g. `https://www.youtube.com/watch?v=VIDEO_ID`):
-   a. WebFetch the video page — the `<meta>` tags and JSON-LD often contain the description with ticker mentions and chapters.
-   b. Try a transcript service: WebFetch `https://www.youtubetranscript.com/?v=VIDEO_ID` or similar.
-   c. If a browser tool is available, open the video, click "Show transcript", and read it.
-   d. The "Momentum plays" section is near the end; "Setups & predictions" is a chapter earlier. If you can only get the description/title, extract ticker names and search each one for today's levels — but don't guess break levels you didn't see.
+   a. **Browser first (most reliable):** navigate to the video, click "Show transcript" or "...more" on the description, and read it.
+      The "Momentum plays" section is near the end; "Setups & predictions" is a chapter earlier.
+   b. Fallback: WebFetch the video page — the `<meta>` tags and JSON-LD sometimes contain the description with ticker mentions.
+   c. Fallback: try a transcript service: WebFetch `https://www.youtubetranscript.com/?v=VIDEO_ID`.
+   d. If you can only get the description/title, extract ticker names and search each one for today's levels — but don't guess break levels you didn't see.
 3. Each momentum play becomes a candidate with THEIR level as the trigger (above = calls/shares, below = puts).
    Their "setups" count only if they gave a clear break level; skip their "big money trade" and long multi-week ideas.
 4. Still run every candidate through our checks (affordable, reward/risk ≥ 1.5, setup check). Tag notes with "StockedUp <today's date>".
@@ -149,9 +165,23 @@ Every candidate MUST have a specific, named event with a date (momentum candidat
 Check tomorrow's economic calendar. Cross-reference candidates against sector-macro relationships.
 
 ## DATABASE LOGGING
-For candidates scoring >= 40, insert with `approval_status = 'research'` and `pick_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + INTERVAL '1 day'`.
+For candidates scoring >= 40, insert with `approval_status = 'research'` and the next trading day as `pick_date`:
+```sql
+-- Next trading day (skips weekends AND market holidays in market_events)
+-- Use this everywhere instead of +1 day
+(SELECT d FROM (
+  SELECT generate_series(
+    (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 1,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 5,
+    '1 day'::interval
+  )::date AS d
+) days
+WHERE EXTRACT(DOW FROM d) NOT IN (0, 6)  -- skip weekends
+  AND d NOT IN (SELECT event_date FROM market_events WHERE kind = 'holiday')
+ORDER BY d LIMIT 1)
+```
 
-**IMPORTANT:** This task runs at 9 PM ET, which is past midnight UTC. Use `(CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date` instead of `CURRENT_DATE` everywhere — otherwise dates are off by one.
+**IMPORTANT:** This task runs at 9 PM ET, which is past midnight UTC. Use `(CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date` instead of `CURRENT_DATE` everywhere — otherwise dates are off by one. The subquery above handles weekends and holidays (e.g. Thanksgiving, Christmas) so the pick_date always lands on a real trading day.
 
 Clean up old research rows first:
 ```sql

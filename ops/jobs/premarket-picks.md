@@ -44,6 +44,14 @@ Start from StockJawn's events calendar (refreshed nightly from Finnhub / Alpaca,
 - **Timed events today** (event_time like "10:00 AM", "2:00 PM"): speeches (Fed, President), deliveries, launches.
   A name tied to one waits for the event or uses a trigger past the level the event would break. Say the time in the summary.
 
+## Step 2b — Read the reaction, don't predict it
+On a big data morning (jobs, CPI, PCE, FOMC) the release is out by 8:30. Don't guess what it "should" do to a sector.
+Look at what the market is actually doing at 9:00: SPY/QQQ/IWM futures or pre-market, the 10-year yield, and the
+theme ETFs (SMH, XLF, KRE, XLE, USO, XBI, GLD...). Pick from the sectors already leading (or lagging, for puts),
+and write the actual numbers in the catalyst ("jobs +29K vs 84K est, 10-yr yield -8bp, SMH +1.9% pre-market").
+On 10/2 we bet "strong jobs → fintech" on a weak report; chips (+2.8%) and TSLA (+5%) led and we had neither.
+StockJawn also runs a market-hours scan at 10:00 and 11:30 (rows tagged "INTRADAY"), so a slow open isn't the last chance.
+
 ## Step 3 — Market read (their SPY segment)
 1. **Market health:** % of S&P 500 above the 50-day ($S5FI via WebSearch) and new highs vs new lows.
    - Healthy: over 50% and more highs than lows → normal.

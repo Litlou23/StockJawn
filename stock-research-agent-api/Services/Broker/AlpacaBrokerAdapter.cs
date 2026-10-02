@@ -608,6 +608,114 @@ public class AlpacaBrokerAdapter : IBrokerAdapter
         return result;
     }
 
+    public record Snapshot(string Symbol, double Last, double Open, double High, double Low, double Volume, double Vwap, double PrevClose);
+
+    // Live view of today so far (latest trade + today's bar + yesterday's bar) for many symbols in one call.
+    public async Task<Dictionary<string, Snapshot>> GetSnapshotsAsync(IReadOnlyCollection<string> symbols)
+    {
+        var result = new Dictionary<string, Snapshot>(StringComparer.OrdinalIgnoreCase);
+        if (!IsConfigured || symbols.Count == 0) return result;
+
+        using var dataHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        dataHttp.DefaultRequestHeaders.Add("APCA-API-KEY-ID", _apiKey);
+        dataHttp.DefaultRequestHeaders.Add("APCA-API-SECRET-KEY", _apiSecret);
+
+        foreach (var chunk in symbols.Distinct(StringComparer.OrdinalIgnoreCase).Chunk(100))
+        {
+            foreach (var feed in new[] { "sip", "iex" })
+            {
+                try
+                {
+                    var url = $"{DataApiBaseUrl}/v2/stocks/snapshots?symbols={Uri.EscapeDataString(string.Join(',', chunk))}&feed={feed}";
+                    var response = await dataHttp.GetAsync(url);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[alpaca-snapshots] {Feed} returned {Status}", feed, response.StatusCode);
+                        continue;
+                    }
+                    if (JsonNode.Parse(await response.Content.ReadAsStringAsync()) is not JsonObject json) break;
+                    // Multi-symbol responses are keyed by symbol; some versions wrap them in "snapshots".
+                    var map = json["snapshots"] as JsonObject ?? json;
+                    foreach (var (sym, node) in map)
+                    {
+                        if (node is not JsonObject n) continue;
+                        var day = n["dailyBar"];
+                        var prev = n["prevDailyBar"];
+                        var last = ParseDouble(n["latestTrade"], "p");
+                        if (last <= 0) last = ParseDouble(day, "c");
+                        result[sym] = new Snapshot(sym, last, ParseDouble(day, "o"), ParseDouble(day, "h"), ParseDouble(day, "l"),
+                            ParseDouble(day, "v"), ParseDouble(day, "vw"), ParseDouble(prev, "c"));
+                    }
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "[alpaca-snapshots] {Feed} failed", feed);
+                }
+            }
+        }
+        return result;
+    }
+
+    // Intraday bars (e.g. "30Min") since startUtc. DailyBar.Date holds the bar's full UTC start time here.
+    public async Task<Dictionary<string, List<DailyBar>>> GetIntradayBarsAsync(IReadOnlyCollection<string> symbols, string timeframe, DateTime startUtc)
+    {
+        var result = new Dictionary<string, List<DailyBar>>(StringComparer.OrdinalIgnoreCase);
+        if (!IsConfigured || symbols.Count == 0) return result;
+
+        using var dataHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+        dataHttp.DefaultRequestHeaders.Add("APCA-API-KEY-ID", _apiKey);
+        dataHttp.DefaultRequestHeaders.Add("APCA-API-SECRET-KEY", _apiSecret);
+        var start = startUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+
+        foreach (var feed in new[] { "sip", "iex" })
+        {
+            result.Clear();
+            string? pageToken = null;
+            var refused = false;
+            try
+            {
+                do
+                {
+                    var url = $"{DataApiBaseUrl}/v2/stocks/bars?symbols={Uri.EscapeDataString(string.Join(',', symbols))}" +
+                              $"&timeframe={timeframe}&start={start}&adjustment=raw&feed={feed}&limit=10000" +
+                              (pageToken is null ? "" : $"&page_token={Uri.EscapeDataString(pageToken)}");
+                    var response = await dataHttp.GetAsync(url);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogWarning("[alpaca-bars] {Feed} {Tf} bars returned {Status}", feed, timeframe, response.StatusCode);
+                        refused = true;
+                        break;
+                    }
+                    var json = JsonNode.Parse(await response.Content.ReadAsStringAsync());
+                    if (json?["bars"] is JsonObject bars)
+                    {
+                        foreach (var (sym, arr) in bars)
+                        {
+                            if (arr is not JsonArray list) continue;
+                            if (!result.TryGetValue(sym, out var into)) result[sym] = into = [];
+                            foreach (var b in list)
+                            {
+                                if (!DateTime.TryParse(b?["t"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var t)) continue;
+                                into.Add(new DailyBar(t, ParseDouble(b, "o"), ParseDouble(b, "h"), ParseDouble(b, "l"), ParseDouble(b, "c"), ParseDouble(b, "v")));
+                            }
+                        }
+                    }
+                    pageToken = json?["next_page_token"]?.ToString();
+                } while (!string.IsNullOrEmpty(pageToken));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "[alpaca-bars] {Feed} {Tf} bars failed", feed, timeframe);
+                refused = true;
+            }
+            if (!refused) break;
+        }
+
+        foreach (var list in result.Values) list.Sort((x, y) => x.Date.CompareTo(y.Date));
+        return result;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────
 
     private void EnsureConfigured()

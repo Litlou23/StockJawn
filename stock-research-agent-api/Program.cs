@@ -274,6 +274,9 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Calendar.CalendarScheduler>();
     builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.MoversScanner>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.MoversScanScheduler>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.IntradayScanner>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.MissedMoversReport>();
+    builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.IntradayScanScheduler>();
 
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 
