@@ -69,6 +69,16 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
   beat/lagged SPY by 1.5+ points, with our status and why we missed each → `missed_movers` table, read by the EOD and
   nightly jobs. Manual: `POST /api/jobs/missed-movers`.
 
+### Trigger strategy backtest
+`TriggerStrategyBacktest` replays the live rules on Alpaca daily bars (default: the ~1,000 tickers in historical_candles
+plus theme ETFs, last 365 days): each day the setups MoversScanner would stage (same filters, relative strength, themes,
+key levels, top 10 + 4 themes), then the executor's rules next session: buy only if the trigger trades (within
+`trigger_max_chase_pct`), no same-day sell unless down `same_day_stop_stock_pct`, stop/target from the next day, sold at
+the open on the sell-by day (2 trading days). Stock prices only. A day touching both stop and target counts as the stop.
+Results: `trigger_backtest_runs.summary` (win rate, avg win/loss, profit factor, avg R, by direction/theme/tag/SPY day,
+exits, P&L risking $10 a trade) and `trigger_backtest_trades`. Start it: set `trigger_backtest_request` to 1 (reason =
+days) in scoring_weight_overrides, or `POST /api/jobs/backtest-triggers?days=365` with the header.
+
 ### Phone alerts (trade events)
 `TradeAlertWatcher` checks picks every minute (7 AM-9 PM ET, trading days) and pushes to the ntfy topic once per event:
 trigger hit, order placed, filled, sold (with P&L), failed/blocked (with the reason), and Robinhood NOT READY (hourly

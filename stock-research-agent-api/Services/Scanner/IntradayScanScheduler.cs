@@ -28,6 +28,7 @@ public class IntradayScanScheduler : BackgroundService
                 var now = TradingCalendar.NowEt();
                 using var scope = _scopeFactory.CreateScope();
                 var sp = scope.ServiceProvider;
+                await StartRequestedBacktestAsync(sp.GetRequiredService<SupabaseClient>(), stoppingToken);
                 if (await sp.GetRequiredService<TradingCalendar>().IsTradingDayAsync(now.Date))
                 {
                     var db = sp.GetRequiredService<SupabaseClient>();
@@ -66,6 +67,29 @@ public class IntradayScanScheduler : BackgroundService
             }
             await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
         }
+    }
+
+    // Set trigger_backtest_request to 1 (reason = days, e.g. "365") to start a trigger backtest without the job secret.
+    private async Task StartRequestedBacktestAsync(SupabaseClient db, CancellationToken ct)
+    {
+        if (await ReadAsync(db, "trigger_backtest_request", "effective_weight", "0") is "0" or "0.0") return;
+        await db.UpdateAsync("scoring_weight_overrides", "signal_name=eq.trigger_backtest_request",
+            new Dictionary<string, object?> { ["effective_weight"] = 0, ["last_updated"] = DateTime.UtcNow });
+        var days = int.TryParse(await ReadAsync(db, "trigger_backtest_request", "reason", "365"), out var d) ? Math.Clamp(d, 30, 1100) : 365;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var r = await scope.ServiceProvider.GetRequiredService<StockResearchAgent.Api.Services.Backtesting.TriggerStrategyBacktest>()
+                    .RunAsync(new(days), ct);
+                _logger.LogInformation("[trigger-backtest] run {Run}: {Notes}", r.RunId, string.Join("; ", r.Notes));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[trigger-backtest] requested run failed");
+            }
+        }, ct);
     }
 
     private static List<TimeSpan> Times(string csv) => csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

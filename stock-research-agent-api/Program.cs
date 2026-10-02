@@ -278,6 +278,7 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.MissedMoversReport>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.IntradayScanScheduler>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Alerts.TradeAlertWatcher>();
+    builder.Services.AddTransient<StockResearchAgent.Api.Services.Backtesting.TriggerStrategyBacktest>();
 
     builder.Services.AddSingleton<PortfolioBalanceEngine>();
 

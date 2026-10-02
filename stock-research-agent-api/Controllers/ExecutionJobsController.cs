@@ -128,6 +128,44 @@ public class ExecutionJobsController : ControllerBase
         return Ok(await scope.ServiceProvider.GetRequiredService<MissedMoversReport>().RunAsync(write, ct));
     }
 
+    // Replay the live trigger strategy over past daily bars (runs in the background; results in trigger_backtest_runs).
+    [HttpPost("api/jobs/backtest-triggers")]
+    public IActionResult BacktestTriggers([FromQuery] int days = 365, [FromQuery] int holdDays = 2, [FromQuery] string? tickers = null)
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+        const string job = "trigger-backtest";
+        if (_jobStatus.GetStatus(job)?.State == "running")
+            return Conflict(new { error = "A trigger backtest is already running" });
+
+        var ct = _jobStatus.MarkStarted(job);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var bt = scope.ServiceProvider.GetRequiredService<StockResearchAgent.Api.Services.Backtesting.TriggerStrategyBacktest>();
+                var r = await bt.RunAsync(new(Math.Clamp(days, 30, 1100), Math.Clamp(holdDays, 1, 10), tickers), ct);
+                _jobStatus.MarkCompleted(job, $"run {r.RunId}: {r.Setups} setups, {r.Triggered} trades, " +
+                    $"win rate {r.Summary["win_rate"]}%, avg {r.Summary["avg_return_pct"]}% per trade, profit factor {r.Summary["profit_factor"]} | {string.Join("; ", r.Notes)}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[trigger-backtest] failed");
+                _jobStatus.MarkFailed(job, ex.Message);
+            }
+        });
+        return Accepted(new { started = true, status = "GET /api/jobs/backtest-triggers/status" });
+    }
+
+    [HttpGet("api/jobs/backtest-triggers/status")]
+    public IActionResult BacktestTriggersStatus()
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+        return Ok(_jobStatus.GetStatus("trigger-backtest"));
+    }
+
     // Refresh market_events now. ?alert=true also sends the next session's events to the ntfy topic.
     [HttpPost("api/jobs/refresh-calendar")]
     public async Task<IActionResult> RefreshCalendar([FromQuery] bool alert = false, CancellationToken ct = default)
