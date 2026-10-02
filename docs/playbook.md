@@ -48,6 +48,14 @@ Switch off with `trigger_entries_enabled` = 0 (then picks buy right after approv
 keeps moves ≥3% (≤25%) on ≥1.5x volume that closed near the high/low, at a new 20-day high/low, or a double top/bottom →
 trigger at the day's extreme, stop 2% back, target 2x risk → FMP upgrade/news attached → `research` rows (notes "SCANNER ...")
 for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-secret; `?write=false` to preview).
+- **Relative strength:** a bullish setup that closed strong on a day SPY closed weak gets "held up while SPY faded" and ranks 1.3x higher (bearish mirror too).
+- **Themes:** `scan_theme_etfs` (XLE, USO, XBI, SMH, GLD...) move ≥ `scan_etf_min_move_pct` (1.5%) and close near the high/low,
+  or run 3 of the last 4 days (≥3%) → up to `scan_max_themes` (4) rows with notes "SCANNER THEME ...".
+- **Key levels** (`key_levels` jsonb): support/resistance from ~6 months of daily bars (swing highs/lows that cluster; touch
+  count = strength), plus Finnhub support/resistance + chart patterns when the plan allows (`levels_finnhub_enabled`; a refusal
+  is noted and we fall back to our own levels). The stop moves just past a support within 3%; the target goes to the next level
+  when it's ≥1.5x the risk away, otherwise 2x risk and the setup ranks lower ("resistance close by").
+- 7:30 AM (`levels_fill_time_et`) fills `key_levels` for the day's research/pending rows the nightly job added. Manual: `POST /api/jobs/fill-levels`.
 
 ### Robinhood login + JOB_RUN_SECRET
 - The job secret only goes in the `x-job-secret` header — never in a URL.

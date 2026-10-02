@@ -41,6 +41,8 @@ Start from StockJawn's events calendar (refreshed nightly from Finnhub / Alpaca,
 - **FOMC decision day → log CASH and stop.**
 - CPI / PCE / jobs / GDP before the open → every pick must have a trigger (the release decides the direction). Use the sector cheat sheet.
 - Check big earnings today/tomorrow (get_earnings_calendar). See "Earnings" below for how to use them.
+- **Timed events today** (event_time like "10:00 AM", "2:00 PM"): speeches (Fed, President), deliveries, launches.
+  A name tied to one waits for the event or uses a trigger past the level the event would break. Say the time in the summary.
 
 ## Step 3 — Market read (their SPY segment)
 1. **Market health:** % of S&P 500 above the 50-day ($S5FI via WebSearch) and new highs vs new lows.
@@ -58,9 +60,11 @@ Start from StockJawn's events calendar (refreshed nightly from Finnhub / Alpaca,
 
 ## Step 4 — Candidates (6–10)
 1. **Nightly research first:**
-   `SELECT ticker, direction, catalyst, notes, total_score, trigger_price, trigger_direction, level_target, level_stop, exit_by_date
+   `SELECT ticker, direction, catalyst, notes, total_score, trigger_price, trigger_direction, level_target, level_stop, exit_by_date, key_levels
     FROM claude_daily_picks WHERE pick_date = CURRENT_DATE AND approval_status = 'research' ORDER BY total_score DESC NULLS LAST;`
    Rows tagged "SCANNER" (StockJawn's movers scan) and "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
+   "SCANNER THEME" rows are sector ETFs on a run (oil, biotech, gold...) — trade the theme through its best stock or the ETF's options.
+   `key_levels` (filled at 7:30 AM for every research row) = support/resistance with touch counts; use them in Step 5.
 2. Check open positions so you don't double up on a name we already hold.
 3. Scan for these setup types:
    - **Momentum continuation (the core play):** yesterday's big mover pressing a level — after-hours/pre-market high or low,
@@ -76,8 +80,10 @@ Start from StockJawn's events calendar (refreshed nightly from Finnhub / Alpaca,
 ## Step 5 — Build each setup
 **Levels (all on the stock's price, even for options):**
 - Trigger: bullish "above X" / bearish "below X", at a real visible level.
-- Target: the next level (high of day, next resistance, gap fill).
-- Stop: just back through the trigger (1.5–3%). Losers in our scorecard poked past the trigger and faded, so keep it tight.
+- Target: the next level (high of day, next resistance, gap fill). Start from `key_levels`: the next resistance above the
+  trigger (support below for puts). 3x+ touches = strong; a strong level less than 1.5x the risk away = skip or wait for the break.
+- Stop: just back through the trigger (1.5–3%), or just under the nearest support in `key_levels` if it's within 3%.
+  Losers in our scorecard poked past the trigger and faded, so keep it tight.
 - Reward/risk = (target − trigger) ÷ (trigger − stop) must be ≥ 1.5.
 - `exit_by_date` = 2 trading days after today (inverse ETFs: the next trading day).
 

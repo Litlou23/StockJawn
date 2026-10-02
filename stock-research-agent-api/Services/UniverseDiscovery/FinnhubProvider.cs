@@ -169,6 +169,59 @@ public class FinnhubProvider
         }
     }
 
+    public record PatternHit(string Name, string Type, string Status, double? Entry, double? StopLoss, double? Target);
+
+    // Support/resistance and pattern recognition are paid add-ons on some Finnhub plans. After a refusal we stop
+    // asking for a while; callers fall back to StockJawn's own levels.
+    private static DateTimeOffset _technicalDeniedUntil = DateTimeOffset.MinValue;
+    public static string? TechnicalAccessNote { get; private set; }
+
+    public async Task<List<double>?> GetSupportResistanceAsync(string symbol)
+    {
+        var json = await GetTechnicalAsync($"{BaseUrl}/scan/support-resistance?symbol={Uri.EscapeDataString(symbol)}&resolution=D&token={_apiKey}");
+        return (json?["levels"] as JsonArray)?.Select(v => double.TryParse(v?.ToString(), out var d) ? d : 0).Where(d => d > 0).ToList();
+    }
+
+    public async Task<List<PatternHit>?> GetPatternsAsync(string symbol)
+    {
+        var json = await GetTechnicalAsync($"{BaseUrl}/scan/pattern?symbol={Uri.EscapeDataString(symbol)}&resolution=D&token={_apiKey}");
+        if (json?["points"] is not JsonArray points) return json is null ? null : [];
+        static double? D(JsonNode? n) => double.TryParse(n?.ToString(), out var d) && d > 0 ? d : null;
+        return points.Select(p => new PatternHit(
+                p?["patternname"]?.ToString() ?? "",
+                p?["patterntype"]?.ToString() ?? "",
+                p?["status"]?.ToString() ?? "",
+                D(p?["entry"]), D(p?["stoploss"]), D(p?["profit1"])))
+            .Where(p => p.Name.Length > 0)
+            .ToList();
+    }
+
+    private async Task<JsonNode?> GetTechnicalAsync(string url)
+    {
+        if (!_configured || DateTimeOffset.UtcNow < _technicalDeniedUntil) return null;
+        try
+        {
+            await ThrottleAsync();
+            using var resp = await _http.GetAsync(url);
+            var body = await resp.Content.ReadAsStringAsync();
+            if ((int)resp.StatusCode is 401 or 403 || body.Contains("don't have access", StringComparison.OrdinalIgnoreCase))
+            {
+                _technicalDeniedUntil = DateTimeOffset.UtcNow.AddHours(6);
+                TechnicalAccessNote = "Finnhub refused support/resistance & pattern recognition (not on this plan) — using StockJawn's own levels";
+                _logger.LogWarning("[finnhub] {Note}", TechnicalAccessNote);
+                return null;
+            }
+            if (!resp.IsSuccessStatusCode) return null;
+            TechnicalAccessNote = null;
+            return JsonNode.Parse(body);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[finnhub] technical scan failed");
+            return null;
+        }
+    }
+
     /// <summary>
     /// Check if any high-impact US economic data released today had a significant miss
     /// vs estimate. A big miss (consumer sentiment crashing from 67 to 51, retail sales

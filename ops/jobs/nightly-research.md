@@ -23,11 +23,20 @@ Get the balance of the agentic account (from `get_accounts`, the one with agenti
 ## STEP 0: STOCKJAWN'S MOVERS SCAN (already done at 4:30 PM — start here)
 StockJawn scans the day's biggest movers after the close (StockedUp's routine) and stages setups for tomorrow:
 ```sql
-SELECT id, ticker, direction, entry_price, trigger_price, trigger_direction, level_target, level_stop, catalyst, notes
+SELECT id, ticker, direction, entry_price, trigger_price, trigger_direction, level_target, level_stop, catalyst, notes, key_levels
 FROM claude_daily_picks
 WHERE approval_status = 'research' AND pick_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + INTERVAL '1 day' AND notes LIKE 'SCANNER%';
 ```
 Each row already has the move, volume, pattern (closed at the high/low, new 20-day high/low, double top/bottom) and levels.
+- **"held up while SPY faded" / "weak while SPY held up"** = relative strength (StockedUp: names "not too affected by the
+  pullback"). These rank higher; prefer them when two setups are close.
+- **`key_levels`** = support/resistance from 6 months of daily bars (touch count = how many times price turned there;
+  3x+ is strong), plus Finnhub's levels and chart patterns when the plan allows. The scanner already moved the stop past
+  a nearby support and the target to the next resistance. "resistance close by" means a wall right above the trigger —
+  only keep it with a strong catalyst.
+- **"SCANNER THEME" rows** are sector/commodity ETFs (oil, biotech, gold, chips, banks...) that moved today or ran 3 of
+  the last 4 days. Find the driver (oil supply news, rate move, FDA wave) and the 1–2 best stocks in that theme under
+  `scan_max_price` with a setup of their own. Keep the ETF row only if it's the cleaner trade (options on it fit the budget).
 For each one:
 1. Find the WHY (WebSearch the ticker + today's date): upgrade, contract, guidance, earnings, sector news. Put it in `catalyst`.
 2. **Group themes:** several names from one industry moving together (e.g. 5 mortgage insurers all -7%) is ONE idea —
@@ -45,11 +54,20 @@ WHERE event_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 10 ORDER BY event_date;
   ("Run-up play") and stage the ones that pass, notes starting "RUN-UP:".
 - **Reaction candidates:** reports tonight after the close or tomorrow before the open → stage both sides (beat / miss)
   with placeholder levels; the morning task resets them to the pre-market high/low.
-- **Add what the feeds miss** — company events (monthly deliveries like NIO on the 1st, product launches, investor days,
-  FDA dates) and any high-importance economic release that's missing (FOMC, CPI, PCE, jobs):
+- **Add what the feeds miss, with the exact time** (WebSearch the next 10 days). The feeds only have earnings and
+  data releases; StockedUp also trades the scheduled moments:
+  - Company: delivery numbers (TSLA quarterly ~2 days after quarter end, NIO/XPEV/LI on the 1st), product launches and
+    keynotes (Apple, Tesla, Nvidia GTC), investor/analyst days, FDA decision (PDUFA) dates, big conferences.
+  - Speeches: Fed chair and governors, the President on tariffs/trade/the economy, Treasury Secretary.
+  - Economic: anything high-importance missing (FOMC decision + press conference, CPI, PCE, jobs, GDP).
+  Use the exact ET time when it's announced ("10:00 AM", "2:00 PM", "after close"); otherwise "before open" / "after
+  close" / NULL. Put the affected tickers or sector in the title.
   `INSERT INTO market_events (event_date, event_time, kind, ticker, title, importance, source)
-   VALUES ('2026-11-02', 'before open', 'company', 'NIO', 'NIO October deliveries', 'high', 'nightly')
+   VALUES ('2026-10-02', '9:00 AM', 'company', 'TSLA', 'Tesla Q3 deliveries', 'high', 'nightly'),
+          ('2026-10-07', '2:00 PM', 'economic', NULL, 'Fed Chair speech (rates outlook) — SPY, banks', 'high', 'nightly')
    ON CONFLICT DO NOTHING;`  (kind: 'company' or 'economic'; ticker NULL for economic)
+- A timed event during market hours for a name we'd buy → set the trigger so it can't fill before the event unless the
+  setup is the run-up itself, and say the time in notes ("Fed chair 2 PM — expect a swing").
 - Positions we hold with `event_warning` set report or have an event before their sell-by date — say so in the summary.
 
 ## SIGNAL SCANS — Run ALL of these

@@ -93,6 +93,19 @@ public class ExecutionJobsController : ControllerBase
         return Ok(new { scanDate = r.ScanDate.ToString("yyyy-MM-dd"), pickDate = r.PickDate.ToString("yyyy-MM-dd"), r.Universe, r.Setups, r.Notes });
     }
 
+    // Add key support/resistance to the day's research/pending picks that don't have them yet (normally 7:30 AM).
+    [HttpPost("api/jobs/fill-levels")]
+    public async Task<IActionResult> FillLevels([FromQuery] DateTime? date = null, CancellationToken ct = default)
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+
+        using var scope = _scopeFactory.CreateScope();
+        var day = date?.Date ?? TradingCalendar.TodayEt();
+        var notes = await scope.ServiceProvider.GetRequiredService<MoversScanner>().FillLevelsAsync(day, ct);
+        return Ok(new { pickDate = day.ToString("yyyy-MM-dd"), notes });
+    }
+
     // Refresh market_events now. ?alert=true also sends the next session's events to the ntfy topic.
     [HttpPost("api/jobs/refresh-calendar")]
     public async Task<IActionResult> RefreshCalendar([FromQuery] bool alert = false, CancellationToken ct = default)

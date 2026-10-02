@@ -5,12 +5,14 @@ namespace StockResearchAgent.Api.Services.Scanner;
 
 // Runs the movers scan once each weekday after the close (movers_scan_time_et, default 16:30 ET),
 // before the 9 PM nightly-research job reads the rows. movers_scan_enabled = 0 turns it off.
+// Also a morning pass (levels_fill_time_et, default 07:30) that adds key levels to the picks the nightly job staged.
 public class MoversScanScheduler : BackgroundService
 {
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<MoversScanScheduler> _logger;
     private DateTime _lastRunDate = DateTime.MinValue;
+    private DateTime _lastFillDate = DateTime.MinValue;
 
     public MoversScanScheduler(IServiceScopeFactory scopeFactory, ILogger<MoversScanScheduler> logger)
     {
@@ -36,6 +38,17 @@ public class MoversScanScheduler : BackgroundService
                         continue;
                     }
                     var db = scope.ServiceProvider.GetRequiredService<SupabaseClient>();
+                    if (_lastFillDate != now.Date)
+                    {
+                        var fillAt = TimeSpan.TryParseExact(await ReadAsync(db, "levels_fill_time_et", "reason", "07:30"), @"hh\:mm",
+                            CultureInfo.InvariantCulture, out var f) ? f : new TimeSpan(7, 30, 0);
+                        if (now.TimeOfDay >= fillAt && now.TimeOfDay < new TimeSpan(9, 30, 0))
+                        {
+                            _lastFillDate = now.Date;
+                            var filled = await scope.ServiceProvider.GetRequiredService<MoversScanner>().FillLevelsAsync(now.Date, stoppingToken);
+                            _logger.LogInformation("[levels] {Notes}", string.Join("; ", filled));
+                        }
+                    }
                     var enabled = await ReadAsync(db, "movers_scan_enabled", "effective_weight", "1") != "0";
                     var at = TimeSpan.TryParseExact(await ReadAsync(db, "movers_scan_time_et", "reason", "16:30"), @"hh\:mm",
                         CultureInfo.InvariantCulture, out var t) ? t : new TimeSpan(16, 30, 0);
