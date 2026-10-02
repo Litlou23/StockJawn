@@ -69,8 +69,13 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
   beat/lagged SPY by 1.5+ points, with our status and why we missed each → `missed_movers` table, read by the EOD and
   nightly jobs. Manual: `POST /api/jobs/missed-movers`.
 
+### Phone alerts (trade events)
+`TradeAlertWatcher` checks picks every minute (7 AM-9 PM ET, trading days) and pushes to the ntfy topic once per event:
+trigger hit, order placed, filled, sold (with P&L), failed/blocked (with the reason), and Robinhood NOT READY (hourly
+during market hours). `alert_log` stops repeats across restarts. `trade_alerts_enabled` = 0 turns it off.
+
 ### Robinhood login + JOB_RUN_SECRET
-- The job secret only goes in the `x-job-secret` header — never in a URL.
+- The job secret only goes in the `x-job-secret` header — never in a URL. The old dev GET endpoints (backtest sweep, meta-labeler, paper-options direct-pick) are header-only too.
 - New Robinhood login: `POST /api/robinhood/oauth/login-url` with the header → returns a Robinhood URL (nothing secret in it) →
   open it, sign in. `GET /api/robinhood/oauth/status` (header) shows whether the stored login is readable.
 - The stored login is encrypted with a key derived from SUPABASE_SERVICE_KEY, so rotating JOB_RUN_SECRET doesn't need a re-login.

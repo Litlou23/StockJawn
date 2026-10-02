@@ -97,6 +97,7 @@ public class EventsCalendarService
         var source = "finnhub";
         foreach (var e in await _finnhub.GetUpcomingEarningsAsync(21))
         {
+            if (!IsTradableTicker(e.Ticker)) continue;
             if (!DateTime.TryParse(e.Date, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) || d.Date < today) continue;
             var details = new JsonObject { ["eps_estimate"] = e.EstimateEps };
             rows[$"{e.Ticker}|{d:yyyy-MM-dd}"] = Row(d, HourLabel(e.Hour), "earnings", e.Ticker.ToUpperInvariant(), $"{e.Ticker.ToUpperInvariant()} earnings", "medium", source, details);
@@ -107,6 +108,7 @@ public class EventsCalendarService
             source = "fmp";
             foreach (var e in await _fmp.GetEarningsCalendarAsync(21))
             {
+                if (!IsTradableTicker(e.Symbol)) continue;
                 if (!DateTime.TryParse(e.Date, CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) || d.Date < today) continue;
                 rows[$"{e.Symbol}|{d:yyyy-MM-dd}"] = Row(d, null, "earnings", e.Symbol.ToUpperInvariant(), $"{e.Symbol.ToUpperInvariant()} earnings", "medium", source,
                     new JsonObject { ["eps_estimate"] = e.EpsEstimated });
@@ -123,12 +125,26 @@ public class EventsCalendarService
         return rows.Count;
     }
 
+    // Foreign over-the-counter names (5 letters ending in F or Y: CASIF, JDWPY) we never trade.
+    public static bool IsTradableTicker(string? t)
+        => !string.IsNullOrEmpty(t) && t.Length <= 5 && t.All(char.IsLetter) && !(t.Length == 5 && t[^1] is 'F' or 'Y' or 'f' or 'y');
+
     private async Task<int> RefreshEconomicAsync(DateTime today, List<string> notes)
     {
-        var events = await _finnhub.GetEconomicCalendarAsync(14);
+        var source = "finnhub";
+        var events = (await _finnhub.GetEconomicCalendarAsync(14))
+            .Select(e => (e.Event, e.Country, e.Date, e.Impact, e.Actual, e.Estimate, e.Previous)).ToList();
+        if (events.Count == 0 && _fmp.IsConfigured)
+        {
+            source = "fmp";
+            events = (await _fmp.GetEconomicCalendarAsync(14))
+                .Where(e => e.Country.Equals("US", StringComparison.OrdinalIgnoreCase) && e.Impact is not null
+                            && (e.Impact.Equals("High", StringComparison.OrdinalIgnoreCase) || e.Impact.Equals("Medium", StringComparison.OrdinalIgnoreCase)))
+                .Select(e => (e.Event, e.Country, e.Date, e.Impact, e.Actual, e.Estimate, e.Previous)).ToList();
+        }
         if (events.Count == 0)
         {
-            notes.Add("economic: Finnhub returned none (its plan may not include the economic calendar) — the nightly job adds them");
+            notes.Add("economic: Finnhub and FMP returned none (their plans may not include the economic calendar) — the nightly job adds them");
             return 0;
         }
 
@@ -139,10 +155,10 @@ public class EventsCalendarService
             var et = TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), Eastern);
             if (et.Date < today) continue;
             var importance = e.Impact?.Equals("high", StringComparison.OrdinalIgnoreCase) == true ? "high" : "medium";
-            rows[$"{e.Event}|{et:yyyy-MM-dd}"] = Row(et.Date, et.ToString("h:mm tt", CultureInfo.InvariantCulture), "economic", null, e.Event, importance, "finnhub",
+            rows[$"{e.Event}|{et:yyyy-MM-dd}"] = Row(et.Date, et.ToString("h:mm tt", CultureInfo.InvariantCulture), "economic", null, e.Event, importance, source,
                 new JsonObject { ["estimate"] = e.Estimate, ["previous"] = e.Previous, ["actual"] = e.Actual });
         }
-        await _db.DeleteAsync(Table, $"kind=eq.economic&source=eq.finnhub&event_date=gte.{today:yyyy-MM-dd}");
+        await _db.DeleteAsync(Table, $"kind=eq.economic&source=eq.{source}&event_date=gte.{today:yyyy-MM-dd}");
         await InsertChunkedAsync(rows.Values.ToList());
         return rows.Count;
     }

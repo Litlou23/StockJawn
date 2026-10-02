@@ -278,6 +278,42 @@ public class FmpClient
         }
     }
 
+    public record FmpEconomicEvent(string Event, string Country, string Date, string? Impact, double? Actual, double? Estimate, double? Previous);
+
+    // Economic calendar (jobs, CPI, FOMC...). Dates are UTC. Fallback for when Finnhub's plan refuses it.
+    public async Task<List<FmpEconomicEvent>> GetEconomicCalendarAsync(int daysAhead = 14)
+    {
+        if (!_configured) return [];
+        var from = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var to = DateTime.UtcNow.AddDays(daysAhead).ToString("yyyy-MM-dd");
+        var url = $"{_options.BaseUrl}/stable/economic-calendar?from={from}&to={to}&apikey={_options.ApiKey}";
+        try
+        {
+            await ThrottleAsync();
+            using var resp = await _http.GetAsync(url);
+            if (!resp.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("[fmp] Economic calendar returned {Status}", (int)resp.StatusCode);
+                return [];
+            }
+            if (JsonNode.Parse(await resp.Content.ReadAsStringAsync()) is not JsonArray arr) return [];
+            static double? D(JsonNode? n) => double.TryParse(n?.ToString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : null;
+            return arr.Where(i => i is not null).Select(i => new FmpEconomicEvent(
+                    i!["event"]?.ToString() ?? "",
+                    i["country"]?.ToString() ?? "",
+                    i["date"]?.ToString() ?? "",
+                    i["impact"]?.ToString(),
+                    D(i["actual"]), D(i["estimate"]), D(i["previous"])))
+                .Where(e => e.Event.Length > 0)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[fmp] Economic calendar fetch failed");
+            return [];
+        }
+    }
+
     /// <summary>
     /// Search SEC filings by form type (e.g., "10-K", "8-K", "4").
     /// Basic plan endpoint.

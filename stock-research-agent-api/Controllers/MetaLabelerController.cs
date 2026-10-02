@@ -179,20 +179,18 @@ public class MetaLabelerController : ControllerBase
     /// <summary>
     /// GET-based dev shortcut for the labeling + training flow. Same auth as
     /// backtest dev hook — the Claude sandbox uses this because its outbound
-    /// proxy blocks POST. Requires ?token= matching JOB_RUN_SECRET.
+    /// proxy blocks POST. Requires the x-job-secret header.
     ///   action=label → runs labeling then returns
     ///   action=train → runs training then returns
     ///   action=full  → labels first, then trains
     /// </summary>
     [HttpGet("dev/run")]
     public IActionResult DevRun(
-        [FromQuery] string? token,
         [FromQuery] string action = "full",
         [FromQuery] int limit = 2000)
     {
-        var expected = _configuration["JOB_RUN_SECRET"];
-        if (string.IsNullOrWhiteSpace(expected) || token != expected)
-            return Unauthorized(new { error = "Invalid or missing ?token=" });
+        if (!JobSecret.Matches(Request, _configuration["JOB_RUN_SECRET"]))
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         var jobName = "meta-labeler-dev";
         if (_jobs.GetStatus(jobName)?.State == "running")

@@ -94,6 +94,9 @@ public class ClaudePickExecutor
         }
     }
 
+    // Read-only view for the phone alerts (Robinhood NOT READY).
+    public RobinhoodReadiness? LastReadiness => _lastReadiness;
+
     private async Task<PickExecutionRunResult> RunAsync(CancellationToken ct)
     {
         RobinhoodReadiness? readiness = null;

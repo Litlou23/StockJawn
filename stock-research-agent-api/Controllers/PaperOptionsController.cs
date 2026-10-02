@@ -154,11 +154,10 @@ public class PaperOptionsController : ControllerBase
     /// <summary>
     /// GET /api/paper-options/dev/direct-pick — GET wrapper for direct-pick.
     /// Used by Claude's scheduled morning options task (sandbox can't POST).
-    /// Auth via ?token= query param (same JOB_RUN_SECRET).
+    /// Auth via the x-job-secret header (same JOB_RUN_SECRET).
     /// </summary>
     [HttpGet("dev/direct-pick")]
     public async Task<IActionResult> DevDirectPick(
-        [FromQuery] string? token,
         [FromQuery] string? ticker,
         [FromQuery] string? direction,
         [FromQuery] string? source,
@@ -167,9 +166,8 @@ public class PaperOptionsController : ControllerBase
         [FromQuery] string? conviction,
         [FromQuery] bool autoSave = true)
     {
-        var expected = Environment.GetEnvironmentVariable("JOB_RUN_SECRET") ?? "";
-        if (string.IsNullOrEmpty(expected) || token != expected)
-            return Unauthorized(new { error = "Invalid or missing ?token=" });
+        if (!JobSecret.Matches(Request, Environment.GetEnvironmentVariable("JOB_RUN_SECRET")))
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         var req = new DirectOptionPickRequest
         {

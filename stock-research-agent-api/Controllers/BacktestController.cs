@@ -413,12 +413,10 @@ public class BacktestController : ControllerBase
     // GET access to a small library of predefined sweeps so I can drive the
     // backtest from the sandbox.
     //
-    // Not a security hole per se — still requires the same JOB_RUN_SECRET
-    // token, just passed as ?token= instead of an x-job-secret header. Only
-    // predefined presets can be started; arbitrary parameter spaces cannot.
+    // Requires the x-job-secret header (never ?token=). Only predefined presets can be started.
 
     /// <summary>
-    /// Start a preset sweep via GET. Requires ?token=&lt;JOB_RUN_SECRET&gt;.
+    /// Start a preset sweep via GET. Requires the x-job-secret header.
     /// Presets:
     ///   quick10       — 10 blue chips, 8 combos of exit-risk params
     ///   full12        — full universe, 12 combos of exit-risk params
@@ -428,11 +426,10 @@ public class BacktestController : ControllerBase
     /// </summary>
     /// <summary>Cancel a running sweep.</summary>
     [HttpGet("dev/cancel-sweep")]
-    public IActionResult DevCancelSweep([FromQuery] string? token)
+    public IActionResult DevCancelSweep()
     {
-        var expected = _configuration["JOB_RUN_SECRET"];
-        if (string.IsNullOrWhiteSpace(expected) || token != expected)
-            return Unauthorized(new { error = "Invalid or missing ?token=" });
+        if (!JobSecret.Matches(Request, _configuration["JOB_RUN_SECRET"]))
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         var cancelled = _jobs.Cancel("backtest-sweep");
         return Ok(new { cancelled, message = cancelled ? "Sweep cancelled" : "No running sweep to cancel" });
@@ -440,15 +437,13 @@ public class BacktestController : ControllerBase
 
     [HttpGet("dev/start-sweep")]
     public async Task<IActionResult> DevStartSweep(
-        [FromQuery] string? token,
         [FromQuery] string? preset,
         [FromQuery] string? startDate,
         [FromQuery] string? endDate,
         [FromQuery] int? maxTickers)
     {
-        var expected = _configuration["JOB_RUN_SECRET"];
-        if (string.IsNullOrWhiteSpace(expected) || token != expected)
-            return Unauthorized(new { error = "Invalid or missing ?token=" });
+        if (!JobSecret.Matches(Request, _configuration["JOB_RUN_SECRET"]))
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
 
         // Resolve preset → BacktestSweepRequest body
         var start = startDate ?? DateOnly.FromDateTime(DateTime.UtcNow).AddMonths(-3).ToString("yyyy-MM-dd");
