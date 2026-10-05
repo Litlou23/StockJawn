@@ -4,6 +4,7 @@ using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.Calendar;
 using StockResearchAgent.Api.Services.Scanner;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 using static StockResearchAgent.Api.Services.Broker.AlpacaBrokerAdapter;
 
 namespace StockResearchAgent.Api.Services.Backtesting;
@@ -11,7 +12,7 @@ namespace StockResearchAgent.Api.Services.Backtesting;
 public record TriggerTrade(
     DateTime SignalDate, string Ticker, string Direction, string Tags, bool IsTheme, double SpyChangePct,
     double Trigger, double Stop, double Target, DateTime EntryDate, double Entry, DateTime ExitDate, double Exit,
-    string ExitReason, double ReturnPct, double RMultiple);
+    string ExitReason, double ReturnPct, double RMultiple, string Market = "", string? Against = null, double EntryRelVol = 0);
 
 public record TriggerBacktestResult(Guid RunId, DateTime From, DateTime To, int Tickers, int Setups, int Triggered,
     JsonObject Summary, List<TriggerTrade> Trades, List<string> Notes);
@@ -21,17 +22,20 @@ public record TriggerBacktestResult(Guid RunId, DateTime From, DateTime To, int 
 // trigger trades (within the chase limit), no same-day sell unless down same_day_stop_stock_pct (PDT guard), then
 // stop / target, sold at the open on the sell-by day. Stock prices only (no option history).
 // Daily bars can't order intraday moves: a day touching both stop and target counts as the stop.
+// Each day is replayed twice: the old rules, and the 10/5 trend rules (TrendRules + sector ranking) so the two can be compared.
 public class TriggerStrategyBacktest
 {
     private const string DefaultThemes = "XLE,USO,XBI,SMH,XLF,KRE,GLD,SLV,XLU,XHB,ITB,JETS,TAN,URA,XME,ARKK";
     private readonly AlpacaBrokerAdapter _alpaca;
     private readonly SupabaseClient _db;
     private readonly HistoricalDataLoader _history;
+    private readonly FmpClient _fmp;
     private readonly ILogger<TriggerStrategyBacktest> _logger;
 
-    public TriggerStrategyBacktest(AlpacaBrokerAdapter alpaca, SupabaseClient db, HistoricalDataLoader history, ILogger<TriggerStrategyBacktest> logger)
+    public TriggerStrategyBacktest(AlpacaBrokerAdapter alpaca, SupabaseClient db, HistoricalDataLoader history, FmpClient fmp, ILogger<TriggerStrategyBacktest> logger)
     {
         _alpaca = alpaca;
+        _fmp = fmp;
         _db = db;
         _history = history;
         _logger = logger;
@@ -57,23 +61,26 @@ public class TriggerStrategyBacktest
         var sameDayStop = await NumberAsync("same_day_stop_stock_pct", 5);
         var themes = (await StringAsync("scan_theme_etfs", DefaultThemes))
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList();
+        var sectorEtfs = (await StringAsync("sector_etfs", SectorStrength.DefaultEtfs))
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList();
+        var minRelVolAtBuy = await NumberAsync("trigger_min_rel_volume", 1.2);
 
         var universe = !string.IsNullOrWhiteSpace(o.Tickers)
             ? o.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList()
             : (await _history.GetStoredTickerCountsAsync()).Keys.Select(t => t.ToUpperInvariant()).ToList();
-        universe = universe.Where(t => t.Length is >= 1 and <= 5 && t.All(char.IsLetter) && t != "SPY" && !themes.Contains(t)).Distinct().ToList();
+        universe = universe.Where(t => t.Length is >= 1 and <= 5 && t.All(char.IsLetter) && t != "SPY" && !themes.Contains(t) && !sectorEtfs.Contains(t)).Distinct().ToList();
         if (universe.Count == 0) return Empty("no tickers: pass ?tickers= or load historical_candles first");
 
         // Extra ~200 calendar days in front so the first signal day already has key-level history.
         var calendarDays = o.Days + 210;
         var bars = new Dictionary<string, List<DailyBar>>(StringComparer.OrdinalIgnoreCase);
-        foreach (var chunk in universe.Concat(themes).Append("SPY").Chunk(100))
+        foreach (var chunk in universe.Concat(themes).Concat(sectorEtfs).Append("SPY").Distinct().Chunk(100))
         {
             ct.ThrowIfCancellationRequested();
             foreach (var (k, v) in await _alpaca.GetDailyBarsAsync(chunk, calendarDays)) bars[k] = v;
         }
         if (!bars.TryGetValue("SPY", out var spyBars) || spyBars.Count < 60) return Empty("no SPY history from Alpaca");
-        notes.Add($"bars loaded for {bars.Count} of {universe.Count + themes.Count + 1} symbols");
+        notes.Add($"bars loaded for {bars.Count} of {universe.Concat(themes).Concat(sectorEtfs).Distinct().Count() + 1} symbols");
 
         var spyIndex = spyBars.Select((b, i) => (b.Date, i)).ToDictionary(x => x.Date, x => x.i);
         var index = bars.ToDictionary(kv => kv.Key, kv => kv.Value.Select((b, i) => (b.Date, i)).ToDictionary(x => x.Date, x => x.i), StringComparer.OrdinalIgnoreCase);
@@ -83,13 +90,22 @@ public class TriggerStrategyBacktest
         days = days.Take(Math.Max(0, days.Count - (o.HoldDays + 1))).ToList();
 
         var trades = new List<TriggerTrade>();
+        var newTrades = new List<TriggerTrade>();
         var setupCount = 0;
+        var newSetupCount = 0;
+        var groupOf = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         foreach (var day in days)
         {
             ct.ThrowIfCancellationRequested();
             var si = spyIndex[day];
             var spyWindow = spyBars.GetRange(Math.Max(0, si - 30), si - Math.Max(0, si - 30) + 1);
             var spyChg = si > 0 ? (spyBars[si].Close / spyBars[si - 1].Close - 1) * 100 : 0;
+            var market = TrendRules.Market(spyBars.GetRange(Math.Max(0, si - 59), si - Math.Max(0, si - 59) + 1));
+            var dayBars = new Dictionary<string, List<DailyBar>>(StringComparer.OrdinalIgnoreCase) { ["SPY"] = spyWindow };
+            foreach (var e in sectorEtfs)
+                if (bars.TryGetValue(e, out var eb) && index[e].TryGetValue(day, out var ei) && ei >= 22)
+                    dayBars[e] = eb.GetRange(Math.Max(0, ei - 30), ei - Math.Max(0, ei - 30) + 1);
+            var sectors = SectorStrength.Rank(sectorEtfs, dayBars, day);
 
             var setups = new List<MoverSetup>();
             var themeSetups = new List<MoverSetup>();
@@ -105,33 +121,68 @@ public class TriggerStrategyBacktest
                 if (MoversScanner.Evaluate(t, window, day, minMove, minRelVol, minPrice, maxPrice, stopPct, maxTriggerDist, maxMove) is { } s)
                     setups.Add(MoversScanner.ApplyRelativeStrength(s, window[^1], spyWindow));
             }
-            var staged = setups.OrderByDescending(s => s.Rank).Take(maxSetups)
-                .Concat(themeSetups.OrderByDescending(s => s.Rank).Take(maxThemes))
-                .Select(s =>
-                {
-                    var i = index[s.Ticker][day];
-                    var window = bars[s.Ticker].GetRange(Math.Max(0, i - 140), i - Math.Max(0, i - 140) + 1);
-                    return MoversScanner.AdjustToLevels(s, KeyLevels.Compute(window, s.Close));
-                }).ToList();
+            // New rules: same candidates judged by market + group (live MoversScanner.ApplySectorAsync), then re-ranked.
+            var against = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            var judged = new List<MoverSetup>();
+            foreach (var s in setups.OrderByDescending(s => s.Rank).Take(maxSetups * 3))
+            {
+                var etf = await GroupEtfAsync(s.Ticker, groupOf);
+                var sec = etf is null ? null : sectors.FirstOrDefault(x => x.Etf == etf);
+                against[s.Ticker] = TrendRules.Check(s.Direction, market, sec?.Group, sec?.AboveSma20 ?? false, s.Pattern.Contains("weak while SPY held up"));
+                if (against[s.Ticker] is not null) continue;
+                judged.Add(sec is null || sec.Group == "middle" ? s
+                    : s with { Rank = Math.Round(s.Rank * ((s.Direction == "bullish") == (sec.Group == "leading") ? 1.25 : 0.75), 2) });
+            }
+            var topThemes = themeSetups.OrderByDescending(s => s.Rank).Take(maxThemes).ToList();
+            var staged = Stage(setups.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes));
+            var stagedNew = Stage(judged.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes));
             setupCount += staged.Count;
-
-            foreach (var s in staged)
+            newSetupCount += stagedNew.Count;
+            foreach (var (s, into) in staged.Select(s => (s, trades)).Concat(stagedNew.Select(s => (s, newTrades))))
             {
                 var list = bars[s.Ticker];
                 var i = index[s.Ticker][day];
                 if (i + 1 >= list.Count) continue;
                 if (Simulate(s, list, i, o.HoldDays, chasePct, sameDayStop) is { } tr)
-                    trades.Add(tr with { SignalDate = day, SpyChangePct = Math.Round(spyChg, 2) });
+                    into.Add(tr with
+                    {
+                        SignalDate = day, SpyChangePct = Math.Round(spyChg, 2), Market = market,
+                        Against = s.IsTheme ? null : against.GetValueOrDefault(s.Ticker), EntryRelVol = RelVolume(list, i + 1),
+                    });
             }
+
+            List<MoverSetup> Stage(IEnumerable<MoverSetup> picks) => picks.Select(s =>
+            {
+                var i = index[s.Ticker][day];
+                var window = bars[s.Ticker].GetRange(Math.Max(0, i - 140), i - Math.Max(0, i - 140) + 1);
+                return MoversScanner.AdjustToLevels(s, KeyLevels.Compute(window, s.Close));
+            }).ToList();
         }
 
         var summary = Summarize(trades, setupCount);
+        summary["new_rules"] = Summarize(newTrades, newSetupCount);
+        // Entry-day volume stands in for the buy-time volume check; a whole day's volume is known only after the fact, so it flatters a little.
+        summary["new_rules_with_volume"] = Summarize(newTrades.Where(t => t.IsTheme || t.EntryRelVol >= minRelVolAtBuy).ToList(), newSetupCount);
+        summary["old_rules_by_trend"] = new JsonObject
+        {
+            ["with_trend"] = Stats(trades.Where(t => !t.IsTheme && t.Against is null)),
+            ["against_trend"] = Stats(trades.Where(t => t.Against is not null)),
+        };
+        var byMarket = new JsonObject();
+        foreach (var m in new[] { "up", "mixed", "down" })
+            byMarket[m] = new JsonObject { ["old_rules"] = Stats(trades.Where(t => t.Market == m)), ["new_rules"] = Stats(newTrades.Where(t => t.Market == m)) };
+        summary["by_market"] = byMarket;
         summary["config"] = new JsonObject
         {
             ["days"] = o.Days, ["hold_days"] = o.HoldDays, ["min_move"] = minMove, ["min_rel_vol"] = minRelVol, ["max_price"] = maxPrice,
             ["stop_pct"] = stopPct, ["chase_pct"] = chasePct, ["same_day_stop_pct"] = sameDayStop, ["max_setups"] = maxSetups, ["max_themes"] = maxThemes,
+            ["min_rel_vol_at_buy"] = minRelVolAtBuy,
         };
         notes.Add($"{days.Count} signal days, {setupCount} setups, {trades.Count} triggered");
+        notes.Add($"{groupOf.Count} tickers looked up for their group ({groupOf.Values.Count(v => v is null)} unknown)");
+        notes.Add($"old rules: {trades.Count} trades, avg {summary["avg_return_pct"]}%/trade, profit factor {summary["profit_factor"]} | " +
+                  $"new trend rules: {newTrades.Count} trades, avg {summary["new_rules"]?["avg_return_pct"]}%/trade, profit factor {summary["new_rules"]?["profit_factor"]} | " +
+                  $"+ volume: {summary["new_rules_with_volume"]?["trades"]} trades, avg {summary["new_rules_with_volume"]?["avg_return_pct"]}%/trade");
 
         if (o.Save) await SaveAsync(runId, days.FirstOrDefault(), days.LastOrDefault(), universe.Count, summary, trades, notes);
         return new(runId, days.FirstOrDefault(), days.LastOrDefault(), universe.Count, setupCount, trades.Count, summary, trades, notes);
@@ -194,27 +245,27 @@ public class TriggerStrategyBacktest
         return Close(last, last.Close, "end of data");
     }
 
+    public static JsonObject Stats(IEnumerable<TriggerTrade> src)
+    {
+        var t = src.ToList();
+        var wins = t.Where(x => x.ReturnPct > 0).ToList();
+        var losses = t.Where(x => x.ReturnPct <= 0).ToList();
+        var grossWin = wins.Sum(x => x.ReturnPct);
+        var grossLoss = -losses.Sum(x => x.ReturnPct);
+        return new JsonObject
+        {
+            ["trades"] = t.Count,
+            ["win_rate"] = t.Count > 0 ? Math.Round(100.0 * wins.Count / t.Count, 1) : 0,
+            ["avg_win_pct"] = wins.Count > 0 ? Math.Round(wins.Average(x => x.ReturnPct), 2) : 0,
+            ["avg_loss_pct"] = losses.Count > 0 ? Math.Round(losses.Average(x => x.ReturnPct), 2) : 0,
+            ["avg_return_pct"] = t.Count > 0 ? Math.Round(t.Average(x => x.ReturnPct), 2) : 0,
+            ["avg_r"] = t.Count > 0 ? Math.Round(t.Average(x => x.RMultiple), 2) : 0,
+            ["profit_factor"] = grossLoss > 0 ? Math.Round(grossWin / grossLoss, 2) : 0,
+        };
+    }
+
     public static JsonObject Summarize(List<TriggerTrade> trades, int setups)
     {
-        JsonObject Stats(IEnumerable<TriggerTrade> src)
-        {
-            var t = src.ToList();
-            var wins = t.Where(x => x.ReturnPct > 0).ToList();
-            var losses = t.Where(x => x.ReturnPct <= 0).ToList();
-            var grossWin = wins.Sum(x => x.ReturnPct);
-            var grossLoss = -losses.Sum(x => x.ReturnPct);
-            return new JsonObject
-            {
-                ["trades"] = t.Count,
-                ["win_rate"] = t.Count > 0 ? Math.Round(100.0 * wins.Count / t.Count, 1) : 0,
-                ["avg_win_pct"] = wins.Count > 0 ? Math.Round(wins.Average(x => x.ReturnPct), 2) : 0,
-                ["avg_loss_pct"] = losses.Count > 0 ? Math.Round(losses.Average(x => x.ReturnPct), 2) : 0,
-                ["avg_return_pct"] = t.Count > 0 ? Math.Round(t.Average(x => x.ReturnPct), 2) : 0,
-                ["avg_r"] = t.Count > 0 ? Math.Round(t.Average(x => x.RMultiple), 2) : 0,
-                ["profit_factor"] = grossLoss > 0 ? Math.Round(grossWin / grossLoss, 2) : 0,
-            };
-        }
-
         var s = Stats(trades);
         s["setups"] = setups;
         s["trigger_rate"] = setups > 0 ? Math.Round(100.0 * trades.Count / setups, 1) : 0;
@@ -235,6 +286,29 @@ public class TriggerStrategyBacktest
         // What $10 of risk per trade would have made (sizing to the stop, the way to keep losses small).
         s["pnl_risking_10_per_trade"] = Math.Round(trades.Sum(x => x.RMultiple * 10), 2);
         return s;
+    }
+
+    // Entry-day volume vs the 20 days before the signal.
+    private static double RelVolume(List<DailyBar> list, int i)
+    {
+        if (i < 21) return 0;
+        var avg = list.Skip(i - 21).Take(20).Average(b => b.Volume);
+        return avg > 0 ? Math.Round(list[i].Volume / avg, 2) : 0;
+    }
+
+    private async Task<string?> GroupEtfAsync(string ticker, Dictionary<string, string?> cache)
+    {
+        if (cache.TryGetValue(ticker, out var etf)) return etf;
+        try
+        {
+            if (_fmp.IsConfigured && await _fmp.GetProfileAsync(ticker) is { } p) etf = SectorStrength.EtfFor(p.Sector, p.Industry);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[trigger-backtest] profile lookup failed for {Ticker}", ticker);
+        }
+        cache[ticker] = etf;
+        return etf;
     }
 
     private async Task SaveAsync(Guid runId, DateTime from, DateTime to, int tickers, JsonObject summary, List<TriggerTrade> trades, List<string> notes)
