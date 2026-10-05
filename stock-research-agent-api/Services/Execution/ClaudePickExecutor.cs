@@ -29,6 +29,7 @@ public class ClaudePickExecutor
     private readonly bool _dryRunFallback;
     private bool _dryRun = true;
     private RobinhoodReadiness? _lastReadiness;
+    private readonly AlpacaBrokerAdapter _alpaca;
     private RiskContext? _risk;
     private bool _spyLoaded;
     private bool _preMarket;
@@ -37,6 +38,7 @@ public class ClaudePickExecutor
     public ClaudePickExecutor(
         SupabaseClient db,
         RobinhoodMcpBrokerAdapter broker,
+        AlpacaBrokerAdapter alpaca,
         MarketDataService marketData,
         FinnhubProvider finnhub,
         TradingCalendar tradingCalendar,
@@ -45,6 +47,7 @@ public class ClaudePickExecutor
     {
         _db = db;
         _broker = broker;
+        _alpaca = alpaca;
         _marketData = marketData;
         _finnhub = finnhub;
         _tradingCalendar = tradingCalendar;
@@ -533,7 +536,7 @@ public class ClaudePickExecutor
     // ── Trigger entries (StockedUp style): "buy ORCL only if it breaks above 140".
 
     private sealed record TriggerConfig(bool Enabled, double MaxChasePct, TimeSpan CutoffEt,
-        double ConfirmSeconds, double SpyGatePct, double MaxSpreadPct, HashSet<string> InverseEtfs);
+        double ConfirmSeconds, double SpyGatePct, double MaxSpreadPct, HashSet<string> InverseEtfs, double MinRelVolume);
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> FirstSeenBreak = new();
 
@@ -549,7 +552,8 @@ public class ClaudePickExecutor
         var inverse = (await GetDbConfigStringAsync("inverse_etfs", "SPXS,SQQQ,UVXY,SPXU,SDS,SH,PSQ,VXX"))
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(t => t.ToUpperInvariant()).ToHashSet();
-        return new TriggerConfig(enabled, chase, cutoff, confirm, spyGate, spread, inverse);
+        var minRelVol = await GetDbConfigNumberAsync("trigger_min_rel_volume", 1.2);
+        return new TriggerConfig(enabled, chase, cutoff, confirm, spyGate, spread, inverse, minRelVol);
     }
 
     private static DateTime NowEastern()
@@ -595,6 +599,7 @@ public class ClaudePickExecutor
                 if (held < cfg.ConfirmSeconds)
                     return $"{p.Ticker}: waiting — broke {side} ${trigger:F2} (${price:F2}), confirming it holds ({held:F0}/{cfg.ConfirmSeconds:0}s)";
             }
+            if (await VolumeGateAsync(p, cfg) is { } volumeWait) return volumeWait;
         }
 
         if (await SpyGateAsync(p, cfg, canTalkToBroker, ct) is { } spyWait) return spyWait;
@@ -610,6 +615,44 @@ public class ClaudePickExecutor
             });
         _logger.LogInformation("[pick-executor] {Ticker} ({Id}) trigger hit: ${Price} {Side} ${Trigger}", p.Ticker, p.Id, price, side, trigger);
         return _dryRun ? $"{p.Ticker}: dry-run — trigger hit (${price:F2} {side} ${trigger:F2}), would buy now" : null;
+    }
+
+    // A real breakout comes on heavy volume (Minervini: 40-50% above normal); TEVA broke $40 on 10/5 at 0.4x and faded.
+    private async Task<string?> VolumeGateAsync(PickFields p, TriggerConfig cfg)
+    {
+        if (cfg.MinRelVolume <= 0 || _preMarket || !_alpaca.IsConfigured) return null;
+        var now = NowEastern();
+        var open = now.Date.AddHours(9.5);
+        if (now < open) return null;
+        try
+        {
+            // One call, one data feed for both today's volume and the 20-day average.
+            var bars = await _alpaca.GetDailyBarsAsync([p.Ticker], 45);
+            if (!bars.TryGetValue(p.Ticker, out var b) || b.Count < 11 || b[^1].Date.Date != now.Date) return null;
+            var avg = b.Take(b.Count - 1).TakeLast(20).Average(x => x.Volume);
+            var pace = RelVolumePace(b[^1].Volume, avg, (now - open).TotalMinutes);
+            return pace < cfg.MinRelVolume
+                ? $"{p.Ticker}: waiting — volume {pace:F1}x normal for this time of day; a breakout needs {cfg.MinRelVolume:0.0}x+ (trigger_min_rel_volume)"
+                : null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[pick-executor] volume check failed for {Ticker} — not blocking", p.Ticker);
+            return null;
+        }
+    }
+
+    // Typical share of a day's volume done N minutes after the open (U-shaped: busy open and close).
+    private static readonly (double Min, double Frac)[] VolumeCurve =
+        [(0, 0), (30, 0.15), (60, 0.25), (120, 0.40), (180, 0.52), (240, 0.63), (300, 0.74), (360, 0.87), (390, 1.0)];
+
+    public static double RelVolumePace(double volumeSoFar, double avgDailyVolume, double minutesSinceOpen)
+    {
+        if (avgDailyVolume <= 0) return 0;
+        var m = Math.Clamp(minutesSinceOpen, 0, 390);
+        var i = Array.FindIndex(VolumeCurve, c => c.Min >= m);
+        var frac = i <= 0 ? 0 : VolumeCurve[i - 1].Frac + (VolumeCurve[i].Frac - VolumeCurve[i - 1].Frac) * (m - VolumeCurve[i - 1].Min) / (VolumeCurve[i].Min - VolumeCurve[i - 1].Min);
+        return volumeSoFar / (avgDailyVolume * Math.Max(frac, 0.05));
     }
 
     // Don't buy calls into a falling market (or puts into a rising one), even if the stock itself broke its level.

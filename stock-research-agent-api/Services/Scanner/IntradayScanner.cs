@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Services.Broker;
 using StockResearchAgent.Api.Services.Calendar;
 using StockResearchAgent.Api.Services.Supabase;
+using StockResearchAgent.Api.Services.UniverseDiscovery;
 using static StockResearchAgent.Api.Services.Broker.AlpacaBrokerAdapter;
 
 namespace StockResearchAgent.Api.Services.Scanner;
@@ -33,9 +34,12 @@ public class IntradayScanner
     private readonly ILogger<IntradayScanner> _logger;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
 
-    public IntradayScanner(AlpacaBrokerAdapter alpaca, SupabaseClient db, TradingCalendar calendar, ILogger<IntradayScanner> logger)
+    private readonly FmpClient _fmp;
+
+    public IntradayScanner(AlpacaBrokerAdapter alpaca, FmpClient fmp, SupabaseClient db, TradingCalendar calendar, ILogger<IntradayScanner> logger)
     {
         _alpaca = alpaca;
+        _fmp = fmp;
         _db = db;
         _calendar = calendar;
         _logger = logger;
@@ -87,7 +91,7 @@ public class IntradayScanner
             .Select(x => $"{x.t} {x.chg:+0.0;-0.0}%")
             .ToList();
 
-        var daily = await _alpaca.GetDailyBarsAsync(universe, 200);
+        var daily = await _alpaca.GetDailyBarsAsync(universe.Append("SPY").ToList(), 200);
         var openUtc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(open, DateTimeKind.Unspecified), Eastern);
         var opening = await _alpaca.GetIntradayBarsAsync(universe, "30Min", openUtc);
         var elapsed = Math.Clamp((now - open).TotalMinutes / 390.0, 0.05, 1);
@@ -109,6 +113,24 @@ public class IntradayScanner
             setups.Add(setup with { Route = route });
         }
 
+        if (await NumberAsync("trend_filter_enabled", 1) >= 1 && setups.Count > 0)
+        {
+            var market = daily.TryGetValue("SPY", out var spyDaily) ? TrendRules.Market(spyDaily.Where(b => b.Date < today).ToList()) : "unknown";
+            var groups = await TrendRules.LoadGroupsAsync(_db);
+            var kept = new List<IntradaySetup>();
+            foreach (var s in setups)
+            {
+                TrendRules.Group? g = null;
+                if (s.Direction == "bullish" && groups.Count > 0 && await _fmp.GetProfileAsync(s.Ticker) is { } prof
+                    && SectorStrength.EtfFor(prof.Sector, prof.Industry) is { } etf)
+                    g = groups.FirstOrDefault(x => x.Etf == etf);
+                // Intraday shorts already need to be 1.5+ points weaker than SPY, which is the relative weakness the rule asks for.
+                var why = TrendRules.Check(s.Direction, market, g?.Grp, g?.AboveSma20 ?? false, relativeWeakness: s.Direction == "bearish");
+                if (why is null) kept.Add(g is null ? s : s with { Why = $"{s.Why}, group {g.Name} ({g.Grp})" });
+                else notes.Add($"{s.Ticker} skipped: {why}");
+            }
+            setups = kept;
+        }
         setups = setups.OrderByDescending(x => x.Rank).ToList();
         var already = (await _db.SelectAsync(Table, filter: $"pick_date=eq.{today:yyyy-MM-dd}", select: "ticker"))
             .Select(r => r["ticker"]?.ToString()?.ToUpperInvariant()).ToHashSet();

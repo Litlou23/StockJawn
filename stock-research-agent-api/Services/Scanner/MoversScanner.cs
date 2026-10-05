@@ -109,7 +109,10 @@ public class MoversScanner
             var setup = Evaluate(ticker, b, today, minMove, minRelVol, minPrice, maxPrice, stopPct, maxTriggerDist, maxMove);
             if (setup is not null) setups.Add(spy is null ? setup : ApplyRelativeStrength(setup, b[^1], spy));
         }
-        setups = await ApplySectorAsync(setups.OrderByDescending(s => s.Rank).Take(maxSetups * 2).ToList(), sectors, leaders);
+        var market = spyBars is { Count: > 0 } ? TrendRules.Market(spyBars) : "unknown";
+        var trendFilter = await NumberAsync("trend_filter_enabled", 1) >= 1;
+        notes.Add($"market trend: {market} (SPY vs its 20/50-day averages)");
+        setups = await ApplySectorAsync(setups.OrderByDescending(s => s.Rank).Take(maxSetups * 3).ToList(), sectors, leaders, market, trendFilter, notes);
         setups = setups.OrderByDescending(s => s.Rank).Take(maxSetups).ToList();
         if (setups.Count > 0) setups = await AttachNewsAsync(setups, today);
 
@@ -161,15 +164,26 @@ public class MoversScanner
     }
 
     // Bullish setups in leading groups rank higher, in lagging groups lower (mirror for bearish).
-    private async Task<List<MoverSetup>> ApplySectorAsync(List<MoverSetup> setups, List<SectorRank> sectors, List<SectorLeader> leaders)
+    private async Task<List<MoverSetup>> ApplySectorAsync(List<MoverSetup> setups, List<SectorRank> sectors, List<SectorLeader> leaders,
+        string market, bool trendFilter, List<string> notes)
     {
-        if (sectors.Count == 0) return setups;
         var result = new List<MoverSetup>();
+        var dropped = new List<string>();
         foreach (var s in setups)
         {
-            var etf = leaders.FirstOrDefault(l => l.Ticker == s.Ticker)?.Etf;
-            if (etf is null && await _fmp.GetProfileAsync(s.Ticker) is { } p) etf = SectorStrength.EtfFor(p.Sector, p.Industry);
-            var sec = etf is null ? null : sectors.FirstOrDefault(x => x.Etf == etf);
+            SectorRank? sec = null;
+            if (sectors.Count > 0)
+            {
+                var etf = leaders.FirstOrDefault(l => l.Ticker == s.Ticker)?.Etf;
+                if (etf is null && await _fmp.GetProfileAsync(s.Ticker) is { } p) etf = SectorStrength.EtfFor(p.Sector, p.Industry);
+                sec = etf is null ? null : sectors.FirstOrDefault(x => x.Etf == etf);
+            }
+            var why = TrendRules.Check(s.Direction, market, sec?.Group, sec?.AboveSma20 ?? false, s.Pattern.Contains("weak while SPY held up"));
+            if (trendFilter && why is not null)
+            {
+                dropped.Add($"{s.Ticker} ({why})");
+                continue;
+            }
             if (sec is null || sec.Group == "middle")
             {
                 result.Add(sec is null ? s : s with { Pattern = $"{s.Pattern}, group {sec.Name} {sec.Ret1m:+0.0;-0.0}% 1m" });
@@ -182,6 +196,7 @@ public class MoversScanner
                 Pattern = $"{s.Pattern}, in a {sec.Group} group ({sec.Name} {sec.Ret1m:+0.0;-0.0}% 1m){(withTrend ? "" : " — against the trend")}",
             });
         }
+        if (dropped.Count > 0) notes.Add($"dropped {dropped.Count} against the trend: {string.Join("; ", dropped.Take(8))}");
         return result;
     }
 

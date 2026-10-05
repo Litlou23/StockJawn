@@ -49,8 +49,9 @@ Each row already has the move, volume, pattern (closed at the high/low, new 20-d
   `scan_max_price` with a setup of their own. Keep the ETF row only if it's the cleaner trade (options on it fit the budget).
 - **Which groups lead** (StockJawn ranks them at 4:30 PM):
   `SELECT name, etf, ret_1m, rs_1m, grp, leaders FROM sector_strength WHERE trade_date = (SELECT max(trade_date) FROM sector_strength) ORDER BY rank;`
-  Prefer bullish candidates in "leading" groups and bearish ones in "lagging" groups; drop or flag the rest
-  ("against the trend"). The `leaders` list (affordable stocks in the top 2 groups) are candidates even without a big move.
+  Trade with the trend: bullish only when the market isn't in a downtrend (SPY below its 20- and 50-day averages) AND
+  the group is "leading" (or "middle" above its 20-day); bearish when the market is down, the group is "lagging", or the
+  stock is clearly weaker than SPY. Drop the rest unless a big catalyst from the last 1-2 days says otherwise ("against the trend"). The `leaders` list (affordable stocks in the top 2 groups) are candidates even without a big move.
 - The nightly job only inserts `research` rows — never `pending` (the morning job makes fresh pending rows).
 - **Today's misses** (StockJawn logs them at 4:15 PM): big movers we never had. Any that closed near its high/low
   and is setting up for a continuation tomorrow is a candidate, same checks as the SCANNER rows:
@@ -164,7 +165,7 @@ The morning task re-checks them with pre-market prices.
 - Trigger within 4% of the close, stop just back through it, target a real level, reward/risk ≥ 1.5
 - Draft `exit_by_date` = 2 trading days after tomorrow (inverse ETFs: 1)
 - Good for a 1–2 day hold: we can't sell the same day unless it's a big loss (PDT), so skip names reporting earnings before tomorrow's close
-  and prefer options at least 7 days out
+  and prefer shares; options only at $0.50+, spread under 10%, 14+ days out
 - Skip candidates that fail — a short clean list beats a long messy one
 
 ## HARD FILTER: NO VAGUE CATALYSTS

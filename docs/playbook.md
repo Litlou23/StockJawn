@@ -91,6 +91,16 @@ from trigger/stop/target (flags < `pick_check_min_rr` 1.5, levels on the wrong s
 `pick_check_stale_days` 7 → flagged). Writes `check_flags` (problems) and `check_summary` (R:R, price vs trigger). New
 problems on a pending row → phone alert. Manual: `POST /api/jobs/check-picks?write=false`. Off: `pick_check_enabled` = 0.
 
+### Trade with the trend (10/5)
+`TrendRules`: market = SPY vs its 20/50-day averages (up / mixed / down). Buy-side setups need a market that isn't down and a
+leading group (or a middle group above its 20-day; unknown group only in an up market). Puts need a down market, a lagging
+group, or a stock weaker than SPY. Movers scan drops the rest (listed in its notes), the market-hours scan skips them, and the
+news scan sends them to Lenny as research instead of pending. Off: `trend_filter_enabled` = 0.
+Why: the 1-year trigger backtest (2,096 trades) had bullish setups at breakeven and "closed near the high" at 0.00%/trade,
+while relative weakness made +0.79%/trade; O'Neil (3 of 4 stocks follow the market), Minervini (breakouts need 40-50% above
+normal volume) and retail-options research (call buyers lose 5-9% a trade) point the same way. Shares first; options only at
+$0.50+, spread under 10%, 14+ days.
+
 ### Group leadership + affordable leaders
 The 4:30 PM scan ranks `sector_etfs` (SPDR sectors + SMH, XBI, KRE, ITB, JETS, GLD, SLV, URA, TAN, XME) by 1-month return vs
 SPY → `sector_strength` (top 3 beating SPY = leading, bottom 3 lagging SPY = lagging). Each setup's group comes from the
@@ -122,9 +132,11 @@ during market hours). `alert_log` stops repeats across restarts. `trade_alerts_e
 
 ### Buy-time checks (every 30s, before any order)
 - Break must hold `trigger_confirm_seconds` (60s) — pokes that fade back don't buy.
+- Volume: the break only buys when volume is running `trigger_min_rel_volume` (1.2x) of normal for that time of day
+  (U-shaped intraday curve; Alpaca daily bars). Skipped before 9:30. TEVA broke $40 on 10/5 at 0.4x and faded.
 - SPY gate: no calls/shares while SPY is down `spy_gate_pct` (1%) today; no puts/inverse ETFs (`inverse_etfs`) while SPY is up 1%.
-- Option spread must be under `options_max_spread_pct` (20%) of the ask.
-- Earnings during the hold (`block_earnings_during_hold`) and contracts under `options_min_days_to_expiry` (7) are refused.
+- Option spread must be under `options_max_spread_pct` (10%) of the ask; asks under `options_min_contract_price` ($0.50) are refused.
+- Earnings during the hold (`block_earnings_during_hold`) and contracts under `options_min_days_to_expiry` (14) are refused.
 All of these wait (except earnings/expiry, which fail the pick). Set any number to 0 to switch it off.
 
 ### Day-trade (PDT) guard

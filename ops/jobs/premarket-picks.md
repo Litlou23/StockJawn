@@ -19,7 +19,8 @@ Supabase MCP execute_sql (project_id: pizoqybgkdhfvxrmnhvx), WebSearch.
 - Waits until the stock breaks `trigger_price`, and the break has to hold for 60 seconds.
 - Won't chase: skips the buy if the stock is already more than 3% past the trigger. Unbroken triggers expire at 3:30 PM ET.
 - SPY gate: no calls/shares while SPY is down 1%+ today; no puts/inverse ETFs while SPY is up 1%+.
-- Refuses option spreads over 20%, contracts expiring in under 7 days, and any pick that reports earnings during the hold
+- Waits for volume: a trigger break only buys when volume is running 1.2x+ normal for that time of day (`trigger_min_rel_volume`).
+- Refuses option spreads over 10%, asks under $0.50, contracts expiring in under 14 days, and any pick that reports earnings during the hold
   (unless it's flagged `earnings_play`, max 1 open).
 - Sizes to its risk limits (per-trade $ cap, 40% position cap, buying power). With 3 picks approved, only the first ones
   that trigger get funded — the rest fail "can't afford". That's fine.
@@ -57,11 +58,14 @@ Before the open, its news scan (8:45 and 9:15, rows tagged "NEWS GAP AM") stages
 StockJawn ranks the groups every evening by 1-month return vs SPY:
 `SELECT etf, name, ret_1w, ret_1m, rs_1m, above_sma20, grp, leaders FROM sector_strength
  WHERE trade_date = (SELECT max(trade_date) FROM sector_strength) ORDER BY rank;`
-- **Calls / shares only in "leading" groups** (or "middle" groups above their 20-day average). Puts only in "lagging" groups.
-  A pick against the group's trend needs a big dated catalyst and says so in notes. SCANNER rows already carry
-  "in a leading group" / "against the trend" tags.
+- **Trade with the trend** (O'Neil: 3 of 4 stocks follow the market; our 1-year backtest: breakouts against the trend
+  broke even). Market = SPY vs its 20- and 50-day averages: above both = up, below both = down.
+  - Calls/shares: market NOT down, and the group is "leading" (or "middle" above its 20-day).
+  - Puts: market down, OR a "lagging" group, OR a stock clearly weaker than SPY.
+  - Against the trend only with a big dated catalyst from the last 1-2 days, and say so in notes. StockJawn's scanners
+    already drop or tag these ("against the trend") — don't promote them without that catalyst.
 - `leaders` = affordable stocks (one buy fits: `max_position_pct` of the account, capped by `risk_max_trade_dollars`) in the top 2 groups that beat SPY this month. When the
-  group's leaders are too expensive for an option over $0.20, buy shares of one of these instead.
+  group's leaders are too expensive for an option over $0.50, buy shares of one of these instead.
 - Late Sep/early Oct: chips +14.6% for the month, while our calls were in consumer, EV, fintech and crypto (all falling).
 
 ## Step 3 — Market read (their SPY segment)
@@ -114,12 +118,13 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
 Macro chains count when the event is dated and the cheat sheet shows the link (e.g. "oil +4% on 9/27 → cruise lines hurt").
 
 **Confirmation:** 2+ of trend (EMA/SMA), RSI, MACD, volume, support/resistance. A real trigger level counts as one.
+Volume matters most for breakouts (Minervini: 40-50% above normal) — skip names trading below normal volume.
 
 **What to buy:**
-1. Option first — calls for bullish, puts for bearish. Premium within budget and at least $0.20 (StockJawn refuses cheaper
-   contracts — they lose to the spread and time decay), spread under 20% of the ask,
-   expiration at least 7 days out (and 7+ days past any earnings date for an earnings play). 1+ whole contracts.
-2. No affordable option → shares (whole shares within budget, stock at or above the min price). Never regular shares on a red day.
+1. Shares first when one whole share fits the budget (stock at or above the min price). Never regular shares on a red day.
+   Research: retail call buyers lose 5-9% per trade on average; our real losses (CCL, NIO) were cheap calls.
+2. Option only when shares don't fit — calls for bullish, puts for bearish. Ask at least $0.50, spread under 10% of the ask,
+   expiration at least 14 days out (and 14+ days past any earnings date for an earnings play). 1+ whole contracts.
 3. Bearish day and no affordable put → an inverse ETF: SPXS (3x short S&P), SQQQ (3x short Nasdaq), or UVXY (only when SPY is
    breaking a support — it fades fast). Log it as a bullish share pick on the ETF: trigger above the ETF's pre-market/yesterday's high,
    levels on the ETF's price, `exit_by_date` = next trading day.
@@ -138,7 +143,7 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
 - It's still a trigger setup: trigger above yesterday's high, stop ~3% back, target 2x the risk or the prior high.
 - `exit_by_date` = the report date if it reports after the close, otherwise the trading day before. StockJawn sells that
   morning, so we never hold through the report (no `earnings_play` flag needed). Notes start with "RUN-UP:".
-- Options are fine here (7+ days out) — rising option prices before earnings help us; we're out before they collapse.
+- Options are fine here (14+ days out) — rising option prices before earnings help us; we're out before they collapse.
 
 **Earnings — two ways, both allowed:**
 - **Reaction play (default):** the report is already out (yesterday after close or this morning). Trade the move with a trigger at the
@@ -158,7 +163,7 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
 2. Not already broken (above → current price still below the trigger; below → still above it) and within 4% of the current price.
 3. `level_stop` just back through the trigger; `level_target` a real level; reward/risk ≥ 1.5.
 4. Shares: `stop_price` = level_stop, `target_price` = level_target.
-   Options: `option_contract_id` (Robinhood instrument UUID), `option_strike`, `option_expiration` ≥ 7 days, `order_quantity` = contracts,
+   Options: `option_contract_id` (Robinhood instrument UUID), `option_strike`, `option_expiration` ≥ 14 days, `order_quantity` = contracts,
    `stop_price` = 50% of premium, `target_price` = 2× premium.
 5. No earnings before `exit_by_date` — unless it's an earnings play with `earnings_play = true`.
 6. Agrees with the SPY bias and market health (or is a dated news setup).
@@ -203,7 +208,8 @@ Don't sit on dead money — if yesterday's pick is flat and today has a clear wi
 
 ## Hard rules
 - Every pick is a trigger setup (trigger + target + stop, reward/risk ≥ 1.5). No trigger = no pick. Don't move triggers to "make sure" they fill.
-- Options first, shares second, inverse ETF on red days, CASH last. Max 40% of buying power per pick.
+- Trade with the trend. Shares first (when one fits), options second ($0.50+, spread under 10%, 14+ days), inverse ETF on red days,
+  CASH last. Max 40% of buying power per pick.
 - No SPACs, no stocks under $1 or under the min price, no stocks with zero analyst coverage.
 - FOMC day = CASH. No regular shares on a red day.
 - Research and log only. Never place orders.

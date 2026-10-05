@@ -13,7 +13,7 @@ namespace StockResearchAgent.Api.Services.Scanner;
 public record NewsGap(
     string Ticker, string Direction, double RefClose, double Last, double GapPct, double ExtHigh, double ExtLow,
     double ExtDollarVolume, double ExtVolRatio, string Headline, string HeadlineTime,
-    double Trigger, double Stop, double Target, string Route, string? Skip, double Rank);
+    double Trigger, double Stop, double Target, string Route, string? Skip, double Rank, string? Trend = null);
 
 public record NewsGapResult(string Mode, DateTime ScanTimeEt, string PickDate, int Headlines, int Candidates,
     List<NewsGap> Picks, List<NewsGap> Skipped, List<string> Notes);
@@ -135,8 +135,26 @@ public class NewsGapScanner
 
         var picks = all.Where(x => x.Skip is null).OrderByDescending(x => x.Rank).ToList();
         var skipped = all.Where(x => x.Skip is not null).OrderByDescending(x => Math.Abs(x.GapPct)).ToList();
+        var market = "unknown";
+        if (picks.Count > 0 && await NumberAsync("trend_filter_enabled", 1) >= 1)
+        {
+            var spyDaily = await _alpaca.GetDailyBarsAsync(["SPY"], 120);
+            market = spyDaily.TryGetValue("SPY", out var sb) ? TrendRules.Market(sb.Where(b => b.Date.Date <= refDay).ToList()) : "unknown";
+            var groups = await TrendRules.LoadGroupsAsync(_db);
+            var checkedPicks = new List<NewsGap>();
+            foreach (var p in picks)
+            {
+                TrendRules.Group? g = null;
+                if (p.Direction == "bullish" && groups.Count > 0 && _fmp.IsConfigured && await _fmp.GetProfileAsync(p.Ticker) is { } prof
+                    && SectorStrength.EtfFor(prof.Sector, prof.Industry) is { } etf)
+                    g = groups.FirstOrDefault(x => x.Etf == etf);
+                // A drop on bad news is itself the weakness puts need.
+                checkedPicks.Add(p with { Trend = TrendRules.Check(p.Direction, market, g?.Grp, g?.AboveSma20 ?? false, relativeWeakness: p.Direction == "bearish") });
+            }
+            picks = checkedPicks;
+        }
         notes.Add($"{mode} scan vs the {refDay:M/d} close: {headlines.Count} tickers in the news, {moves.Count} moving {minGap:F0}%+, " +
-                  $"{picks.Count} setups, {skipped.Count} skipped; shares up to ${maxShare:F2} ({budget.Why})");
+                  $"{picks.Count} setups, {skipped.Count} skipped; shares up to ${maxShare:F2} ({budget.Why}); market {market}");
 
         if (write)
         {
@@ -202,8 +220,9 @@ public class NewsGapScanner
         var mine = rows.Where(r => r["notes"]?.ToString()?.StartsWith(MorningPrefix) == true).ToList();
         // Shares and option ideas get separate caps so a put idea for Lenny doesn't crowd out a buy Lou can approve.
         var fresh = picks.Where(x => !taken.Contains(x.Ticker) && !mine.Any(r => r["ticker"]?.ToString() == x.Ticker)).ToList();
-        var staged = fresh.Where(x => x.Route == "shares").Take(Math.Max(0, maxPicks - mine.Count(r => r["approval_status"]?.ToString() != "research")))
-            .Concat(fresh.Where(x => x.Route == "option").Take(Math.Max(0, maxPicks - mine.Count(r => r["approval_status"]?.ToString() == "research"))))
+        var staged = fresh.Where(x => x.Route == "shares" && x.Trend is null).Take(Math.Max(0, maxPicks - mine.Count(r => r["approval_status"]?.ToString() != "research")))
+            .Concat(fresh.Where(x => x.Route == "option" || (x.Route == "shares" && x.Trend is not null))
+                .Take(Math.Max(0, maxPicks - mine.Count(r => r["approval_status"]?.ToString() == "research"))))
             .ToList();
         if (staged.Count == 0)
         {
@@ -212,9 +231,9 @@ public class NewsGapScanner
         }
 
         await _db.InsertAsync(Table, await RowsAsync(staged, now, pd, pickDate, MorningPrefix, morning: true), returnRows: false);
-        notes.Add($"wrote {staged.Count} picks ({staged.Count(x => x.Route == "shares")} pending shares, {staged.Count(x => x.Route != "shares")} research for an option)");
+        notes.Add($"wrote {staged.Count} picks ({staged.Count(x => x.Route == "shares" && x.Trend is null)} pending shares, {staged.Count(x => x.Route != "shares" || x.Trend is not null)} research for Lenny)");
 
-        var forLenny = staged.Where(x => x.Route == "option").ToList();
+        var forLenny = staged.Where(x => x.Route != "shares" || x.Trend is not null).ToList();
         if (forLenny.Count > 0)
         {
             try
@@ -224,8 +243,8 @@ public class NewsGapScanner
                     ["sender"] = "StockJawn",
                     ["recipient"] = "Lenny",
                     ["topic"] = $"Premarket news scan {now:h:mm}: contract needed?",
-                    ["body"] = "Gapping on news before the open; these need an option (puts for the drops, calls where shares are over the per-trade cap): " +
-                               string.Join("; ", forLenny.Select(x => $"{x.Ticker} {x.GapPct:+0.0;-0.0}% ({x.Headline}) {(x.Direction == "bullish" ? "above" : "below")} ${x.Trigger:F2}, stop ${x.Stop:F2}, target ${x.Target:F2}")) +
+                    ["body"] = "Gapping on news before the open; these need your call (puts for the drops, calls where shares are over the cap, or buys that fight the trend): " +
+                               string.Join("; ", forLenny.Select(x => $"{x.Ticker} {x.GapPct:+0.0;-0.0}% ({x.Headline}) {(x.Direction == "bullish" ? "above" : "below")} ${x.Trigger:F2}, stop ${x.Stop:F2}, target ${x.Target:F2}{(x.Trend is null ? "" : $" [against the trend: {x.Trend}]")}")) +
                                ". If one is worth it, pick the option contract (ask $0.20 or more) and INSERT a new pending row with it; " +
                                "don't update the research row, because the 2-hour approval window counts from when a row was created.",
                 }, returnRows: false);
@@ -255,7 +274,7 @@ public class NewsGapScanner
                 ["ticker"] = s.Ticker,
                 ["direction"] = s.Direction,
                 ["conviction"] = "medium",
-                ["approval_status"] = morning && s.Route == "shares" ? "pending" : "research",
+                ["approval_status"] = morning && s.Route == "shares" && s.Trend is null ? "pending" : "research",
                 ["order_type"] = "stock",
                 ["entry_price"] = s.Last,
                 ["current_price"] = s.Last,
@@ -268,7 +287,8 @@ public class NewsGapScanner
                 ["exit_by_date"] = exitBy,
                 ["total_score"] = 60,
                 ["catalyst"] = Trim(s.Headline, 200),
-                ["notes"] = $"{prefix} {now:M/d h:mm}: {s.Ticker} {why} → {how} {side} ${s.Trigger:F2}, target ${s.Target:F2}, out ${s.Stop:F2}",
+                ["notes"] = $"{prefix} {now:M/d h:mm}: {s.Ticker} {why} → {how} {side} ${s.Trigger:F2}, target ${s.Target:F2}, out ${s.Stop:F2}" +
+                            (s.Trend is null ? "" : $" — against the trend: {s.Trend}"),
             };
         }).ToList();
     }
@@ -279,7 +299,7 @@ public class NewsGapScanner
         foreach (var s in written)
         {
             var side = s.Direction == "bullish" ? "above" : "below";
-            lines.Add(mode == "morning" && s.Route == "shares"
+            lines.Add(mode == "morning" && s.Route == "shares" && s.Trend is null
                 ? $"APPROVE: {s.Ticker} shares {side} ${s.Trigger:F2} (stop ${s.Stop:F2}, target ${s.Target:F2}) {s.GapPct:+0.0;-0.0}% - {Trim(s.Headline, 70)}"
                 : $"{s.Ticker} {s.GapPct:+0.0;-0.0}% {side} ${s.Trigger:F2} - {Trim(s.Headline, 70)}");
         }
