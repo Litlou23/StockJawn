@@ -59,8 +59,8 @@ public class IntradayScanner
         var minRelVol = await NumberAsync("intraday_min_rel_volume", 1.5);
         var maxPicks = (int)await NumberAsync("intraday_max_picks", 2);
         var minPrice = await NumberAsync("risk_min_stock_price", 4);
-        var maxPrice = await NumberAsync("scan_max_price", 100);
-        var maxTrade = await NumberAsync("risk_max_trade_dollars", 80);
+        var maxTrade = (await ScanBudget.LoadAsync(_db)).MaxSharePrice;
+        var maxPrice = Math.Max(await NumberAsync("scan_max_price", 100), maxTrade);
         var themes = (await StringAsync("scan_theme_etfs", DefaultThemes))
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList();
 

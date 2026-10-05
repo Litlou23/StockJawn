@@ -117,6 +117,17 @@ public class ExecutionJobsController : ControllerBase
         return Ok(await scope.ServiceProvider.GetRequiredService<IntradayScanner>().ScanAsync(write, ct));
     }
 
+    // Stocks gapping on news outside market hours. mode=night|morning (default by clock); ?write=false previews.
+    [HttpPost("api/jobs/scan-news")]
+    public async Task<IActionResult> ScanNews([FromQuery] string? mode = null, [FromQuery] bool write = false, CancellationToken ct = default)
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+
+        using var scope = _scopeFactory.CreateScope();
+        return Ok(await scope.ServiceProvider.GetRequiredService<NewsGapScanner>().ScanAsync(mode, write, ct));
+    }
+
     // "What did we miss" report for today. ?write=false previews without saving to missed_movers.
     [HttpPost("api/jobs/missed-movers")]
     public async Task<IActionResult> MissedMovers([FromQuery] bool write = false, CancellationToken ct = default)

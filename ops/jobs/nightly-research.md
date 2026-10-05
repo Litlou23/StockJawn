@@ -55,6 +55,10 @@ Each row already has the move, volume, pattern (closed at the high/low, new 20-d
 - **Today's misses** (StockJawn logs them at 4:15 PM): big movers we never had. Any that closed near its high/low
   and is setting up for a continuation tomorrow is a candidate, same checks as the SCANNER rows:
   `SELECT ticker, change_pct, price, reasons FROM missed_movers WHERE trade_date = (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date AND our_status IS NULL;`
+- **After-hours news** (StockJawn scans at 5:30 and 7:30 PM): rows tagged "NEWS GAP PM" for the same pick_date
+  (`notes LIKE 'NEWS GAP PM%'`) are stocks moving 3%+ after the close on news (earnings, upgrades, guidance), trigger =
+  the after-hours high (low for drops). Buyouts, 20%+ jumps and thin trading are already filtered out. Check the story like
+  a SCANNER row. The 8:45 AM scan re-checks them against the premarket and stages the ones still holding.
 For each one:
 1. Find the WHY (WebSearch the ticker + today's date): upgrade, contract, guidance, earnings, sector news. Put it in `catalyst`.
 2. **Group themes:** several names from one industry moving together (e.g. 5 mortgage insurers all -7%) is ONE idea —
@@ -186,7 +190,9 @@ WHERE EXTRACT(DOW FROM d) NOT IN (0, 6)  -- skip weekends
 ORDER BY d LIMIT 1)
 ```
 
-**IMPORTANT:** This task runs at 9 PM ET, which is past midnight UTC. Use `(CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date` instead of `CURRENT_DATE` everywhere — otherwise dates are off by one. The subquery above handles weekends and holidays (e.g. Thanksgiving, Christmas) so the pick_date always lands on a real trading day.
+**IMPORTANT:** This task normally runs at 9 PM ET, which is past midnight UTC. Use `(CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date` instead of `CURRENT_DATE` everywhere — otherwise dates are off by one. The subquery above handles weekends and holidays (e.g. Thanksgiving, Christmas) so the pick_date always lands on a real trading day.
+
+**DATE EDGE CASE:** If this task runs after midnight ET but before 9:30 AM ET (e.g. a retry or manual run), and today is a trading day (weekday, not a holiday), then "tomorrow" is actually today — use today's date as pick_date instead of tomorrow's. Check: `EXTRACT(HOUR FROM CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') < 10` → the +1 in the generate_series start should be +0.
 
 Clean up old research rows first:
 ```sql

@@ -129,13 +129,13 @@ public class MoversScanner
         return new(today, pickDate, universe.Count, setups, notes);
     }
 
-    // For the top 2 leading groups: liquid stocks under affordable_max_price beating SPY over the month and above their
+    // For the top 2 leading groups: liquid stocks a single buy can afford, beating SPY over the month and above their
     // 20-day average, so the trend can be owned with shares instead of a $0.10 option.
     private async Task<List<SectorLeader>> FindAffordableLeadersAsync(List<SectorRank> sectors, Dictionary<string, List<DailyBar>> bars, double minPrice, List<string> notes)
     {
         var result = new List<SectorLeader>();
         if (!_fmp.IsConfigured || !bars.TryGetValue("SPY", out var spy) || spy.Count < 22) return result;
-        var maxPx = await NumberAsync("affordable_max_price", 60);
+        var maxPx = (await ScanBudget.LoadAsync(_db)).MaxSharePrice;
         var spy1m = SectorStrength.Ret(spy, 21);
         foreach (var s in sectors.Where(x => x.Group == "leading").Take(2))
         {

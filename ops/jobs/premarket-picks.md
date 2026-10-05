@@ -3,7 +3,7 @@ name: premarket-picks
 description: Before the open, finds up to 3 StockedUp-style trigger setups ("buy only if X breaks $Y"), checks them, and logs them for Lou to approve.
 schedule: "8 8 * * 1-5"
 schedule_human: "8:08 AM Mon-Fri"
-status: DISABLED
+status: ENABLED
 last_run: "2026-09-30"
 ---
 
@@ -51,6 +51,7 @@ theme ETFs (SMH, XLF, KRE, XLE, USO, XBI, GLD...). Pick from the sectors already
 and write the actual numbers in the catalyst ("jobs +29K vs 84K est, 10-yr yield -8bp, SMH +1.9% pre-market").
 On 10/2 we bet "strong jobs → fintech" on a weak report; chips (+2.8%) and TSLA (+5%) led and we had neither.
 StockJawn also runs a market-hours scan at 10:00 and 11:30 (rows tagged "INTRADAY"), so a slow open isn't the last chance.
+Before the open, its news scan (8:45 and 9:15, rows tagged "NEWS GAP AM") stages stocks gapping 3%+ on news since yesterday's close.
 
 ## Step 2c — Go with the leaders
 StockJawn ranks the groups every evening by 1-month return vs SPY:
@@ -59,7 +60,7 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
 - **Calls / shares only in "leading" groups** (or "middle" groups above their 20-day average). Puts only in "lagging" groups.
   A pick against the group's trend needs a big dated catalyst and says so in notes. SCANNER rows already carry
   "in a leading group" / "against the trend" tags.
-- `leaders` = affordable stocks (under `affordable_max_price`) in the top 2 groups that beat SPY this month. When the
+- `leaders` = affordable stocks (one buy fits: `max_position_pct` of the account, capped by `risk_max_trade_dollars`) in the top 2 groups that beat SPY this month. When the
   group's leaders are too expensive for an option over $0.20, buy shares of one of these instead.
 - Late Sep/early Oct: chips +14.6% for the month, while our calls were in consumer, EV, fintech and crypto (all falling).
 
@@ -84,6 +85,9 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
    Rows tagged "SCANNER" (StockJawn's movers scan) and "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
    "SCANNER THEME" rows are sector ETFs on a run (oil, biotech, gold...) — trade the theme through its best stock or the ETF's options.
    `key_levels` (filled at 7:30 AM for every research row) = support/resistance with touch counts; use them in Step 5.
+   "NEWS GAP PM" rows = stocks that moved 3%+ after hours on news. The 8:45/9:15 news scan re-checks them and stages the
+   ones still gapping as `pending` "NEWS GAP AM" rows (trigger = premarket high). Never add a second pending row for a
+   NEWS GAP AM ticker; its "contract needed?" messages (drops, or shares over the cap) are yours to pick an option for.
 2. Check open positions so you don't double up on a name we already hold.
 3. Scan for these setup types:
    - **Momentum continuation (the core play):** yesterday's big mover pressing a level — after-hours/pre-market high or low,

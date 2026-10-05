@@ -61,7 +61,7 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
 - `IntradayScanner` at `intraday_scan_times_et` (10:00, 11:30): Alpaca movers/most-active → live snapshots → keeps stocks
   up ≥2% (≤15%), ≥1.5 points stronger than SPY, ≥1.5x normal volume for the time of day, above VWAP and the first-30-minute
   high (mirror for down days). Trigger = day's high + 1¢, stop 1.5–3% back (VWAP / opening range), target = next key level
-  if ≥1.5x risk, else 2x. Shares within `risk_max_trade_dollars` → `pending` for the approval page; $80–$100 names →
+  if ≥1.5x risk, else 2x. Shares within the share budget → `pending` for the approval page; $80–$100 names →
   `research` + a claude_messages note for Lenny to pick an option; over `scan_max_price` → listed in the alert only.
   Max `intraday_max_picks` (2) per scan, skips tickers already picked today. Phone alert to the ntfy topic with a link
   to the approval page. Manual: `POST /api/jobs/scan-intraday?write=false` (preview) / `?write=true`.
@@ -69,12 +69,26 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
   beat/lagged SPY by 1.5+ points, with our status and why we missed each → `missed_movers` table, read by the EOD and
   nightly jobs. Manual: `POST /api/jobs/missed-movers`.
 
+### News gap scan (night + morning)
+- `NewsGapScanner` at `news_gap_times_et` (17:30, 19:30, 08:45, 09:15). Headlines since 30 min before the last close
+  (Alpaca/Benzinga news + FMP upgrades/news) → 5-min bars → stocks moving `news_gap_min_pct` (3%) to `news_gap_max_pct` (20%)
+  outside market hours. Skips buyout targets, thin trading (< `news_gap_min_dollar_volume` $1M, half at night), under 3% of a
+  normal day's volume, moves that gave back half, and triggers more than 4% away.
+- Night (trading days + Sunday): `research` rows tagged "NEWS GAP PM" for the next trading day (re-runs replace them) + phone alert.
+- Morning: trigger = premarket high + 1¢, stop 2–4% back, target = next key level or 2x risk. Shares that fit the budget →
+  `pending` "NEWS GAP AM" (max `news_gap_max_picks` 2); drops and pricier names → `research` + a note to Lenny. Phone alert.
+- Manual: `POST /api/jobs/scan-news?mode=night|morning&write=false`. Off switch: `news_gap_enabled` = 0.
+
+### Share budget (grows with the account)
+`ScanBudget`: the most one buy can spend = `max_position_pct` of the latest `account_value_snapshots` value, capped by
+`risk_max_trade_dollars` when that's above 0. The news scan, market-hours scan and affordable-leaders list all use it.
+
 ### Group leadership + affordable leaders
 The 4:30 PM scan ranks `sector_etfs` (SPDR sectors + SMH, XBI, KRE, ITB, JETS, GLD, SLV, URA, TAN, XME) by 1-month return vs
 SPY → `sector_strength` (top 3 beating SPY = leading, bottom 3 lagging SPY = lagging). Each setup's group comes from the
 FMP profile (industry first: semis → SMH, biotech → XBI, regional banks → KRE...); bullish setups in leading groups rank
 1.25x, in lagging groups 0.75x and get "against the trend" (mirror for bearish). For the top 2 leading groups, the FMP
-screener finds stocks under `affordable_max_price` ($60) beating SPY and above their 20-day average → `leaders`, also
+screener finds stocks within the share budget beating SPY and above their 20-day average → `leaders`, also
 checked for setups. The executor refuses option buys whose ask is under `options_min_contract_price` ($0.20).
 
 ### Trigger strategy backtest
