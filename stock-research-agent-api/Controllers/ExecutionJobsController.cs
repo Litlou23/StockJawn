@@ -128,6 +128,17 @@ public class ExecutionJobsController : ControllerBase
         return Ok(await scope.ServiceProvider.GetRequiredService<NewsGapScanner>().ScanAsync(mode, write, ct));
     }
 
+    // Re-checks the math on every open pick; ?write=false previews without saving check_flags.
+    [HttpPost("api/jobs/check-picks")]
+    public async Task<IActionResult> CheckPicks([FromQuery] bool write = false, CancellationToken ct = default)
+    {
+        if (!ValidateJobSecret())
+            return Unauthorized(new { error = "Invalid or missing x-job-secret header" });
+
+        using var scope = _scopeFactory.CreateScope();
+        return Ok(await scope.ServiceProvider.GetRequiredService<PickChecker>().RunAsync(write, ct));
+    }
+
     // "What did we miss" report for today. ?write=false previews without saving to missed_movers.
     [HttpPost("api/jobs/missed-movers")]
     public async Task<IActionResult> MissedMovers([FromQuery] bool write = false, CancellationToken ct = default)

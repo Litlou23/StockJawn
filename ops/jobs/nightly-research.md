@@ -194,6 +194,9 @@ ORDER BY d LIMIT 1)
 
 **DATE EDGE CASE:** If this task runs after midnight ET but before 9:30 AM ET (e.g. a retry or manual run), and today is a trading day (weekday, not a holiday), then "tomorrow" is actually today — use today's date as pick_date instead of tomorrow's. Check: `EXTRACT(HOUR FROM CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York') < 10` → the +1 in the generate_series start should be +0.
 
+StockJawn re-checks every row you insert within 10 minutes (`check_flags`, `check_summary`). Write your R:R in notes as
+`R:R 2.1` so a math slip gets caught; the morning job drops or fixes flagged rows.
+
 Clean up old research rows first:
 ```sql
 DELETE FROM claude_daily_picks WHERE approval_status = 'research' AND pick_date <= (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date;

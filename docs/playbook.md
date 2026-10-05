@@ -83,6 +83,14 @@ for the nightly job to check. Manual run: `POST /api/jobs/scan-movers` (x-job-se
 `ScanBudget`: the most one buy can spend = `max_position_pct` of the latest `account_value_snapshots` value, capped by
 `risk_max_trade_dollars` when that's above 0. The news scan, market-hours scan and affordable-leaders list all use it.
 
+### Pick checker (math + facts on every open pick)
+`PickChecker` every `pick_check_interval_min` (10) on research/pending/approved rows from today on. Recomputes risk/reward
+from trigger/stop/target (flags < `pick_check_min_rr` 1.5, levels on the wrong side, a stop over `pick_check_max_stop_pct`
+10% away, and an R:R in the notes that's 25%+ off the real one), flags shares one buy can't afford (share budget), and for
+"upgrade/downgrade/initiated" catalysts checks FMP's rating history (named firm's latest change older than
+`pick_check_stale_days` 7 → flagged). Writes `check_flags` (problems) and `check_summary` (R:R, price vs trigger). New
+problems on a pending row → phone alert. Manual: `POST /api/jobs/check-picks?write=false`. Off: `pick_check_enabled` = 0.
+
 ### Group leadership + affordable leaders
 The 4:30 PM scan ranks `sector_etfs` (SPDR sectors + SMH, XBI, KRE, ITB, JETS, GLD, SLV, URA, TAN, XME) by 1-month return vs
 SPY → `sector_strength` (top 3 beating SPY = leading, bottom 3 lagging SPY = lagging). Each setup's group comes from the

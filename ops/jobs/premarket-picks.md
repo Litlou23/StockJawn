@@ -151,6 +151,9 @@ Macro chains count when the event is dated and the cheat sheet shows the link (e
   any pick that reports before its exit_by_date.
 
 ## Step 6 — Setup check (drop the pick if any line fails)
+0. StockJawn re-checks every open row every 10 minutes: `check_flags` = problems (wrong R:R, stale analyst news, a share
+   over budget, stop on the wrong side), `check_summary` = R:R and how far the trigger is. Read those instead of redoing
+   the math. A research row with check_flags → fix it or drop it. Pending rows get re-checked too and Lou is alerted.
 1. `trigger_price` set; `trigger_direction` = `above` for calls/shares/inverse ETFs, `below` for puts.
 2. Not already broken (above → current price still below the trigger; below → still above it) and within 4% of the current price.
 3. `level_stop` just back through the trigger; `level_target` a real level; reward/risk ≥ 1.5.

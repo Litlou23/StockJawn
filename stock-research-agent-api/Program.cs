@@ -278,6 +278,8 @@ builder.Services.AddSingleton<OptionsDataService>();
     builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.MissedMoversReport>();
     builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.NewsGapScanner>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.NewsGapScheduler>();
+    builder.Services.AddSingleton<StockResearchAgent.Api.Services.Scanner.PickChecker>();
+    builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.PickCheckScheduler>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Scanner.IntradayScanScheduler>();
     builder.Services.AddHostedService<StockResearchAgent.Api.Services.Alerts.TradeAlertWatcher>();
     builder.Services.AddTransient<StockResearchAgent.Api.Services.Backtesting.TriggerStrategyBacktest>();
