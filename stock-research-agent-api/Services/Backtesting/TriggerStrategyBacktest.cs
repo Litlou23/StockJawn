@@ -66,6 +66,7 @@ public class TriggerStrategyBacktest
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList();
         var minRelVolAtBuy = await NumberAsync("trigger_min_rel_volume", 1.2);
         var maxR = await NumberAsync("max_target_r", 3);
+        var leaderBoost = await NumberAsync("movers_leader_boost", 1);
 
         var universe = !string.IsNullOrWhiteSpace(o.Tickers)
             ? o.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList()
@@ -127,7 +128,7 @@ public class TriggerStrategyBacktest
                 }
                 if (MoversScanner.Evaluate(t, window, day, minMove, minRelVol, minPrice, maxPrice, stopPct, maxTriggerDist, maxMove) is { } s)
                 {
-                    setups.Add(MoversScanner.ApplyLeader(MoversScanner.ApplyRelativeStrength(s, window[^1], spyWindow), window));
+                    setups.Add(MoversScanner.ApplyLeader(MoversScanner.ApplyRelativeStrength(s, window[^1], spyWindow), window, leaderBoost));
                     ownAgainst[t] = TrendRules.OwnTrend(s.Direction, window, window[^1].Close);
                 }
             }

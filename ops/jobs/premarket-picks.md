@@ -66,8 +66,9 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
     already drop or tag these ("against the trend") — don't promote them without that catalyst.
   - The stock's own trend: buy only above its 50-day average (short only below). A stock far under its 50-day is falling
     (XNDU 10/6: 42% under, -47% in a month) — skip it whatever the news. The scanners and pick checker flag these ("trend:").
-  - Best setup (FRSH 10/6): a hard catalyst with forced buyers (S&P 500/400/600 add, fresh upgrade) on a stock at or near a
-    52-week / multi-month high, above its 20/50-day, in a leading group, 1.5x+ volume. Rank these first.
+  - Best setup (FRSH 10/6): a hard catalyst with forced buyers (S&P 500/400/600 add, fresh upgrade) on a stock above its
+    20/50-day, in a leading group, 1.5x+ volume. The catalyst is what matters: in the 1-year backtest, plain big movers
+    near a multi-month high did slightly worse (-0.12%/trade), so a new high alone isn't a reason to buy.
 - **Targets:** at most 3x the risk (`max_target_r`); past that it rarely gets hit in the 2-3 days we hold. The checker flags bigger ones.
 - **2-day rule:** StockJawn sells a stock the next morning if it hasn't closed up 1%+ after 2 full days (`time_stop_days`).
 - **Breakeven stop:** once a stock is up as much as it risked, StockJawn moves its stop up to the buy price (`breakeven_at_r`).

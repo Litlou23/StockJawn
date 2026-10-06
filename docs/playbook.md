@@ -112,7 +112,10 @@ $0.50+, spread under 10%, 14+ days.
 - Breakeven stop (`breakeven_at_r` = 1, 0 = off): once a stock is up as much as it risked, the GTC stop is cancelled and
   re-placed at the buy price (exit_status `raising_stop` in between), so a winner can't turn into a loss.
 - Leaders (the FRSH pattern, 10/6): within 3% of the highest price in the bars we have (~4-6 months) and above the
-  20/50-day → rank x1.25, tagged "leader at a multi-month high". S&P 500/400/600 add headlines rank x1.3 in the news scan.
+  20/50-day → tagged "leader at a multi-month high". News scan: leaders rank x1.25, S&P 500/400/600 add headlines x1.3.
+  Movers scan: tag only (`movers_leader_boost` = 1), because the 10/6 backtest had tagged movers at -0.12%/trade vs +0.15%.
+- 10/6 backtest (2,100 trades, 1 year): old +0.15%/trade, trend rules +0.15%, + buy-time volume +0.35%, + 3R cap +0.14%,
+  + own trend +0.15%. Only the volume check clearly helps; the cap and own trend are kept as guards against XNDU-type picks.
 - The pick checker waits for 9:30 to judge price: before the open Alpaca's last trade is yesterday's close (it called FRSH
   "through the stop" at 9:26).
 - Backtest summary adds new_rules_capped, new_rules_own_trend, old_rules_by_own_trend and the "leader" tag.

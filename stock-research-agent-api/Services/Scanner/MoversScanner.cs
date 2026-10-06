@@ -74,6 +74,7 @@ public class MoversScanner
         var maxMove = await NumberAsync("scan_max_move_pct", 25);
         var ownTrend = await NumberAsync("own_trend_filter_enabled", 1) >= 1;
         var maxR = await NumberAsync("max_target_r", 3);
+        var leaderBoost = await NumberAsync("movers_leader_boost", 1);
 
         var movers = await _alpaca.GetTopMoversAsync(50);
         var actives = await _alpaca.GetMostActivesAsync(50);
@@ -116,7 +117,7 @@ public class MoversScanner
                 falling.Add($"{ticker} ({own})");
                 continue;
             }
-            setups.Add(ApplyLeader(spy is null ? setup : ApplyRelativeStrength(setup, b[^1], spy), b));
+            setups.Add(ApplyLeader(spy is null ? setup : ApplyRelativeStrength(setup, b[^1], spy), b, leaderBoost));
         }
         if (falling.Count > 0) notes.Add($"dropped {falling.Count} fighting their own trend: {string.Join("; ", falling.Take(8))}");
         var market = spyBars is { Count: > 0 } ? TrendRules.Market(spyBars) : "unknown";
@@ -303,9 +304,10 @@ public class MoversScanner
             string.Join(", ", tags), trigger, stop, target, null, Math.Round(rank, 2));
     }
 
-    public static MoverSetup ApplyLeader(MoverSetup s, List<DailyBar> b)
+    // Tag only by default: in the 10/6 backtest, movers at a multi-month high averaged -0.12%/trade vs +0.15% overall.
+    public static MoverSetup ApplyLeader(MoverSetup s, List<DailyBar> b, double boost = 1)
         => s.Direction == "bullish" && TrendRules.Leader(b, b[^1].Close)
-            ? s with { Pattern = $"{s.Pattern}, leader at a multi-month high", Rank = Math.Round(s.Rank * 1.25, 2) }
+            ? s with { Pattern = $"{s.Pattern}, leader at a multi-month high", Rank = Math.Round(s.Rank * boost, 2) }
             : s;
 
     // StockedUp picks names "not too affected by the end-of-day pullback": strong closes on a day SPY closed weak.
