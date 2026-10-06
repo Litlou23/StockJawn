@@ -52,5 +52,13 @@ public static class KeyLevels
     public static KeyLevel? NearestBelow(IEnumerable<KeyLevel> levels, double price, double minGapPct = 0.5)
         => levels.Where(l => l.Price < price * (1 - minGapPct / 100)).OrderByDescending(l => l.Price).FirstOrDefault();
 
+    // A level far past the trigger rarely gets hit in a 2–3 day trade (XNDU's $9.53 on a $5 trigger, 10/6).
+    public static double CapTarget(bool bull, double trigger, double risk, double target, double maxR)
+    {
+        if (maxR <= 0 || risk <= 0) return target;
+        var cap = Math.Round(bull ? trigger + maxR * risk : trigger - maxR * risk, 2);
+        return bull ? Math.Min(target, cap) : Math.Max(target, cap);
+    }
+
     public static string Describe(KeyLevel l) => $"{l.Price:F2}{(l.Touches > 0 ? $" ({l.Touches}x)" : "")}";
 }

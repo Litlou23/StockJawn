@@ -62,6 +62,8 @@ public class IntradayScanner
         var minRs = await NumberAsync("intraday_min_rs_pct", 1.5);
         var minRelVol = await NumberAsync("intraday_min_rel_volume", 1.5);
         var maxPicks = (int)await NumberAsync("intraday_max_picks", 2);
+        var ownTrend = await NumberAsync("own_trend_filter_enabled", 1) >= 1;
+        var maxR = await NumberAsync("max_target_r", 3);
         var minPrice = await NumberAsync("risk_min_stock_price", 4);
         var maxTrade = (await ScanBudget.LoadAsync(_db)).MaxSharePrice;
         var maxPrice = Math.Max(await NumberAsync("scan_max_price", 100), maxTrade);
@@ -106,8 +108,13 @@ public class IntradayScanner
             var orBar = opening.TryGetValue(t, out var o) ? o.FirstOrDefault() : null;
             if (orBar is null) continue;
 
-            var setup = Evaluate(t, s, spyChg, hist, orBar, elapsed, bullishDay, minMove, maxMove, minRs, minRelVol);
+            var setup = Evaluate(t, s, spyChg, hist, orBar, elapsed, bullishDay, minMove, maxMove, minRs, minRelVol, maxR);
             if (setup is null) continue;
+            if (ownTrend && TrendRules.OwnTrend(setup.Direction, hist, s.Last) is { } own)
+            {
+                notes.Add($"{t} skipped: {own}");
+                continue;
+            }
             var route = setup.Direction == "bullish" && setup.Price <= maxTrade ? "shares"
                 : setup.Price <= maxPrice ? "option" : "over_budget";
             setups.Add(setup with { Route = route });
@@ -155,7 +162,7 @@ public class IntradayScanner
     }
 
     public static IntradaySetup? Evaluate(string ticker, Snapshot s, double spyChg, List<DailyBar> hist, DailyBar orBar,
-        double elapsed, bool bullishDay, double minMove, double maxMove, double minRs, double minRelVol)
+        double elapsed, bool bullishDay, double minMove, double maxMove, double minRs, double minRelVol, double maxR = 3)
     {
         var chg = (s.Last / s.PrevClose - 1) * 100;
         var rs = chg - spyChg;
@@ -191,6 +198,7 @@ public class IntradayScanner
         var target = next is not null && Math.Abs(next.Price - trigger) >= 1.5 * risk
             ? Math.Round(bull ? next.Price - 0.01 : next.Price + 0.01, 2)
             : Math.Round(bull ? trigger + 2 * risk : trigger - 2 * risk, 2);
+        target = KeyLevels.CapTarget(bull, trigger, risk, target, maxR);
         var levelNote = next is null ? "" : $", next {(bull ? "resistance" : "support")} {KeyLevels.Describe(next)}";
 
         var why = $"{chg:+0.0;-0.0}% today vs SPY {spyChg:+0.0;-0.0}% ({rs:+0.0;-0.0}% stronger), {relVol:F1}x normal volume, " +

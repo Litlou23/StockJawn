@@ -72,6 +72,8 @@ public class MoversScanner
         var stopPct = await NumberAsync("scan_stop_pct", 2);
         var maxTriggerDist = await NumberAsync("scan_max_trigger_distance_pct", 4);
         var maxMove = await NumberAsync("scan_max_move_pct", 25);
+        var ownTrend = await NumberAsync("own_trend_filter_enabled", 1) >= 1;
+        var maxR = await NumberAsync("max_target_r", 3);
 
         var movers = await _alpaca.GetTopMoversAsync(50);
         var actives = await _alpaca.GetMostActivesAsync(50);
@@ -103,12 +105,20 @@ public class MoversScanner
                       " · lagging: " + string.Join(", ", sectors.Where(s => s.Group == "lagging").Select(s => $"{s.Name} {s.Ret1m:+0.0;-0.0}%")) + " (1 month)");
 
         var setups = new List<MoverSetup>();
+        var falling = new List<string>();
         foreach (var ticker in universe)
         {
             if (!bars.TryGetValue(ticker, out var b) || b.Count < 22) continue;
             var setup = Evaluate(ticker, b, today, minMove, minRelVol, minPrice, maxPrice, stopPct, maxTriggerDist, maxMove);
-            if (setup is not null) setups.Add(spy is null ? setup : ApplyRelativeStrength(setup, b[^1], spy));
+            if (setup is null) continue;
+            if (ownTrend && TrendRules.OwnTrend(setup.Direction, b, b[^1].Close) is { } own)
+            {
+                falling.Add($"{ticker} ({own})");
+                continue;
+            }
+            setups.Add(ApplyLeader(spy is null ? setup : ApplyRelativeStrength(setup, b[^1], spy), b));
         }
+        if (falling.Count > 0) notes.Add($"dropped {falling.Count} fighting their own trend: {string.Join("; ", falling.Take(8))}");
         var market = spyBars is { Count: > 0 } ? TrendRules.Market(spyBars) : "unknown";
         var trendFilter = await NumberAsync("trend_filter_enabled", 1) >= 1;
         notes.Add($"market trend: {market} (SPY vs its 20/50-day averages)");
@@ -125,7 +135,7 @@ public class MoversScanner
         }
         setups.AddRange(themeSetups.OrderByDescending(s => s.Rank).Take(maxThemes));
 
-        if (setups.Count > 0) setups = await AttachLevelsAsync(setups, bars, notes);
+        if (setups.Count > 0) setups = await AttachLevelsAsync(setups, bars, maxR, notes);
         notes.Add($"{universe.Count} movers + {themes.Count} theme ETFs checked, {setups.Count(x => !x.IsTheme)} setups, {setups.Count(x => x.IsTheme)} themes");
         if (write && setups.Count > 0) await WriteAsync(setups, today, pickDate, notes);
         if (write && sectors.Count > 0) await WriteSectorsAsync(today, sectors, leaders, notes);
@@ -293,6 +303,11 @@ public class MoversScanner
             string.Join(", ", tags), trigger, stop, target, null, Math.Round(rank, 2));
     }
 
+    public static MoverSetup ApplyLeader(MoverSetup s, List<DailyBar> b)
+        => s.Direction == "bullish" && TrendRules.Leader(b, b[^1].Close)
+            ? s with { Pattern = $"{s.Pattern}, leader at a multi-month high", Rank = Math.Round(s.Rank * 1.25, 2) }
+            : s;
+
     // StockedUp picks names "not too affected by the end-of-day pullback": strong closes on a day SPY closed weak.
     public static MoverSetup ApplyRelativeStrength(MoverSetup s, DailyBar bar, List<DailyBar> spy)
     {
@@ -343,7 +358,7 @@ public class MoversScanner
     // Key levels: StockJawn's own multi-touch levels, plus Finnhub's support/resistance and chart patterns when the
     // plan allows. The stop moves just under a nearby support (above a resistance for puts) and the target goes
     // to the next level when that still pays at least 1.5x the risk.
-    private async Task<List<MoverSetup>> AttachLevelsAsync(List<MoverSetup> setups, Dictionary<string, List<DailyBar>> bars, List<string> notes)
+    private async Task<List<MoverSetup>> AttachLevelsAsync(List<MoverSetup> setups, Dictionary<string, List<DailyBar>> bars, double maxR, List<string> notes)
     {
         var useFinnhub = _finnhub.IsConfigured && await NumberAsync("levels_finnhub_enabled", 1) >= 1;
         var result = new List<MoverSetup>();
@@ -351,7 +366,7 @@ public class MoversScanner
         {
             var b = bars[s.Ticker];
             var (levels, json, text) = await BuildLevelsAsync(s.Ticker, b, s.Close, useFinnhub);
-            result.Add(AdjustToLevels(s, levels) with { Levels = text, KeyLevelsJson = json });
+            result.Add(AdjustToLevels(s, levels, maxR) with { Levels = text, KeyLevelsJson = json });
         }
         if (useFinnhub && FinnhubProvider.TechnicalAccessNote is { } note) notes.Add(note);
         return result;
@@ -385,7 +400,7 @@ public class MoversScanner
         return (levels, json, text);
     }
 
-    public static MoverSetup AdjustToLevels(MoverSetup s, List<KeyLevel> levels)
+    public static MoverSetup AdjustToLevels(MoverSetup s, List<KeyLevel> levels, double maxR = 3)
     {
         var bull = s.Direction == "bullish";
         var trigger = s.Trigger;
@@ -418,6 +433,12 @@ public class MoversScanner
                 tags.Add($"{(bull ? "resistance" : "support")} close by at {KeyLevels.Describe(next)}");
                 rank *= 0.7;
             }
+        }
+        var capped = KeyLevels.CapTarget(bull, trigger, risk, target, maxR);
+        if (capped != target)
+        {
+            tags.Add($"target cut to {maxR:0.#}x the risk");
+            target = capped;
         }
 
         return s with

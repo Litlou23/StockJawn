@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using StockResearchAgent.Api.Services.Broker;
+using StockResearchAgent.Api.Services.Calendar;
 using StockResearchAgent.Api.Services.Supabase;
 
 namespace StockResearchAgent.Api.Services.Execution;
@@ -17,6 +19,7 @@ namespace StockResearchAgent.Api.Services.Execution;
 //                                                          → exit_failed (terminal); manual_exit if no option_contract_id
 // adopt: an existing position handed to StockJawn's exits; treated like a fresh fill (older builds ignore it, so it's safe to set early).
 // exit_by_date: on/after that day (ET) the position is sold whatever the price (inverse ETFs decay when held).
+// time stop: a stock that hasn't closed time_stop_min_gain_pct up after time_stop_days full days is sold the next morning.
 // PDT guard: anything bought today is held overnight (no stop order yet). It's only sold the same day if the loss passes
 // same_day_stop_*_pct AND fewer than max_day_trades same-day sells happened in the last 5 trading days (stop_sell_placed).
 public class PickLifecycleMonitor
@@ -29,6 +32,10 @@ public class PickLifecycleMonitor
     private readonly RobinhoodMcpBrokerAdapter _broker;
     private readonly ILogger _logger;
     private double _staleBuyMinutes;
+    private double _timeStopDays;
+    private double _timeStopMinGain;
+    // Judged on the prior close, so a position that passes is fine for the rest of the day.
+    private static readonly ConcurrentDictionary<string, DateTime> TimeStopCleared = new();
 
     public PickLifecycleMonitor(SupabaseClient db, RobinhoodMcpBrokerAdapter broker, ILogger logger)
     {
@@ -46,6 +53,8 @@ public class PickLifecycleMonitor
 
         var exitsEnabled = await NumberAsync("exits_enabled", 0) >= 1;
         _staleBuyMinutes = await NumberAsync("stale_buy_minutes", 30);
+        _timeStopDays = await NumberAsync("time_stop_days", 2);
+        _timeStopMinGain = await NumberAsync("time_stop_min_gain_pct", 1);
         var since = DateTime.UtcNow.AddDays(-30).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var rows = await _db.SelectAsync(Table,
             filter: $"approval_status=eq.executed&order_id=not.is.null&pick_date=gte.{since}" +
@@ -208,18 +217,19 @@ public class PickLifecycleMonitor
                     await SetExitAsync(id, "watching", $"Stop order {so.State} outside StockJawn — position has no stop now");
                     return $"stop order {so.State} — watching target only";
                 }
-                if (ExitDue(row))
+                var timeExit = ExitDue(row) ? $"Time exit: {row["exit_by_date"]} reached" : await TimeStopAsync(row, id, ticker, ct);
+                if (timeExit is not null)
                 {
                     var (accepted, cancelErr) = await _broker.CancelEquityOrderByIdAsync(stopOrderId!, ct);
-                    if (!accepted) return $"exit day reached but stop cancel failed ({cancelErr})";
-                    await SetExitAsync(id, "cancelling_stop", $"Time exit: {row["exit_by_date"]} reached — cancelling stop to sell");
-                    return "exit day reached, cancelling stop";
+                    if (!accepted) return $"time exit due but stop cancel failed ({cancelErr})";
+                    await SetExitAsync(id, "cancelling_stop", $"{timeExit} — cancelling stop to sell");
+                    return $"{timeExit.ToLowerInvariant()}, cancelling stop";
                 }
                 return await CheckTargetAsync(id, ticker, target, stopOrderId, filledQty, ct);
             }
 
             case "watching":
-                if (ExitDue(row)) return await PlaceTargetSellAsync(id, ticker, filledQty, ct, "Time exit");
+                if (ExitDue(row) || await TimeStopAsync(row, id, ticker, ct) is not null) return await PlaceTargetSellAsync(id, ticker, filledQty, ct, "Time exit");
                 return await CheckTargetAsync(id, ticker, target, null, filledQty, ct);
 
             case "cancelling_stop":
@@ -483,6 +493,28 @@ public class PickLifecycleMonitor
 
     private static bool ExitDue(JsonObject row)
         => DateTime.TryParse(row["exit_by_date"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) && TodayEt() >= d.Date;
+
+    private async Task<string?> TimeStopAsync(JsonObject row, string id, string ticker, CancellationToken ct)
+    {
+        var today = TodayEt();
+        if (_timeStopDays <= 0 || (TimeStopCleared.TryGetValue(id, out var cleared) && cleared == today)) return null;
+        if (!DateTimeOffset.TryParse(row["executed_at"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at)) return null;
+        var held = 0;
+        for (var d = TimeZoneInfo.ConvertTime(at, Eastern).Date.AddDays(1); d < today; d = d.AddDays(1))
+            if (TradingCalendar.IsTradingDay(d, TradingCalendar.BuiltInHolidays)) held++;
+        if (held < _timeStopDays) return null;
+
+        var avg = D(row["filled_avg_price"]);
+        var quote = await _broker.GetEquityQuoteAsync(ticker, ct);
+        if (avg <= 0 || quote is not { PrevClose: > 0 } q) return null;
+        var gain = (q.PrevClose / avg - 1) * 100;
+        if (gain >= _timeStopMinGain)
+        {
+            TimeStopCleared[id] = today;
+            return null;
+        }
+        return $"Time exit: closed {gain:+0.0;-0.0}% after {held} full days (the {_timeStopDays:0}-day rule wants +{_timeStopMinGain:0.#}%)";
+    }
 
     private static bool IsTimeExit(JsonObject row) => row["exit_reason"]?.ToString()?.StartsWith("Time exit") == true;
 

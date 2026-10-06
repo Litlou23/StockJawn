@@ -101,6 +101,20 @@ while relative weakness made +0.79%/trade; O'Neil (3 of 4 stocks follow the mark
 normal volume) and retail-options research (call buyers lose 5-9% a trade) point the same way. Shares first; options only at
 $0.50+, spread under 10%, 14+ days.
 
+### Own trend, 3R targets, 2-day rule, leaders (10/6)
+- Own trend (`own_trend_filter_enabled`): buys need the stock above its 50-day average (shorts below); with fewer than 50
+  bars it uses what there is (20+). Movers and intraday scans drop the rest, the news scan sends them to Lenny as research,
+  the checker flags them. XNDU (10/6) was 42% under its 50-day.
+- Target cap (`max_target_r` = 3): scanner targets stop at 3x the risk; the checker flags bigger ones. XNDU's $9.53 on a
+  $5.01 trigger was 22x.
+- 2-day rule (`time_stop_days` = 2, `time_stop_min_gain_pct` = 1): a stock that hasn't closed up 1% after 2 full days is
+  sold the next morning (judged on the prior close; 0 = off).
+- Leaders (the FRSH pattern, 10/6): within 3% of the highest price in the bars we have (~4-6 months) and above the
+  20/50-day → rank x1.25, tagged "leader at a multi-month high". S&P 500/400/600 add headlines rank x1.3 in the news scan.
+- The pick checker waits for 9:30 to judge price: before the open Alpaca's last trade is yesterday's close (it called FRSH
+  "through the stop" at 9:26).
+- Backtest summary adds new_rules_capped, new_rules_own_trend, old_rules_by_own_trend and the "leader" tag.
+
 ### Group leadership + affordable leaders
 The 4:30 PM scan ranks `sector_etfs` (SPDR sectors + SMH, XBI, KRE, ITB, JETS, GLD, SLV, URA, TAN, XME) by 1-month return vs
 SPY → `sector_strength` (top 3 beating SPY = leading, bottom 3 lagging SPY = lagging). Each setup's group comes from the

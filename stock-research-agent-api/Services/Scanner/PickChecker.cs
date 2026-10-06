@@ -49,17 +49,28 @@ public class PickChecker
         var maxDist = await NumberAsync("pick_check_max_trigger_dist_pct", 4);
         var maxStop = await NumberAsync("pick_check_max_stop_pct", 10);
         var staleDays = await NumberAsync("pick_check_stale_days", 7);
+        var maxR = await NumberAsync("max_target_r", 3);
         var budget = await ScanBudget.LoadAsync(_db);
         var tickers = rows.Select(r => Str(r, "ticker").ToUpperInvariant()).Where(t => t.Length > 0).Distinct().ToList();
         var snaps = _alpaca.IsConfigured ? await _alpaca.GetSnapshotsAsync(tickers) : new();
+        var daily = _alpaca.IsConfigured ? await _alpaca.GetDailyBarsAsync(tickers, 120) : new();
         var grades = new Dictionary<string, List<Grade>?>(StringComparer.OrdinalIgnoreCase);
 
+        // Before 9:30 Alpaca's last trade is yesterday's close, which made FRSH look "through the stop" on 10/6.
+        var beforeOpen = now.TimeOfDay < new TimeSpan(9, 30, 0);
         var results = new List<PickCheck>();
         foreach (var r in rows)
         {
             var t = Str(r, "ticker").ToUpperInvariant();
-            double? price = snaps.TryGetValue(t, out var s) && s.Last > 0 ? s.Last : null;
-            var (issues, summary) = Evaluate(r, price, budget, minRr, maxDist, maxStop);
+            double? price = !beforeOpen && snaps.TryGetValue(t, out var s) && s.Last > 0 ? s.Last : null;
+            var (issues, summary) = Evaluate(r, price, budget, minRr, maxDist, maxStop, maxR);
+            if (beforeOpen) summary = string.Join(" · ", new[] { summary, "live price check starts at 9:30" }.Where(x => x.Length > 0));
+            if (daily.TryGetValue(t, out var hist))
+            {
+                var before = hist.Where(b => b.Date.Date < now.Date).ToList();
+                var px = price ?? (before.Count > 0 ? before[^1].Close : 0);
+                if (TrendRules.OwnTrend(Str(r, "direction") == "bearish" ? "bearish" : "bullish", before, px) is { } own) issues.Add($"trend: {own}");
+            }
 
             var text = $"{Str(r, "catalyst")} {Str(r, "reason")}";
             if (AnalystAction.IsMatch(text) && DateTime.TryParse(Str(r, "pick_date"), CultureInfo.InvariantCulture, DateTimeStyles.None, out var pickDate))
@@ -91,7 +102,7 @@ public class PickChecker
         return new(now, results.Count, flagged, results, notes);
     }
 
-    public static (List<string> Issues, string Summary) Evaluate(JsonObject r, double? price, ScanBudget.Budget budget, double minRr, double maxDist, double maxStop)
+    public static (List<string> Issues, string Summary) Evaluate(JsonObject r, double? price, ScanBudget.Budget budget, double minRr, double maxDist, double maxStop, double maxR = 3)
     {
         var issues = new List<string>();
         var summary = new List<string>();
@@ -116,6 +127,7 @@ public class PickChecker
                 var rr = reward / risk;
                 summary.Add($"R:R {rr:F2} (risk ${risk:F2} to make ${reward:F2})");
                 if (rr < minRr) issues.Add($"risk/reward only {rr:F2} (risk ${risk:F2} to make ${reward:F2})");
+                if (maxR > 0 && rr > maxR + 0.05) issues.Add($"target is {rr:F1}x the risk; past {maxR:0.#}x it rarely gets hit in a few days");
                 var m = ClaimedRr.Match($"{Str(r, "notes")} {Str(r, "reason")}");
                 if (m.Success && double.TryParse(m.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var claimed)
                     && claimed > 0 && Math.Abs(claimed - rr) / rr > 0.25)
@@ -148,11 +160,13 @@ public class PickChecker
         var firm = grades.Select(g => g.Firm).Distinct()
             .FirstOrDefault(f => f.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() is { } w
                                  && text.Contains(w.Length > 4 ? w[..4] : w, StringComparison.OrdinalIgnoreCase));
-        var latest = grades.Where(g => firm is null || g.Firm == firm).MaxBy(g => g.Date);
+        // Only judge a firm we can find: FMP lags a day or two on brand-new initiations (Bernstein on FPS, 10/5).
+        if (firm is null) return null;
+        var latest = grades.Where(g => g.Firm == firm).MaxBy(g => g.Date);
         if (latest is null) return null;
         var age = (pickDate.Date - latest.Date.Date).TotalDays;
         return age > staleDays
-            ? $"catalyst: the latest {(firm ?? "analyst")} rating change on {ticker} is {latest.Action} on {latest.Date:M/d/yy}, {age:F0} days old"
+            ? $"catalyst: {firm}'s latest rating change on {ticker} is {latest.Action} on {latest.Date:M/d/yy}, {age:F0} days old"
             : null;
     }
 

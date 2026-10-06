@@ -35,6 +35,28 @@ public static class TrendRules
             : "puts need a weak market, a lagging group or a stock weaker than SPY";
     }
 
+    // Minervini: buy only stocks in their own uptrend, short only ones in a downtrend. Null = fine.
+    // Fewer than 20 bars (a brand-new listing) can't be judged; between 20 and 50 uses what there is.
+    public static string? OwnTrend(string direction, IReadOnlyList<DailyBar> bars, double price, int days = 50)
+    {
+        var n = Math.Min(days, bars.Count);
+        if (n < 20 || price <= 0) return null;
+        var sma = bars.Skip(bars.Count - n).Average(b => b.Close);
+        var pct = (price / sma - 1) * 100;
+        if (direction != "bearish") return price > sma ? null : $"the stock is {-pct:F0}% below its {n}-day average (its own downtrend)";
+        return price < sma ? null : $"the stock is {pct:F0}% above its {n}-day average (its own uptrend)";
+    }
+
+    // The FRSH pattern (10/6): near its highest price in months and above its 20- and 50-day averages,
+    // so there's nobody above waiting to sell at breakeven. Needs ~3 months of bars.
+    public static bool Leader(IReadOnlyList<DailyBar> bars, double price)
+    {
+        if (bars.Count < 60 || price <= 0) return false;
+        var sma20 = bars.Skip(bars.Count - 20).Average(b => b.Close);
+        var sma50 = bars.Skip(bars.Count - 50).Average(b => b.Close);
+        return price >= bars.Max(b => b.High) * 0.97 && price > sma20 && price > sma50;
+    }
+
     // Latest sector ranking from the 4:30 PM scan.
     public static async Task<List<Group>> LoadGroupsAsync(SupabaseClient db)
     {

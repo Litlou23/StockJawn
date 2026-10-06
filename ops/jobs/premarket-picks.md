@@ -64,6 +64,12 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
   - Puts: market down, OR a "lagging" group, OR a stock clearly weaker than SPY.
   - Against the trend only with a big dated catalyst from the last 1-2 days, and say so in notes. StockJawn's scanners
     already drop or tag these ("against the trend") — don't promote them without that catalyst.
+  - The stock's own trend: buy only above its 50-day average (short only below). A stock far under its 50-day is falling
+    (XNDU 10/6: 42% under, -47% in a month) — skip it whatever the news. The scanners and pick checker flag these ("trend:").
+  - Best setup (FRSH 10/6): a hard catalyst with forced buyers (S&P 500/400/600 add, fresh upgrade) on a stock at or near a
+    52-week / multi-month high, above its 20/50-day, in a leading group, 1.5x+ volume. Rank these first.
+- **Targets:** at most 3x the risk (`max_target_r`); past that it rarely gets hit in the 2-3 days we hold. The checker flags bigger ones.
+- **2-day rule:** StockJawn sells a stock the next morning if it hasn't closed up 1%+ after 2 full days (`time_stop_days`).
 - `leaders` = affordable stocks (one buy fits: `max_position_pct` of the account, capped by `risk_max_trade_dollars`) in the top 2 groups that beat SPY this month. When the
   group's leaders are too expensive for an option over $0.50, buy shares of one of these instead.
 - Late Sep/early Oct: chips +14.6% for the month, while our calls were in consumer, EV, fintech and crypto (all falling).
@@ -208,7 +214,7 @@ Don't sit on dead money — if yesterday's pick is flat and today has a clear wi
 
 ## Hard rules
 - Every pick is a trigger setup (trigger + target + stop, reward/risk ≥ 1.5). No trigger = no pick. Don't move triggers to "make sure" they fill.
-- Trade with the trend. Shares first (when one fits), options second ($0.50+, spread under 10%, 14+ days), inverse ETF on red days,
+- Trade with the trend (market, group and the stock's own 50-day). Targets within 3x the risk. Shares first (when one fits), options second ($0.50+, spread under 10%, 14+ days), inverse ETF on red days,
   CASH last. Max 40% of buying power per pick.
 - No SPACs, no stocks under $1 or under the min price, no stocks with zero analyst coverage.
 - FOMC day = CASH. No regular shares on a red day.

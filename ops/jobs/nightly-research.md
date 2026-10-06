@@ -52,6 +52,9 @@ Each row already has the move, volume, pattern (closed at the high/low, new 20-d
   Trade with the trend: bullish only when the market isn't in a downtrend (SPY below its 20- and 50-day averages) AND
   the group is "leading" (or "middle" above its 20-day); bearish when the market is down, the group is "lagging", or the
   stock is clearly weaker than SPY. Drop the rest unless a big catalyst from the last 1-2 days says otherwise ("against the trend"). The `leaders` list (affordable stocks in the top 2 groups) are candidates even without a big move.
+  The stock's own trend too: buys only above their 50-day average, shorts only below (the scanners already drop the rest).
+  Favor the FRSH pattern (10/6): a hard catalyst (S&P index add, fresh upgrade) on a stock at or near a multi-month high and
+  above its 20/50-day. Keep targets within 3x the risk (write "R:R X.X", 3.0 or less).
 - The nightly job only inserts `research` rows — never `pending` (the morning job makes fresh pending rows).
 - **Today's misses** (StockJawn logs them at 4:15 PM): big movers we never had. Any that closed near its high/low
   and is setting up for a continuation tomorrow is a candidate, same checks as the SCANNER rows:

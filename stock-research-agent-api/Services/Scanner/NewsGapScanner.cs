@@ -13,7 +13,7 @@ namespace StockResearchAgent.Api.Services.Scanner;
 public record NewsGap(
     string Ticker, string Direction, double RefClose, double Last, double GapPct, double ExtHigh, double ExtLow,
     double ExtDollarVolume, double ExtVolRatio, string Headline, string HeadlineTime,
-    double Trigger, double Stop, double Target, string Route, string? Skip, double Rank, string? Trend = null);
+    double Trigger, double Stop, double Target, string Route, string? Skip, double Rank, string? Trend = null, bool Leader = false);
 
 public record NewsGapResult(string Mode, DateTime ScanTimeEt, string PickDate, int Headlines, int Candidates,
     List<NewsGap> Picks, List<NewsGap> Skipped, List<string> Notes);
@@ -26,6 +26,8 @@ public class NewsGapScanner
     public const string NightPrefix = "NEWS GAP PM";
     public const string MorningPrefix = "NEWS GAP AM";
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+    // Index funds have to buy an S&P add, so the demand is real (FRSH, S&P SmallCap 600, 10/6).
+    private static readonly Regex IndexAdd = new(@"\bS&P\s*(500|MidCap\s*400|SmallCap\s*600)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DealWords = new(@"\b(to acquire|acquired|acquisition|buyout|merger|merge|take[- ]private|definitive agreement|tender offer)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
@@ -90,6 +92,7 @@ public class NewsGapScanner
         var maxTriggerDist = await NumberAsync("news_gap_max_trigger_dist_pct", 4);
         var maxPicks = (int)await NumberAsync("news_gap_max_picks", 2);
         var maxRows = (int)await NumberAsync("news_gap_max_rows", 6);
+        var maxR = await NumberAsync("max_target_r", 3);
 
         // Headlines since 30 minutes before the close: late-day news often moves the stock after hours.
         var headlines = await HeadlinesAsync(closeUtc.AddMinutes(-30));
@@ -130,26 +133,39 @@ public class NewsGapScanner
             var ratio = avgVol > 0 ? m.Vol / avgVol : 0;
             var h = headlines[m.T];
             all.Add(Evaluate(m.T, m.RefClose, m.Last, m.Hi, m.Lo, m.Dollar, ratio, h.Text, ToEt(h.Utc).ToString("M/d h:mm tt", CultureInfo.InvariantCulture),
-                h.Specific, hist, minDollar, minRatio, maxGap, maxTriggerDist, maxShare, maxOption));
+                h.Specific, hist, minDollar, minRatio, maxGap, maxTriggerDist, maxShare, maxOption, maxR));
         }
 
         var picks = all.Where(x => x.Skip is null).OrderByDescending(x => x.Rank).ToList();
         var skipped = all.Where(x => x.Skip is not null).OrderByDescending(x => Math.Abs(x.GapPct)).ToList();
         var market = "unknown";
-        if (picks.Count > 0 && await NumberAsync("trend_filter_enabled", 1) >= 1)
+        var trendOn = await NumberAsync("trend_filter_enabled", 1) >= 1;
+        var ownOn = await NumberAsync("own_trend_filter_enabled", 1) >= 1;
+        if (picks.Count > 0 && (trendOn || ownOn))
         {
-            var spyDaily = await _alpaca.GetDailyBarsAsync(["SPY"], 120);
-            market = spyDaily.TryGetValue("SPY", out var sb) ? TrendRules.Market(sb.Where(b => b.Date.Date <= refDay).ToList()) : "unknown";
-            var groups = await TrendRules.LoadGroupsAsync(_db);
+            var groups = new List<TrendRules.Group>();
+            if (trendOn)
+            {
+                var spyDaily = await _alpaca.GetDailyBarsAsync(["SPY"], 120);
+                market = spyDaily.TryGetValue("SPY", out var sb) ? TrendRules.Market(sb.Where(b => b.Date.Date <= refDay).ToList()) : "unknown";
+                groups = await TrendRules.LoadGroupsAsync(_db);
+            }
             var checkedPicks = new List<NewsGap>();
             foreach (var p in picks)
             {
-                TrendRules.Group? g = null;
-                if (p.Direction == "bullish" && groups.Count > 0 && _fmp.IsConfigured && await _fmp.GetProfileAsync(p.Ticker) is { } prof
-                    && SectorStrength.EtfFor(prof.Sector, prof.Industry) is { } etf)
-                    g = groups.FirstOrDefault(x => x.Etf == etf);
-                // A drop on bad news is itself the weakness puts need.
-                checkedPicks.Add(p with { Trend = TrendRules.Check(p.Direction, market, g?.Grp, g?.AboveSma20 ?? false, relativeWeakness: p.Direction == "bearish") });
+                string? why = null;
+                if (trendOn)
+                {
+                    TrendRules.Group? g = null;
+                    if (p.Direction == "bullish" && groups.Count > 0 && _fmp.IsConfigured && await _fmp.GetProfileAsync(p.Ticker) is { } prof
+                        && SectorStrength.EtfFor(prof.Sector, prof.Industry) is { } etf)
+                        g = groups.FirstOrDefault(x => x.Etf == etf);
+                    // A drop on bad news is itself the weakness puts need.
+                    why = TrendRules.Check(p.Direction, market, g?.Grp, g?.AboveSma20 ?? false, relativeWeakness: p.Direction == "bearish");
+                }
+                if (why is null && ownOn && daily.TryGetValue(p.Ticker, out var pd1))
+                    why = TrendRules.OwnTrend(p.Direction, pd1.Where(b => b.Date.Date <= refDay).ToList(), p.Last);
+                checkedPicks.Add(p with { Trend = why });
             }
             picks = checkedPicks;
         }
@@ -169,7 +185,7 @@ public class NewsGapScanner
 
     public static NewsGap Evaluate(string t, double refClose, double last, double extHigh, double extLow, double dollar, double ratio,
         string headline, string headlineTime, bool specific, List<DailyBar> hist,
-        double minDollar, double minRatio, double maxGap, double maxTriggerDist, double maxShare, double maxOption)
+        double minDollar, double minRatio, double maxGap, double maxTriggerDist, double maxShare, double maxOption, double maxR = 3)
     {
         var gap = (last / refClose - 1) * 100;
         var bull = gap > 0;
@@ -194,12 +210,15 @@ public class NewsGapScanner
         var target = next is not null && Math.Abs(next.Price - trigger) >= 1.5 * risk
             ? Math.Round(bull ? next.Price - 0.01 : next.Price + 0.01, 2)
             : Math.Round(bull ? trigger + 2 * risk : trigger - 2 * risk, 2);
+        target = KeyLevels.CapTarget(bull, trigger, risk, target, maxR);
 
         var route = bull && last <= maxShare ? "shares" : last <= maxOption ? "option" : "over_budget";
-        var rank = Math.Abs(gap) * Math.Min(ratio / Math.Max(minRatio, 0.001), 4) * (specific ? 1.2 : 1);
+        var leader = bull && TrendRules.Leader(hist, last);
+        var rank = Math.Abs(gap) * Math.Min(ratio / Math.Max(minRatio, 0.001), 4) * (specific ? 1.2 : 1)
+                   * (leader ? 1.25 : 1) * (bull && IndexAdd.IsMatch(headline) ? 1.3 : 1);
         return new NewsGap(t, bull ? "bullish" : "bearish", Math.Round(refClose, 2), Math.Round(last, 2), Math.Round(gap, 2),
             Math.Round(extHigh, 2), Math.Round(extLow, 2), Math.Round(dollar), Math.Round(ratio, 3), headline, headlineTime,
-            trigger, stop, target, route, skip, Math.Round(rank, 2));
+            trigger, stop, target, route, skip, Math.Round(rank, 2), Leader: leader);
     }
 
     private async Task<List<NewsGap>> WriteNightAsync(List<NewsGap> picks, DateTime now, string pd, DateTime pickDate, List<string> notes)
@@ -288,6 +307,7 @@ public class NewsGapScanner
                 ["total_score"] = 60,
                 ["catalyst"] = Trim(s.Headline, 200),
                 ["notes"] = $"{prefix} {now:M/d h:mm}: {s.Ticker} {why} → {how} {side} ${s.Trigger:F2}, target ${s.Target:F2}, out ${s.Stop:F2}" +
+                            (s.Leader ? " — leader at a multi-month high" : "") +
                             (s.Trend is null ? "" : $" — against the trend: {s.Trend}"),
             };
         }).ToList();

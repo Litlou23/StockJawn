@@ -12,7 +12,7 @@ namespace StockResearchAgent.Api.Services.Backtesting;
 public record TriggerTrade(
     DateTime SignalDate, string Ticker, string Direction, string Tags, bool IsTheme, double SpyChangePct,
     double Trigger, double Stop, double Target, DateTime EntryDate, double Entry, DateTime ExitDate, double Exit,
-    string ExitReason, double ReturnPct, double RMultiple, string Market = "", string? Against = null, double EntryRelVol = 0);
+    string ExitReason, double ReturnPct, double RMultiple, string Market = "", string? Against = null, double EntryRelVol = 0, string? OwnAgainst = null);
 
 public record TriggerBacktestResult(Guid RunId, DateTime From, DateTime To, int Tickers, int Setups, int Triggered,
     JsonObject Summary, List<TriggerTrade> Trades, List<string> Notes);
@@ -22,7 +22,8 @@ public record TriggerBacktestResult(Guid RunId, DateTime From, DateTime To, int 
 // trigger trades (within the chase limit), no same-day sell unless down same_day_stop_stock_pct (PDT guard), then
 // stop / target, sold at the open on the sell-by day. Stock prices only (no option history).
 // Daily bars can't order intraday moves: a day touching both stop and target counts as the stop.
-// Each day is replayed twice: the old rules, and the 10/5 trend rules (TrendRules + sector ranking) so the two can be compared.
+// Each day is replayed four ways so each rule's effect shows on its own: old rules; + market/group trend (10/5);
+// + targets capped at max_target_r; + the stock's own trend (above its 50-day for buys) (10/6).
 public class TriggerStrategyBacktest
 {
     private const string DefaultThemes = "XLE,USO,XBI,SMH,XLF,KRE,GLD,SLV,XLU,XHB,ITB,JETS,TAN,URA,XME,ARKK";
@@ -64,6 +65,7 @@ public class TriggerStrategyBacktest
         var sectorEtfs = (await StringAsync("sector_etfs", SectorStrength.DefaultEtfs))
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList();
         var minRelVolAtBuy = await NumberAsync("trigger_min_rel_volume", 1.2);
+        var maxR = await NumberAsync("max_target_r", 3);
 
         var universe = !string.IsNullOrWhiteSpace(o.Tickers)
             ? o.Tickers.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Select(t => t.ToUpperInvariant()).ToList()
@@ -91,8 +93,12 @@ public class TriggerStrategyBacktest
 
         var trades = new List<TriggerTrade>();
         var newTrades = new List<TriggerTrade>();
+        var cappedTrades = new List<TriggerTrade>();
+        var ownTrades = new List<TriggerTrade>();
         var setupCount = 0;
         var newSetupCount = 0;
+        var cappedSetupCount = 0;
+        var ownSetupCount = 0;
         var groupOf = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         foreach (var day in days)
         {
@@ -109,6 +115,7 @@ public class TriggerStrategyBacktest
 
             var setups = new List<MoverSetup>();
             var themeSetups = new List<MoverSetup>();
+            var ownAgainst = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
             foreach (var (t, list) in bars)
             {
                 if (t == "SPY" || !index[t].TryGetValue(day, out var i) || i < 22) continue;
@@ -119,7 +126,10 @@ public class TriggerStrategyBacktest
                     continue;
                 }
                 if (MoversScanner.Evaluate(t, window, day, minMove, minRelVol, minPrice, maxPrice, stopPct, maxTriggerDist, maxMove) is { } s)
-                    setups.Add(MoversScanner.ApplyRelativeStrength(s, window[^1], spyWindow));
+                {
+                    setups.Add(MoversScanner.ApplyLeader(MoversScanner.ApplyRelativeStrength(s, window[^1], spyWindow), window));
+                    ownAgainst[t] = TrendRules.OwnTrend(s.Direction, window, window[^1].Close);
+                }
             }
             // New rules: same candidates judged by market + group (live MoversScanner.ApplySectorAsync), then re-ranked.
             var against = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -134,11 +144,17 @@ public class TriggerStrategyBacktest
                     : s with { Rank = Math.Round(s.Rank * ((s.Direction == "bullish") == (sec.Group == "leading") ? 1.25 : 0.75), 2) });
             }
             var topThemes = themeSetups.OrderByDescending(s => s.Rank).Take(maxThemes).ToList();
-            var staged = Stage(setups.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes));
-            var stagedNew = Stage(judged.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes));
+            var staged = Stage(setups.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes), 0);
+            var stagedNew = Stage(judged.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes), 0);
+            var stagedCapped = Stage(judged.OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes), maxR);
+            var stagedOwn = Stage(judged.Where(s => ownAgainst.GetValueOrDefault(s.Ticker) is null)
+                .OrderByDescending(s => s.Rank).Take(maxSetups).Concat(topThemes), maxR);
             setupCount += staged.Count;
             newSetupCount += stagedNew.Count;
-            foreach (var (s, into) in staged.Select(s => (s, trades)).Concat(stagedNew.Select(s => (s, newTrades))))
+            cappedSetupCount += stagedCapped.Count;
+            ownSetupCount += stagedOwn.Count;
+            foreach (var (s, into) in staged.Select(s => (s, trades)).Concat(stagedNew.Select(s => (s, newTrades)))
+                         .Concat(stagedCapped.Select(s => (s, cappedTrades))).Concat(stagedOwn.Select(s => (s, ownTrades))))
             {
                 var list = bars[s.Ticker];
                 var i = index[s.Ticker][day];
@@ -148,14 +164,15 @@ public class TriggerStrategyBacktest
                     {
                         SignalDate = day, SpyChangePct = Math.Round(spyChg, 2), Market = market,
                         Against = s.IsTheme ? null : against.GetValueOrDefault(s.Ticker), EntryRelVol = RelVolume(list, i + 1),
+                        OwnAgainst = s.IsTheme ? null : ownAgainst.GetValueOrDefault(s.Ticker),
                     });
             }
 
-            List<MoverSetup> Stage(IEnumerable<MoverSetup> picks) => picks.Select(s =>
+            List<MoverSetup> Stage(IEnumerable<MoverSetup> picks, double cap) => picks.Select(s =>
             {
                 var i = index[s.Ticker][day];
                 var window = bars[s.Ticker].GetRange(Math.Max(0, i - 140), i - Math.Max(0, i - 140) + 1);
-                return MoversScanner.AdjustToLevels(s, KeyLevels.Compute(window, s.Close));
+                return MoversScanner.AdjustToLevels(s, KeyLevels.Compute(window, s.Close), cap);
             }).ToList();
         }
 
@@ -163,6 +180,13 @@ public class TriggerStrategyBacktest
         summary["new_rules"] = Summarize(newTrades, newSetupCount);
         // Entry-day volume stands in for the buy-time volume check; a whole day's volume is known only after the fact, so it flatters a little.
         summary["new_rules_with_volume"] = Summarize(newTrades.Where(t => t.IsTheme || t.EntryRelVol >= minRelVolAtBuy).ToList(), newSetupCount);
+        summary["new_rules_capped"] = Summarize(cappedTrades, cappedSetupCount);
+        summary["new_rules_own_trend"] = Summarize(ownTrades, ownSetupCount);
+        summary["old_rules_by_own_trend"] = new JsonObject
+        {
+            ["with_own_trend"] = Stats(trades.Where(t => !t.IsTheme && t.OwnAgainst is null)),
+            ["against_own_trend"] = Stats(trades.Where(t => t.OwnAgainst is not null)),
+        };
         summary["old_rules_by_trend"] = new JsonObject
         {
             ["with_trend"] = Stats(trades.Where(t => !t.IsTheme && t.Against is null)),
@@ -170,19 +194,25 @@ public class TriggerStrategyBacktest
         };
         var byMarket = new JsonObject();
         foreach (var m in new[] { "up", "mixed", "down" })
-            byMarket[m] = new JsonObject { ["old_rules"] = Stats(trades.Where(t => t.Market == m)), ["new_rules"] = Stats(newTrades.Where(t => t.Market == m)) };
+            byMarket[m] = new JsonObject
+            {
+                ["old_rules"] = Stats(trades.Where(t => t.Market == m)), ["new_rules"] = Stats(newTrades.Where(t => t.Market == m)),
+                ["new_rules_own_trend"] = Stats(ownTrades.Where(t => t.Market == m)),
+            };
         summary["by_market"] = byMarket;
         summary["config"] = new JsonObject
         {
             ["days"] = o.Days, ["hold_days"] = o.HoldDays, ["min_move"] = minMove, ["min_rel_vol"] = minRelVol, ["max_price"] = maxPrice,
             ["stop_pct"] = stopPct, ["chase_pct"] = chasePct, ["same_day_stop_pct"] = sameDayStop, ["max_setups"] = maxSetups, ["max_themes"] = maxThemes,
-            ["min_rel_vol_at_buy"] = minRelVolAtBuy,
+            ["min_rel_vol_at_buy"] = minRelVolAtBuy, ["max_target_r"] = maxR,
         };
         notes.Add($"{days.Count} signal days, {setupCount} setups, {trades.Count} triggered");
         notes.Add($"{groupOf.Count} tickers looked up for their group ({groupOf.Values.Count(v => v is null)} unknown)");
         notes.Add($"old rules: {trades.Count} trades, avg {summary["avg_return_pct"]}%/trade, profit factor {summary["profit_factor"]} | " +
                   $"new trend rules: {newTrades.Count} trades, avg {summary["new_rules"]?["avg_return_pct"]}%/trade, profit factor {summary["new_rules"]?["profit_factor"]} | " +
-                  $"+ volume: {summary["new_rules_with_volume"]?["trades"]} trades, avg {summary["new_rules_with_volume"]?["avg_return_pct"]}%/trade");
+                  $"+ volume: {summary["new_rules_with_volume"]?["trades"]} trades, avg {summary["new_rules_with_volume"]?["avg_return_pct"]}%/trade | " +
+                  $"+ {maxR:0.#}R target cap: {cappedTrades.Count} trades, avg {summary["new_rules_capped"]?["avg_return_pct"]}%/trade | " +
+                  $"+ own trend: {ownTrades.Count} trades, avg {summary["new_rules_own_trend"]?["avg_return_pct"]}%/trade, profit factor {summary["new_rules_own_trend"]?["profit_factor"]}");
 
         if (o.Save) await SaveAsync(runId, days.FirstOrDefault(), days.LastOrDefault(), universe.Count, summary, trades, notes);
         return new(runId, days.FirstOrDefault(), days.LastOrDefault(), universe.Count, setupCount, trades.Count, summary, trades, notes);
@@ -276,7 +306,7 @@ public class TriggerStrategyBacktest
         s["spy_up_day"] = Stats(trades.Where(x => x.SpyChangePct > 0));
         s["spy_down_day"] = Stats(trades.Where(x => x.SpyChangePct <= 0));
         var tags = new JsonObject();
-        foreach (var tag in new[] { "held up while SPY faded", "weak while SPY held up", "new 20-day high", "new 20-day low", "double top", "double bottom",
+        foreach (var tag in new[] { "leader at a multi-month high", "held up while SPY faded", "weak while SPY held up", "new 20-day high", "new 20-day low", "double top", "double bottom",
                      "closed near the high", "closed near the low", "target at resistance", "target at support", "resistance close by", "support close by" })
             tags[tag] = Stats(trades.Where(x => x.Tags.Contains(tag, StringComparison.OrdinalIgnoreCase)));
         s["by_tag"] = tags;
