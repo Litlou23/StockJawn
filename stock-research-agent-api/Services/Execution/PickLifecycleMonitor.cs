@@ -15,6 +15,7 @@ namespace StockResearchAgent.Api.Services.Execution;
 //  3. stock exits: GTC stop-loss at stop_price once filled; at target_price, cancel the stop and sell
 // STOCK exit_status: null → protected | watching → cancelling_stop → target_sell_placed → closed_target
 //                                   protected → closed_stop;   no_position / manual_exit / stop_rejected / exit_failed are terminal
+//                                   protected → raising_stop → protected (stop moved to the buy price once up breakeven_at_r)
 // OPTION exit_status: null → watching → option_sell_placed → closed_stop | closed_target
 //                                                          → exit_failed (terminal); manual_exit if no option_contract_id
 // adopt: an existing position handed to StockJawn's exits; treated like a fresh fill (older builds ignore it, so it's safe to set early).
@@ -26,7 +27,7 @@ public class PickLifecycleMonitor
 {
     private const string Table = "claude_daily_picks";
     private static readonly TimeSpan StuckAfter = TimeSpan.FromMinutes(10);
-    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "target_sell_placed", "stop_sell_placed", "option_sell_placed", "adopt"];
+    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "raising_stop", "target_sell_placed", "stop_sell_placed", "option_sell_placed", "adopt"];
 
     private readonly SupabaseClient _db;
     private readonly RobinhoodMcpBrokerAdapter _broker;
@@ -34,6 +35,8 @@ public class PickLifecycleMonitor
     private double _staleBuyMinutes;
     private double _timeStopDays;
     private double _timeStopMinGain;
+    private double _breakevenR;
+    private readonly Dictionary<string, double?> _prices = new(StringComparer.OrdinalIgnoreCase);
     // Judged on the prior close, so a position that passes is fine for the rest of the day.
     private static readonly ConcurrentDictionary<string, DateTime> TimeStopCleared = new();
 
@@ -55,6 +58,7 @@ public class PickLifecycleMonitor
         _staleBuyMinutes = await NumberAsync("stale_buy_minutes", 30);
         _timeStopDays = await NumberAsync("time_stop_days", 2);
         _timeStopMinGain = await NumberAsync("time_stop_min_gain_pct", 1);
+        _breakevenR = await NumberAsync("breakeven_at_r", 1);
         var since = DateTime.UtcNow.AddDays(-30).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var rows = await _db.SelectAsync(Table,
             filter: $"approval_status=eq.executed&order_id=not.is.null&pick_date=gte.{since}" +
@@ -225,7 +229,36 @@ public class PickLifecycleMonitor
                     await SetExitAsync(id, "cancelling_stop", $"{timeExit} — cancelling stop to sell");
                     return $"{timeExit.ToLowerInvariant()}, cancelling stop";
                 }
-                return await CheckTargetAsync(id, ticker, target, stopOrderId, filledQty, ct);
+                return await CheckTargetAsync(id, ticker, target, stopOrderId, filledQty, ct)
+                       ?? await BreakevenAsync(row, id, ticker, stopOrderId!, ct);
+            }
+
+            case "raising_stop":
+            {
+                var (so, _) = await _broker.GetOrderStateAsync(stopOrderId!, false, ct);
+                if (so is null) return null;
+                if (so.State == "filled")
+                {
+                    await CloseAsync(id, "closed_stop", so.AveragePrice, "Stop filled before it could be raised");
+                    return $"stopped out @ ${so.AveragePrice:F2}";
+                }
+                if (so.State is not ("cancelled" or "canceled")) return "waiting for stop cancel";
+                var buy = Math.Round(D(row["filled_avg_price"]), 2);
+                var outcome = await _broker.PlaceEquitySellAsync(ticker, filledQty, "stop_market", buy, RefFor(id, "stop-breakeven"), ct);
+                if (outcome.Result.Success)
+                {
+                    await _db.UpdateAsync(Table, $"id=eq.{id}", new Dictionary<string, object?>
+                    {
+                        ["stop_order_id"] = outcome.Result.BrokerOrderId,
+                        ["stop_price"] = buy,
+                        ["exit_status"] = "protected",
+                        ["exit_reason"] = $"Stop-loss {filledQty} @ ${buy:F2} GTC (moved up to the buy price; was ${stop:F2})",
+                    });
+                    return $"stop raised to the buy price ${buy:F2}";
+                }
+                if (outcome.Result.Status == BrokerOrderState.unknown) return $"breakeven stop outcome unknown, will retry ({outcome.Result.ErrorMessage})";
+                await SetExitAsync(id, "watching", $"Breakeven stop rejected ({outcome.Result.ErrorMessage}) — no stop now, watching target only");
+                return $"BREAKEVEN STOP REJECTED ({outcome.Result.ErrorMessage}) — watching target only";
             }
 
             case "watching":
@@ -268,10 +301,31 @@ public class PickLifecycleMonitor
         return null;
     }
 
+    private async Task<double?> LastAsync(string ticker, CancellationToken ct)
+    {
+        if (!_prices.TryGetValue(ticker, out var px)) _prices[ticker] = px = await _broker.GetEquityLastPriceAsync(ticker, ct);
+        return px;
+    }
+
+    private async Task<string?> BreakevenAsync(JsonObject row, string id, string ticker, string stopOrderId, CancellationToken ct)
+    {
+        var buy = D(row["filled_avg_price"]);
+        var stop = D(row["stop_price"]);
+        if (_breakevenR <= 0 || buy <= 0 || stop <= 0 || stop >= buy) return null;
+        var last = await LastAsync(ticker, ct);
+        if (last is null || last < buy + _breakevenR * (buy - stop)) return null;
+
+        // Robinhood can't edit a stop, so cancel it and place the new one once the cancel is confirmed.
+        var (accepted, err) = await _broker.CancelEquityOrderByIdAsync(stopOrderId, ct);
+        if (!accepted) return $"up {_breakevenR:0.#}R but stop cancel failed ({err})";
+        await SetExitAsync(id, "raising_stop", $"Up {_breakevenR:0.#}R at ${last:F2} — moving the stop from ${stop:F2} to the ${buy:F2} buy price");
+        return $"up {_breakevenR:0.#}R @ ${last:F2}, moving stop to ${buy:F2}";
+    }
+
     private async Task<string?> CheckTargetAsync(string id, string ticker, double target, string? stopOrderId, double qty, CancellationToken ct)
     {
         if (target <= 0) return null;
-        var last = await _broker.GetEquityLastPriceAsync(ticker, ct);
+        var last = await LastAsync(ticker, ct);
         if (last is null || last < target) return null;
 
         if (stopOrderId is null) return await PlaceTargetSellAsync(id, ticker, qty, ct);

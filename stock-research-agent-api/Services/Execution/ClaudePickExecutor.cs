@@ -705,7 +705,7 @@ public class ClaudePickExecutor
             // Holding through a report is a deliberate bet — allowed, but only one at a time.
             var open = await _db.SelectAsync(Table,
                 filter: $"earnings_play=eq.true&approval_status=in.(executing,executed)&id=neq.{p.Id}" +
-                        "&or=(exit_status.is.null,exit_status.in.(protected,watching,cancelling_stop,target_sell_placed,stop_sell_placed,option_sell_placed))",
+                        "&or=(exit_status.is.null,exit_status.in.(protected,watching,cancelling_stop,raising_stop,target_sell_placed,stop_sell_placed,option_sell_placed))",
                 select: "ticker");
             return open.Count > 0 ? $"another earnings play is still open ({open[0]["ticker"]})" : null;
         }

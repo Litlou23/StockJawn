@@ -17,7 +17,7 @@ public class EventsCalendarService
     private const string Table = "market_events";
     private const string Picks = "claude_daily_picks";
     private static readonly TimeZoneInfo Eastern = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
-    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "target_sell_placed", "stop_sell_placed", "option_sell_placed", "adopt"];
+    private static readonly string[] OpenExitStates = ["protected", "watching", "cancelling_stop", "raising_stop", "target_sell_placed", "stop_sell_placed", "option_sell_placed", "adopt"];
 
     private readonly SupabaseClient _db;
     private readonly FinnhubProvider _finnhub;

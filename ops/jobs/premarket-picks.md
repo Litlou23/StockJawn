@@ -70,6 +70,7 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
     52-week / multi-month high, above its 20/50-day, in a leading group, 1.5x+ volume. Rank these first.
 - **Targets:** at most 3x the risk (`max_target_r`); past that it rarely gets hit in the 2-3 days we hold. The checker flags bigger ones.
 - **2-day rule:** StockJawn sells a stock the next morning if it hasn't closed up 1%+ after 2 full days (`time_stop_days`).
+- **Breakeven stop:** once a stock is up as much as it risked, StockJawn moves its stop up to the buy price (`breakeven_at_r`).
 - `leaders` = affordable stocks (one buy fits: `max_position_pct` of the account, capped by `risk_max_trade_dollars`) in the top 2 groups that beat SPY this month. When the
   group's leaders are too expensive for an option over $0.50, buy shares of one of these instead.
 - Late Sep/early Oct: chips +14.6% for the month, while our calls were in consumer, EV, fintech and crypto (all falling).

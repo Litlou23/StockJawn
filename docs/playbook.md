@@ -109,6 +109,8 @@ $0.50+, spread under 10%, 14+ days.
   $5.01 trigger was 22x.
 - 2-day rule (`time_stop_days` = 2, `time_stop_min_gain_pct` = 1): a stock that hasn't closed up 1% after 2 full days is
   sold the next morning (judged on the prior close; 0 = off).
+- Breakeven stop (`breakeven_at_r` = 1, 0 = off): once a stock is up as much as it risked, the GTC stop is cancelled and
+  re-placed at the buy price (exit_status `raising_stop` in between), so a winner can't turn into a loss.
 - Leaders (the FRSH pattern, 10/6): within 3% of the highest price in the bars we have (~4-6 months) and above the
   20/50-day → rank x1.25, tagged "leader at a multi-month high". S&P 500/400/600 add headlines rank x1.3 in the news scan.
 - The pick checker waits for 9:30 to judge price: before the open Alpaca's last trade is yesterday's close (it called FRSH
