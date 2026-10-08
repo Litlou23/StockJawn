@@ -95,7 +95,7 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
 1. **Nightly research first:**
    `SELECT ticker, direction, catalyst, notes, total_score, trigger_price, trigger_direction, level_target, level_stop, exit_by_date, key_levels
     FROM claude_daily_picks WHERE pick_date = CURRENT_DATE AND approval_status = 'research' ORDER BY total_score DESC NULLS LAST;`
-   Rows tagged "SCANNER" (StockJawn's movers scan) and "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
+   Rows tagged "SCANNER" (StockJawn's movers scan), "CASE" (Delento's multi-day cases) and "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
    **StockedUp plays you'd pass on (Lou, 10/7):** after your own picks, stage up to 2 of them a day as pending anyway so Lou can decide,
    when one share fits the budget (or an option passes the option rules) and the stock is within about 4% of StockedUp's level.
    Their level = trigger; their support / next level = stop / target, target within 3x the risk; prefer the ones closest to the

@@ -96,6 +96,24 @@ WHERE event_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 10 ORDER BY event_date;
   setup is the run-up itself, and say the time in notes ("Fed chair 2 PM — expect a swing").
 - Positions we hold with `event_warning` set report or have an event before their sell-by date — say so in the summary.
 
+## STEP 0c: DELENTO'S CASES + STOCKEDUP (Delento's job runs at 8:10 PM, before you)
+Delento (the builder Claude) now does the multi-day "case" work and grabs StockedUp's plays so you don't have to:
+```sql
+SELECT id, created_at, body FROM claude_messages
+WHERE recipient = 'Lenny' AND sender = 'Delento' AND topic = 'cases'
+  AND created_at > now() - interval '18 hours' ORDER BY id DESC LIMIT 1;
+```
+Also, if the table exists (`SELECT to_regclass('public.trade_cases')` not null):
+`SELECT ticker, direction, source, thesis, sector_etf, trigger_price, stop_price, target_price, invalidate_below, expires_on FROM trade_cases WHERE status = 'open' ORDER BY created_at;`
+- **Cases** = setups that can take a few days (quiet volume build-ups, sector rotation, catalysts still building).
+  Delento already checked the trend, budget, R:R and earnings with the same rules you use. Each night, any case whose
+  trigger is within 4% of today's close becomes a research row: notes start `CASE <opened date>: <thesis>`, his
+  trigger/stop/target, `exit_by_date` as usual. Cases further away just wait; don't log them yet.
+  You still decide: drop one if tonight's news or chart says no, and say why in the summary.
+- **StockedUp:** if the message has a "StockedUp <today's date>" section, use those plays for SCAN 7 and skip the
+  YouTube fetch. If it says StockedUp wasn't available, or there's no message, do SCAN 7 yourself as written.
+- Mark the message read: `UPDATE claude_messages SET read_at = now() WHERE id = <id> AND read_at IS NULL;`
+
 ## SIGNAL SCANS — Run ALL of these
 
 ### SCAN 1: POST-EARNINGS DRIFT (PEAD)
@@ -132,7 +150,7 @@ WHERE event_date BETWEEN CURRENT_DATE AND CURRENT_DATE + 10 ORDER BY event_date;
 
 ### SCAN 7: STOCKEDUP'S PLAYS (best source — their momentum plays won 7 of 11 in our 9/24–9/30 check)
 StockedUp (youtube.com/@StockedUp) posts a video every trading day after the close with "setups and predictions" and
-three "momentum plays" ("if TSLA breaks under $356, watch it down"). Take their plays as candidates:
+three "momentum plays" ("if TSLA breaks under $356, watch it down"). Take their plays as candidates (first check STEP 0c: if Delento's message already lists today's plays, use those and skip steps 1-2):
 1. **Find today's video — DO NOT WebFetch YouTube directly (it's client-rendered and returns empty).**
    Try these in order. **If a-c all fail or return empty, you MUST try d — the browser tools work and are available in this session.**
    a. WebSearch `"StockedUp" stock market tomorrow` (extended mode) — their videos rank well; look for a youtube.com result from today.

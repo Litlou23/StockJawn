@@ -11,6 +11,7 @@ Source of truth for all Claude scheduled task prompts. Both Claude accounts read
 | [trade-executor](trade-executor.md) | — | RETIRED | Replaced by StockJawn's API executor (polls every 30s, waits for triggers). Disable the Claude task. |
 | [nightly-research](nightly-research.md) | 9 PM Sun-Thu | ENABLED | Scan for next-day candidates (PEAD, initiations, congress, index) |
 | [weekly-learning-review](weekly-learning-review.md) | 10:13 AM Saturday | ENABLED | Deep analysis of all historical picks, tune scoring weights |
+| Delento evening cases (Delento's account) | 8:10 PM Sun-Thu | ENABLED | Builds multi-day trade cases and grabs StockedUp's plays; hands both to nightly-research via claude_messages (topic 'cases') |
 
 ## One-Time Tasks (Disabled)
 
