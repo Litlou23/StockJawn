@@ -31,7 +31,9 @@ Three categories — score each differently:
 #### A. REAL TRADES (fill_status = 'filled')
 These are the only ones that matter for P&L. Score by actual money:
 - Use `filled_avg_price` as entry (NOT `entry_price` — that was the pre-market estimate)
-- If exited (`exit_status = 'exited'`): use `exit_price` for the result
+- If closed (`exit_status` is `closed_stop`, `closed_target` or `closed_time`, or `exited_at` is set): use `exit_price` for the result.
+  Open states: `protected` (GTC stop working), `watching`, `raising_stop` (stop moving up to the buy price), `cancelling_stop`,
+  `target_sell_placed`, `stop_sell_placed`. `exit_failed` / `manual_exit` = handled in Robinhood: check the position there.
 - If still open: use current stock price (for stocks) or current option mark (for options via `get_option_quotes` using `option_contract_id`)
 - For OPTIONS: `price_change_pct` = (exit_price - filled_avg_price) / filled_avg_price × 100 (this is premium %, NOT stock %)
 - For STOCKS: `price_change_pct` = (current_price - filled_avg_price) / filled_avg_price × 100
