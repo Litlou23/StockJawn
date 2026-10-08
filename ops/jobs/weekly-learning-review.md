@@ -13,10 +13,10 @@ You are running the StockJawn Weekly Learning Review. This runs every Saturday m
 Deep-dive into ALL historical data — not just this week. Find systemic patterns across hundreds of picks that can improve win rate, reduce losses, and sharpen the system's edge. Produce a concrete list of changes to make.
 
 ## SYSTEM CONTEXT
-- Options-only trading system (calls on up days, puts on down days)
+- Shares first (stock trigger setups); options only at $0.50+, spread under 10%, 14+ days out
 - Goal: $5/day profit
 - No day trading (PDT rule) — buy today, sell tomorrow+
-- Contract range: $0.50-$1.50
+- Size per trade: `max_position_pct` (60%) of account value, within buying power
 - Max 2-3 picks per day
 - Robinhood agentic account: the one `get_accounts` shows with agentic_allowed = true
 - Data lives in Supabase (project_id: pizoqybgkdhfvxrmnhvx)
@@ -33,6 +33,9 @@ c) Conviction level performance
 d) Score bracket performance (is higher score = better outcome?)
 e) Sector performance
 f) Ticker repeat performance
+g) Idea source, from the SHADOW grades the EOD job writes on research / expired rows: per source (NEWS GAP AM/PM, SCANNER,
+   SCANNER THEME, StockedUp, INTRADAY, Lenny) how often the trigger traded and the average result from the trigger. A source that
+   loses in shadow 2+ weeks running gets tightened or dropped; one that wins gets ranked higher.
 g) Target/stop calibration (are targets too far, stops too tight?)
 h) Weekly trend — is the system improving over time?
 

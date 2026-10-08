@@ -50,6 +50,12 @@ These were approved but never traded (trigger never hit, or system blocked them)
 - `approval_status` in ('expired', 'rejected', 'research', 'failed') → do NOT score these
 - Set outcome = 'scratch', note the reason, and move on
 - These do NOT count in win rate, direction accuracy, or any averages
+- **Shadow grade them anyway (10/7)** so we learn which idea sources work. For every research / expired / skipped row with a trigger,
+  using today's high/low/close: did the trigger trade? If yes, what happened from the trigger: stop hit first, target hit, or
+  close vs trigger (%)? Write it into `price_change_pct` (close vs trigger, signed for the direction) and append to notes:
+  `SHADOW 10/7: triggered, closed -3.2% vs trigger` or `SHADOW 10/7: never triggered (high $X vs trigger $Y)`. Outcome stays 'scratch'.
+  Source = the notes tag: NEWS GAP AM/PM, SCANNER, SCANNER THEME, StockedUp, INTRADAY, or Lenny. The weekly review totals shadow
+  results by source (10/7 examples: NEOG gapped +15% premarket and closed -3%, XNDU -11% and BRUN -9% after "good news").
 
 **Trigger picks:** if `approval_status = 'expired'` with "Trigger never hit", category C (scratch). Note whether the trigger was a good call (did the stock move the wrong way? then waiting saved money — log it).
 For triggered real trades, grade against `level_target` / `level_stop` (the stock's levels).
