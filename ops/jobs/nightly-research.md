@@ -18,7 +18,7 @@ Scan all 5 high-probability signal sources for tomorrow's candidates. Stage the 
 - Log candidates with approval_status = 'research' so the morning task knows they're pre-screened, not real picks
 
 ## ACCOUNT CHECK
-Get the balance of the agentic account (from `get_accounts`, the one with agentic_allowed = true) first — this determines which stocks are even worth researching. Calculate max_per_trade_budget = buying_power * 0.40.
+Get the balance of the agentic account (from `get_accounts`, the one with agentic_allowed = true) first — this determines which stocks are even worth researching. Calculate max_per_trade_budget = the smaller of `max_position_pct` (60% since 10/7) of the latest `account_value_snapshots.total_value` and buying power.
 
 ## STEP 0: STOCKJAWN'S MOVERS SCAN (already done at 4:30 PM — start here)
 StockJawn scans the day's biggest movers after the close (StockedUp's routine) and stages setups for tomorrow:
@@ -28,8 +28,8 @@ FROM claude_daily_picks
 WHERE approval_status = 'research' AND pick_date = (
   SELECT d FROM (
     SELECT generate_series(
-      (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 1,
-      (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 5,
+      (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York' - interval '6 hours')::date + 1,
+      (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York' - interval '6 hours')::date + 5,
       '1 day'::interval
     )::date AS d
   ) days
@@ -151,6 +151,8 @@ three "momentum plays" ("if TSLA breaks under $356, watch it down"). Take their 
 3. Each momentum play becomes a candidate with THEIR level as the trigger (above = calls/shares, below = puts).
    Their "setups" count only if they gave a clear break level; skip their "big money trade" and long multi-week ideas.
 4. Still run every candidate through our checks (affordable, reward/risk ≥ 1.5, setup check). Tag notes with "StockedUp <today's date>".
+   Log every play as a research row with their level as the trigger, even over budget, so the scorecard can grade them.
+   The ones you'd pass on aren't dropped: the premarket job stages up to 2 of them for Lou (premarket Step 4, "StockedUp plays you'd pass on").
 5. If you couldn't get today's plays after all attempts, write `StockedUp: not available (YouTube fetch failed)` in the summary and continue — never block on it.
 
 ## TOMORROW'S SETUP LIST (every candidate)
@@ -182,10 +184,11 @@ For candidates scoring >= 40, insert with `approval_status = 'research'` and the
 ```sql
 -- Next trading day (skips weekends AND market holidays in market_events)
 -- Use this everywhere instead of +1 day
+-- Minus 6 hours: a run that slips past midnight still picks for the next session (the 12:40 AM 10/8 run dated its rows 10/9)
 (SELECT d FROM (
   SELECT generate_series(
-    (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 1,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York')::date + 5,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York' - interval '6 hours')::date + 1,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'America/New_York' - interval '6 hours')::date + 5,
     '1 day'::interval
   )::date AS d
 ) days

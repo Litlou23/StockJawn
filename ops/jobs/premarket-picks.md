@@ -22,14 +22,15 @@ Supabase MCP execute_sql (project_id: pizoqybgkdhfvxrmnhvx), WebSearch.
 - Waits for volume: a trigger break only buys when volume is running 1.2x+ normal for that time of day (`trigger_min_rel_volume`).
 - Refuses option spreads over 10%, asks under $0.50, contracts expiring in under 14 days, and any pick that reports earnings during the hold
   (unless it's flagged `earnings_play`, max 1 open).
-- Sizes to its risk limits (per-trade $ cap, 40% position cap, buying power). With 3 picks approved, only the first ones
+- Sizes to its risk limits (`max_position_pct` of account value, 60% since 10/7, and buying power; `risk_max_trade_dollars` 0 = no fixed cap). With 3 picks approved, only the first ones
   that trigger get funded — the rest fail "can't afford". That's fine.
 - Holds overnight (PDT: account under $25k). Sells the same day only on a big loss (shares -5%, options -40%, max 2 a week).
   From the next morning: stop, target, and it sells on `exit_by_date` whatever the price.
 
 ## Step 1 — Account
 1. `get_accounts` → the account with agentic_allowed = true. `get_portfolio` on it → buying power.
-2. Budget per trade = buying power × 0.40. Max option premium = budget ÷ 100. Min stock price = budget × 5% (and never under $1).
+2. Budget per trade = the smaller of `max_position_pct` (60%) of the latest `account_value_snapshots.total_value` and buying power
+   (about $94 on a $157 account). Shares: `order_quantity` = whole shares the budget buys at the trigger. Max option premium = budget ÷ 100. Min stock price = budget × 5% (and never under $1).
 3. Buying power under $25 → log one row `ticker='CASH'`, notes 'Insufficient funds'. Still log the best 1–2 research candidates
    as pending picks with triggers (the executor checks buying power at trigger-break time, and budget may change intraday — e.g. an exit frees cash).
 
@@ -95,6 +96,10 @@ StockJawn ranks the groups every evening by 1-month return vs SPY:
    `SELECT ticker, direction, catalyst, notes, total_score, trigger_price, trigger_direction, level_target, level_stop, exit_by_date, key_levels
     FROM claude_daily_picks WHERE pick_date = CURRENT_DATE AND approval_status = 'research' ORDER BY total_score DESC NULLS LAST;`
    Rows tagged "SCANNER" (StockJawn's movers scan) and "StockedUp <date>" get priority — re-check their triggers against pre-market prices.
+   **StockedUp plays you'd pass on (Lou, 10/7):** after your own picks, stage up to 2 of them a day as pending anyway so Lou can decide,
+   when one share fits the budget (or an option passes the option rules) and the stock is within about 4% of StockedUp's level.
+   Their level = trigger; their support / next level = stop / target, target within 3x the risk; prefer the ones closest to the
+   trigger with above-normal volume. Notes: `StockedUp <video date> — Lenny passes: <your reason>`.
    "SCANNER THEME" rows are sector ETFs on a run (oil, biotech, gold...) — trade the theme through its best stock or the ETF's options.
    `key_levels` (filled at 7:30 AM for every research row) = support/resistance with touch counts; use them in Step 5.
    "NEWS GAP PM" rows = stocks that moved 3%+ after hours on news. The 8:45/9:15 news scan re-checks them and stages the
@@ -217,7 +222,7 @@ Don't sit on dead money — if yesterday's pick is flat and today has a clear wi
 ## Hard rules
 - Every pick is a trigger setup (trigger + target + stop, reward/risk ≥ 1.5). No trigger = no pick. Don't move triggers to "make sure" they fill.
 - Trade with the trend (market, group and the stock's own 50-day). Targets within 3x the risk. Shares first (when one fits), options second ($0.50+, spread under 10%, 14+ days), inverse ETF on red days,
-  CASH last. Max 40% of buying power per pick.
+  CASH last. Max per pick: `max_position_pct` (60%) of account value, within buying power.
 - No SPACs, no stocks under $1 or under the min price, no stocks with zero analyst coverage.
 - FOMC day = CASH. No regular shares on a red day.
 - Research and log only. Never place orders.

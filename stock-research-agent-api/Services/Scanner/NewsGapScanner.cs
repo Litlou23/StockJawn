@@ -225,10 +225,16 @@ public class NewsGapScanner
     {
         // Re-runs replace this scan's own rows; nothing else is touched.
         await _db.DeleteAsync(Table, $"pick_date=eq.{pd}&approval_status=eq.research&notes=like.{Uri.EscapeDataString(NightPrefix)}*");
+        // One row per ticker and day (unique index): a stock the movers scan or Lenny already has is left to that row.
+        var have = (await _db.SelectAsync(Table, filter: $"pick_date=eq.{pd}", select: "ticker"))
+            .Select(r => r["ticker"]?.ToString()?.ToUpperInvariant()).ToHashSet();
+        var skip = picks.Where(x => have.Contains(x.Ticker)).Select(x => x.Ticker).ToList();
+        picks = picks.Where(x => !have.Contains(x.Ticker)).ToList();
+        if (skip.Count > 0) notes.Add($"already in today's picks, not added again: {string.Join(", ", skip)}");
         if (picks.Count == 0) return picks;
-        await _db.InsertAsync(Table, await RowsAsync(picks, now, pd, pickDate, NightPrefix, morning: false), returnRows: false);
-        notes.Add($"wrote {picks.Count} research rows for {pd}");
-        return picks;
+        var inserted = await _db.InsertAsync(Table, await RowsAsync(picks, now, pd, pickDate, NightPrefix, morning: false));
+        notes.Add($"wrote {inserted.Count} of {picks.Count} research rows for {pd}");
+        return inserted.Count > 0 ? picks : [];
     }
 
     private async Task<List<NewsGap>> WriteMorningAsync(List<NewsGap> picks, DateTime now, string pd, DateTime pickDate, int maxPicks, List<string> notes)
@@ -239,8 +245,10 @@ public class NewsGapScanner
         var mine = rows.Where(r => r["notes"]?.ToString()?.StartsWith(MorningPrefix) == true).ToList();
         // Shares and option ideas get separate caps so a put idea for Lenny doesn't crowd out a buy Lou can approve.
         var fresh = picks.Where(x => !taken.Contains(x.Ticker) && !mine.Any(r => r["ticker"]?.ToString() == x.Ticker)).ToList();
+        var research = rows.Where(r => r["approval_status"]?.ToString() == "research")
+            .Select(r => r["ticker"]?.ToString()?.ToUpperInvariant()).ToHashSet();
         var staged = fresh.Where(x => x.Route == "shares" && x.Trend is null).Take(Math.Max(0, maxPicks - mine.Count(r => r["approval_status"]?.ToString() != "research")))
-            .Concat(fresh.Where(x => x.Route == "option" || (x.Route == "shares" && x.Trend is not null))
+            .Concat(fresh.Where(x => (x.Route == "option" || (x.Route == "shares" && x.Trend is not null)) && !research.Contains(x.Ticker))
                 .Take(Math.Max(0, maxPicks - mine.Count(r => r["approval_status"]?.ToString() == "research"))))
             .ToList();
         if (staged.Count == 0)
@@ -249,7 +257,16 @@ public class NewsGapScanner
             return staged;
         }
 
-        await _db.InsertAsync(Table, await RowsAsync(staged, now, pd, pickDate, MorningPrefix, morning: true), returnRows: false);
+        // A night research row on the same stock gives way to the pending row (one row per ticker and day).
+        var promote = staged.Where(x => x.Route == "shares" && x.Trend is null && research.Contains(x.Ticker)).Select(x => x.Ticker).ToList();
+        if (promote.Count > 0)
+            await _db.DeleteAsync(Table, $"pick_date=eq.{pd}&approval_status=eq.research&ticker=in.({string.Join(",", promote)})");
+        var inserted = await _db.InsertAsync(Table, await RowsAsync(staged, now, pd, pickDate, MorningPrefix, morning: true));
+        if (inserted.Count == 0)
+        {
+            notes.Add($"INSERT FAILED for {string.Join(", ", staged.Select(x => x.Ticker))} — nothing staged (see the log)");
+            return [];
+        }
         notes.Add($"wrote {staged.Count} picks ({staged.Count(x => x.Route == "shares" && x.Trend is null)} pending shares, {staged.Count(x => x.Route != "shares" || x.Trend is not null)} research for Lenny)");
 
         var forLenny = staged.Where(x => x.Route != "shares" || x.Trend is not null).ToList();
